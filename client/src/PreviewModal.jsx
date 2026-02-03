@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon } from '@heroicons/react/24/outline';
+import heic2any from 'heic2any';
 import api from './api';
 
 const PreviewModal = ({ file, onClose, drive = 'local' }) => {
@@ -8,7 +9,8 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   const [url, setUrl] = useState('');
 
   const fileType = file.type || '';
-  const isImage = fileType.startsWith('image/');
+  const isHeic = fileType === 'image/heic' || fileType === 'image/heif' || /\.(heic|heif)$/i.test(file.name);
+  const isImage = (fileType.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(file.name)) && !isHeic;
   const isVideo = fileType.startsWith('video/');
   const isAudio = fileType.startsWith('audio/');
   const isPDF = fileType === 'application/pdf';
@@ -17,6 +19,30 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
 
   useEffect(() => {
     const load = async () => {
+        if (isHeic) {
+            setLoading(true);
+            try {
+                // For HEIC, we need the actual blob to convert
+                const blob = await api.getFileBlob(file.path, drive);
+                const convertedBlob = await heic2any({
+                    blob,
+                    toType: "image/jpeg",
+                    quality: 0.8
+                });
+                // Handle case where heic2any returns an array
+                const resultBlob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+                setUrl(URL.createObjectURL(resultBlob));
+            } catch (e) {
+                console.error("HEIC conversion failed", e);
+                // Fallback to raw URL if conversion fails
+                const res = await api.getFileUrl(file.path, drive);
+                setUrl(res);
+            } finally {
+                setLoading(false);
+            }
+            return;
+        }
+
         const res = await api.getFileUrl(file.path, drive);
         setUrl(res);
         
@@ -33,7 +59,13 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         }
     };
     load();
-  }, [file.path, drive, isText]);
+
+    return () => {
+        if (isHeic && url) {
+            URL.revokeObjectURL(url);
+        }
+    }
+  }, [file.path, drive, isText, isHeic]);
 
   // Handle ESC key
   useEffect(() => {
@@ -62,7 +94,7 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
       >
         
         {/* Preview Renderers */}
-        {isImage && url && (
+        {(isImage || isHeic) && url && (
           <img src={url} alt={file.name} className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl" />
         )}
 

@@ -360,10 +360,25 @@ const ServerAPI = {
     await axios.delete(`/api/drives/${id}`);
   },
   getFileUrl: (path, driveId) => `/api/raw?path=${encodeURIComponent(path)}&drive=${driveId}`,
+  getFileBlob: async (path, driveId) => {
+      const res = await axios.get(`/api/raw?path=${encodeURIComponent(path)}&drive=${driveId}`, { responseType: 'blob' });
+      return res.data;
+  },
   readFileText: async (path, driveId) => {
       const res = await axios.get(`/api/raw?path=${encodeURIComponent(path)}&drive=${driveId}`, { responseType: 'text' });
       return res.data;
   }
+};
+
+// --- Helper: Base64 to Blob ---
+const base64ToBlob = (base64, mimeType = 'application/octet-stream') => {
+    const byteCharacters = atob(base64);
+    const byteNumbers = new Array(byteCharacters.length);
+    for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    return new Blob([byteArray], { type: mimeType });
 };
 
 // --- Strategy 2: Native API (Capacitor) ---
@@ -765,6 +780,21 @@ const NativeAPI = {
           // Filesystem returns 'data' which is base64
           return `data:application/octet-stream;base64,${file.data}`;
       } catch (e) { return ''; }
+  },
+
+  getFileBlob: async (path, driveId) => {
+      if (driveId !== 'local') {
+          const drives = await NativeAPI.getDrives();
+          const config = drives.find(d => d.id === driveId);
+          const client = getWebDAVClient(config);
+          const buffer = await client.getFileContents(path, { format: 'binary' });
+          return new Blob([buffer]);
+      }
+      const file = await Filesystem.readFile({
+          path: path,
+          directory: Directory.ExternalStorage
+      });
+      return base64ToBlob(file.data);
   },
 
   readFileText: async (path, driveId) => {
