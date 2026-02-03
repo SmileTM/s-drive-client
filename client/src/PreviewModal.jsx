@@ -20,7 +20,6 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   
   // PDF State
   const [numPages, setNumPages] = useState(null);
-  const [pageNumber, setPageNumber] = useState(1);
   const [pdfScale, setPdfScale] = useState(1.0);
 
   const fileType = file.type || '';
@@ -108,7 +107,6 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
 
   function onDocumentLoadSuccess({ numPages }) {
     setNumPages(numPages);
-    setPageNumber(1);
   }
 
   return (
@@ -141,47 +139,27 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
 
         {isPDF && url && (
           <div className="relative w-full h-[80vh] bg-slate-100 rounded-lg shadow-2xl overflow-hidden flex flex-col items-center">
-            <div className="flex-1 overflow-auto w-full flex justify-center p-4">
+            <div className="flex-1 overflow-auto w-full flex flex-col items-center p-4">
                <Document
                   file={url}
                   onLoadSuccess={onDocumentLoadSuccess}
                   loading={<div className="text-slate-500 mt-10">Loading PDF...</div>}
                   error={<div className="text-red-500 mt-10">Failed to load PDF.</div>}
-                  className="shadow-lg"
+                  className="shadow-lg flex flex-col gap-4"
                 >
-                  <Page 
-                    pageNumber={pageNumber} 
-                    scale={pdfScale}
-                    width={window.innerWidth > 800 ? 800 : window.innerWidth - 60}
-                    renderTextLayer={false} 
-                    renderAnnotationLayer={false}
-                    className="bg-white"
-                  />
+                  {Array.from(new Array(numPages), (el, index) => (
+                    <Page 
+                      key={`page_${index + 1}`}
+                      pageNumber={index + 1} 
+                      scale={pdfScale}
+                      width={window.innerWidth > 800 ? 800 : window.innerWidth - 60}
+                      renderTextLayer={false} 
+                      renderAnnotationLayer={false}
+                      className="bg-white shadow-sm"
+                    />
+                  ))}
                 </Document>
             </div>
-            
-            {/* PDF Controls */}
-            {numPages && (
-              <div className="bg-white/90 backdrop-blur shadow-lg border-t w-full p-3 flex items-center justify-between px-6 z-10">
-                <button 
-                  disabled={pageNumber <= 1}
-                  onClick={() => setPageNumber(p => p - 1)}
-                  className="p-2 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors"
-                >
-                  <ChevronLeftIcon className="w-6 h-6 text-slate-700" />
-                </button>
-                <span className="text-slate-700 font-medium">
-                  {pageNumber} / {numPages}
-                </span>
-                <button 
-                  disabled={pageNumber >= numPages}
-                  onClick={() => setPageNumber(p => p + 1)}
-                  className="p-2 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors"
-                >
-                  <ChevronRightIcon className="w-6 h-6 text-slate-700" />
-                </button>
-              </div>
-            )}
           </div>
         )}
 
