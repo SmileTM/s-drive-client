@@ -558,36 +558,75 @@ app.post('/api/rename', async (req, res) => {
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
-        if (driveId === 'local') {
-            const uploadDir = path.join(STORAGE_DIR, path.normalize(reqPath).replace(/^(\.\.[/\\])+/, ''));
-            fs.ensureDirSync(uploadDir);
-            cb(null, uploadDir);
-        } else {
-            cb(null, '/tmp'); // Temp for remote upload
+        console.log(`[Upload] Destination check: drive=${driveId}, path=${reqPath}`);
+        
+        try {
+            if (driveId === 'local') {
+                const absPath = resolveSafePath(reqPath);
+                fs.ensureDirSync(absPath);
+                cb(null, absPath);
+            } else {
+                const tempDir = os.tmpdir();
+                cb(null, tempDir); 
+            }
+        } catch (e) {
+            console.error('[Upload] Destination Error:', e);
+            cb(e);
         }
     },
-    filename: (req, file, cb) => cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8'))
+    filename: (req, file, cb) => {
+        // Fix UTF-8 filenames
+        const name = Buffer.from(file.originalname, 'latin1').toString('utf8');
+        cb(null, name);
+    }
 });
-const upload = multer({ storage });
+
+const upload = multer({ 
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 * 1024 } // 10GB limit example
+});
 
 app.post('/api/upload', upload.array('files'), async (req, res) => {
+    const uploadedFiles = req.files || [];
+    const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
+    console.log(`[Upload] Processing ${uploadedFiles.length} files. Drive: ${driveId}`);
+
     try {
-        const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
         const config = await getDriveConfig(driveId);
 
         if (config.type !== 'local') {
             const client = getWebDAVClient(config);
-            await Promise.all(req.files.map(async file => {
-                // Strip leading slash to avoid double slash with base URL
-                const cleanReqPath = reqPath.replace(/^\/+/, '');
-                const remotePath = path.posix.join(cleanReqPath, file.filename);
-                const fileBuffer = await fs.readFile(file.path);
-                await client.putFileContents(remotePath, fileBuffer);
-                await fs.remove(file.path); 
-            }));
+            
+            for (const file of uploadedFiles) {
+                try {
+                    console.log(`[Upload] Transferring to WebDAV: ${file.filename}`);
+                    // Strip leading slash to avoid double slash with base URL
+                    const cleanReqPath = reqPath.replace(/^\/+/, '');
+                    const remotePath = path.posix.join(cleanReqPath, file.filename);
+                    
+                    const fileBuffer = await fs.readFile(file.path);
+                    await client.putFileContents(remotePath, fileBuffer);
+                    console.log(`[Upload] Success: ${remotePath}`);
+                } catch (e) {
+                    console.error(`[Upload] Failed to upload ${file.filename} to WebDAV:`, e);
+                    throw e; // Stop processing to report error
+                } finally {
+                    // Always cleanup temp file
+                    await fs.remove(file.path).catch(e => console.error('Failed to cleanup temp file:', e));
+                }
+            }
+        } else {
+             console.log('[Upload] Local files saved directly via Multer.');
         }
         res.json({ success: true });
     } catch (err) {
+        console.error('[Upload API Error]', err);
+        // Attempt cleanup on error for any remaining files
+        if (uploadedFiles.length > 0 && driveId !== 'local') {
+            for (const file of uploadedFiles) {
+                await fs.remove(file.path).catch(() => {});
+            }
+        }
         res.status(500).json({ error: err.message });
     }
 });
