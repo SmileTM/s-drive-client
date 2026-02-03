@@ -1,4 +1,4 @@
-# CloudMgr - 极简全能的本地云盘管理工具
+# WebDavClient - 极简全能的本地云盘管理工具
 
 > **打破本地与云端的界限，用最优雅的方式管理你的数字资产。**
 > A beautiful, minimalist file manager for Local & WebDAV drives.
@@ -9,7 +9,7 @@
 
 ## ✨ 核心特性 (Features)
 
-CloudMgr 不仅仅是一个文件管理器，它是一个追求极致交互体验的**私有云中枢**。
+WebDavClient 不仅仅是一个文件管理器，它是一个追求极致交互体验的**私有云中枢**。
 
 ### 🎨 极致 UI 设计
 *   **无边框悬浮岛 (Floating Island)**：侧边栏采用大圆角悬浮设计，配合磨砂玻璃背景，营造出悬浮于内容之上的高级感。
