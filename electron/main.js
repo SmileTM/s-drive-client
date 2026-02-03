@@ -29,7 +29,7 @@ function createWindow() {
       contextIsolation: true,
     },
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '../client/public/vite.svg') // Temporary icon
+    icon: path.join(__dirname, '../client/assets/icon.png')
   });
 
   const url = `http://localhost:${SERVER_PORT}`;
