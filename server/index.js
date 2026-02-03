@@ -282,6 +282,76 @@ app.get('/api/files', async (req, res) => {
     }
 });
 
+// GET /api/search
+app.get('/api/search', async (req, res) => {
+    try {
+        const { query, drive: driveId = 'local', path: searchPath = '/' } = req.query;
+        if (!query) return res.json([]);
+
+        console.log(`[DEBUG] GET /api/search query="${query}" drive="${driveId}"`);
+
+        const config = await getDriveConfig(driveId);
+        if (!config) return res.status(404).json({ error: 'Drive config not found' });
+
+        if (config.type === 'local') {
+            const absoluteRoot = resolveSafePath(searchPath);
+            const results = [];
+            
+            // Helper for recursive search
+            const walk = async (dir) => {
+                if (results.length >= 100) return; // Limit results
+                try {
+                    const files = await fs.readdir(dir, { withFileTypes: true });
+                    for (const file of files) {
+                        if (file.name.startsWith('.')) continue;
+                        if (results.length >= 100) break;
+                        
+                        const fullPath = path.join(dir, file.name);
+                        
+                        if (file.name.toLowerCase().includes(query.toLowerCase())) {
+                            const relPath = path.relative(STORAGE_DIR, fullPath);
+                            results.push({
+                                name: file.name,
+                                path: '/' + relPath.split(path.sep).join('/'),
+                                isDirectory: file.isDirectory(),
+                                size: 0, // Skip stat for speed
+                                mtime: 0,
+                                type: file.isDirectory() ? 'folder' : mime.lookup(file.name) || 'application/octet-stream'
+                            });
+                        }
+                        
+                        if (file.isDirectory()) {
+                            await walk(fullPath);
+                        }
+                    }
+                } catch (e) {
+                    // Ignore access errors
+                }
+            };
+
+            await walk(absoluteRoot);
+            res.json(results);
+        } else {
+            // WebDAV Search (Naive: Filter current directory only, or try deep)
+            // Recursive WebDAV is risky. For now, we search CURRENT directory only via proxy
+            // To be safe and consistent with previous "current view" behavior but server-side.
+            // OR: We try to get "deep" but with caution.
+            
+            // Current Decision: Only search current folder for WebDAV to prevent timeouts.
+            // Users can navigate and search.
+            const client = getWebDAVClient(config);
+            const items = await client.getDirectoryContents(searchPath);
+            const results = items
+                .filter(item => item.basename.toLowerCase().includes(query.toLowerCase()))
+                .map(item => normalizeFile(item, driveId));
+            res.json(results);
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // GET /api/raw (Serve file)
 app.get('/api/raw', async (req, res) => {
     try {

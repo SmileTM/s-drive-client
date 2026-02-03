@@ -371,6 +371,10 @@ const ServerAPI = {
   readFileText: async (path, driveId) => {
       const res = await axios.get(`/api/raw?path=${encodeURIComponent(path)}&drive=${driveId}`, { responseType: 'text' });
       return res.data;
+  },
+  searchItems: async (query, driveId, rootPath = '/') => {
+    const res = await axios.get(`/api/search?query=${encodeURIComponent(query)}&drive=${driveId}&path=${encodeURIComponent(rootPath)}`);
+    return res.data;
   }
 };
 
