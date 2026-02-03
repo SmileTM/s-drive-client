@@ -1,8 +1,20 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 
-const SECRET_FILE = path.join(__dirname, '.secret.key');
+// Determine User Data Path (Same logic as server/index.js)
+const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
+// Ensure directory exists (sync is fine here as it's startup)
+if (!fs.existsSync(APP_DATA_DIR)) {
+    try {
+        fs.mkdirSync(APP_DATA_DIR, { recursive: true });
+    } catch (e) {
+        console.error('Failed to create config dir:', e);
+    }
+}
+
+const SECRET_FILE = path.join(APP_DATA_DIR, '.secret.key');
 const ALGORITHM = 'aes-256-cbc';
 
 // Ensure we have a persistent secret key
