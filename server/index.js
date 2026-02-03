@@ -12,10 +12,12 @@ const { encrypt, decrypt } = require('./utils/crypto');
 const app = express();
 const PORT = 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
-const CONFIG_FILE = path.join(__dirname, 'drives.json');
+const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
+const CONFIG_FILE = path.join(APP_DATA_DIR, 'drives.json');
 
 // Ensure storage directory exists
 fs.ensureDirSync(STORAGE_DIR);
+fs.ensureDirSync(APP_DATA_DIR);
 if (!fs.existsSync(CONFIG_FILE)) {
     fs.writeJsonSync(CONFIG_FILE, [{ id: 'local', name: 'Local Storage', type: 'local', path: './storage' }]);
 }

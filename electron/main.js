@@ -14,7 +14,11 @@ function startServer() {
   // Start the server as a child process
   serverProcess = fork(serverPath, [], {
     stdio: 'inherit',
-    env: { ...process.env, NODE_ENV: 'production' }
+    env: { 
+      ...process.env, 
+      NODE_ENV: 'production',
+      USER_DATA_PATH: app.getPath('userData')
+    }
   });
 
   console.log(`[Electron] Server started with PID: ${serverProcess.pid}`);
