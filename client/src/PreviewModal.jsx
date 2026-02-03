@@ -4,8 +4,8 @@ import heic2any from 'heic2any';
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { Document, Page, pdfjs } from 'react-pdf';
-import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
-import 'react-pdf/dist/esm/Page/TextLayer.css';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
 import api from './api';
 
 // Configure PDF Worker
