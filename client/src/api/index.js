@@ -822,6 +822,26 @@ const NativeAPI = {
           encoding: Encoding.UTF8
       });
       return file.data;
+  },
+
+  searchItems: async (query, driveId, rootPath = '/') => {
+    if (driveId !== 'local') {
+        return []; // WebDAV search not supported on mobile
+    }
+    try {
+        const res = await WebDavNative.search({ query });
+        return res.items.map(item => ({
+            name: item.name,
+            path: item.path,
+            isDirectory: item.isDirectory,
+            size: item.size,
+            mtime: item.mtime,
+            type: item.isDirectory ? 'folder' : 'application/octet-stream'
+        }));
+    } catch (e) {
+        console.warn('[Native] Search failed:', e);
+        return [];
+    }
   }
 };
 
