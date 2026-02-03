@@ -2,13 +2,39 @@
   "name": "webdev-client-pro",
   "version": "1.0.0",
   "description": "Local Cloud Drive Manager (Web + WebDAV)",
+  "main": "electron/main.js",
   "scripts": {
     "install-all": "npm install && cd server && npm install && cd ../client && npm install",
     "dev": "concurrently \"npm run server --prefix server\" \"npm run dev --prefix client\"",
     "build": "npm run build --prefix client",
-    "start": "npm run start --prefix server"
+    "start": "npm run start --prefix server",
+    "electron:dev": "npm run build && electron .",
+    "electron:build": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.webdev.client",
+    "productName": "WebDev Drive",
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": ["dmg"]
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "client/dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist-electron"
+    },
+    "asar": true
   },
   "devDependencies": {
-    "concurrently": "^8.2.0"
+    "concurrently": "^8.2.0",
+    "cross-env": "^10.1.0",
+    "electron": "^40.1.0",
+    "electron-builder": "^26.7.0",
+    "kill-port": "^2.0.1",
+    "wait-on": "^9.0.3"
   }
 }

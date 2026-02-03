@@ -1,0 +1,10 @@
+{
+  "appId": "com.webdev.client",
+  "appName": "WebDevClient",
+  "webDir": "dist",
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

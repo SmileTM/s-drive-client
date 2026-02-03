@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+import api from './api';
 import clsx from 'clsx';
 // import { XMarkIcon, ServerStackIcon } from '@heroicons/react/24/outline';
 import { translations } from './i18n';
@@ -22,7 +22,7 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
     }
     setTestStatus({ type: 'testing', msg: t.testing });
     try {
-      await axios.post('/api/drives/test', formData);
+      await api.testConnection(formData);
       setTestStatus({ type: 'success', msg: t.connectionSuccess });
     } catch (err) {
       setTestStatus({ type: 'error', msg: t.connectionFailed });
@@ -44,7 +44,7 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
 
       // Step 1: Verify Connection First
       try {
-        await axios.post('/api/drives/test', formData);
+        await api.testConnection(formData);
       } catch (testErr) {
         setTestStatus({ type: 'error', msg: t.connectionFailed });
         // Don't proceed if test fails
@@ -59,8 +59,8 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
         ...formData
       };
 
-      const res = await axios.post('/api/drives', drivePayload);
-      onAdded(res.data); 
+      const newDrive = await api.addDrive(drivePayload);
+      onAdded(newDrive); 
       onClose();
     } catch (err) {
       console.error(err);
@@ -72,7 +72,7 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
           alert(t.driveAccountAdded);
         }
       } else {
-        alert(t.failedToAdd + ': ' + (err.response?.data?.error || err.message));
+        alert(t.failedToAdd + ': ' + (err.message));
       }
     } finally {
       setLoading(false);

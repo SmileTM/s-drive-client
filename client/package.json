@@ -10,6 +10,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^8.0.2",
+    "@capacitor/cli": "^8.0.2",
+    "@capacitor/core": "^8.0.2",
+    "@capacitor/device": "^8.0.0",
+    "@capacitor/filesystem": "^8.1.0",
+    "@capacitor/ios": "^8.0.2",
+    "@capacitor/preferences": "^8.0.0",
     "axios": "^1.6.0",
     "clsx": "^2.0.0",
     "date-fns": "^2.30.0",
@@ -18,7 +25,8 @@
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.2.3",
     "react-router-dom": "^6.18.0",
-    "tailwind-merge": "^2.0.0"
+    "tailwind-merge": "^2.0.0",
+    "webdav": "^5.8.0"
   },
   "devDependencies": {
     "@heroicons/react": "^2.0.18",

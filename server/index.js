@@ -433,6 +433,20 @@ const server = new webdavServer.WebDAVServer({
 server.setFileSystem('/', new webdavServer.PhysicalFileSystem(STORAGE_DIR), (s) => {});
 app.use(webdavServer.extensions.express('/webdav', server));
 
+// Serve static files from React app (for production/electron)
+const CLIENT_BUILD_PATH = path.join(__dirname, '../client/dist');
+if (fs.existsSync(CLIENT_BUILD_PATH)) {
+    app.use(express.static(CLIENT_BUILD_PATH));
+    
+    // Handle SPA routing: return index.html for any unknown non-API routes
+    app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/api') || req.path.startsWith('/webdav')) {
+            return next();
+        }
+        res.sendFile(path.join(CLIENT_BUILD_PATH, 'index.html'));
+    });
+}
+
 app.listen(PORT, () => {
     console.log(`🚀 Multi-Drive Server running at http://localhost:${PORT}`);
 });
