@@ -7,6 +7,7 @@ const fs = require('fs-extra');
 const os = require('os');
 const mime = require('mime-types');
 const multer = require('multer');
+const { encrypt, decrypt } = require('./utils/crypto');
 
 const app = express();
 const PORT = 8000;
@@ -25,13 +26,18 @@ app.use(express.json());
 // --- Drive Helper: Get Client for Drive ---
 const getDriveConfig = async (driveId) => {
     const drives = await fs.readJson(CONFIG_FILE);
-    return drives.find(d => d.id === driveId) || drives[0];
+    const drive = drives.find(d => d.id === driveId) || drives[0];
+    // Decrypt password for internal use
+    if (drive.password) {
+        drive.password = decrypt(drive.password);
+    }
+    return drive;
 };
 
 const getWebDAVClient = (config) => {
     return createClient(config.url.trim(), {
         username: config.username,
-        password: config.password
+        password: config.password // Config already has decrypted password
     });
 };
 
@@ -58,33 +64,51 @@ app.get('/api/drives', async (req, res) => {
 
     try {
         const drivesWithQuota = await Promise.all(drives.map(async (drive) => {
+            // Decrypt for quota check (internal connection)
+            const internalDrive = { ...drive };
+            if (internalDrive.password) {
+                internalDrive.password = decrypt(internalDrive.password);
+            }
+
+            // Prepare public drive object (NO PASSWORD)
+            const publicDrive = { ...drive };
+            delete publicDrive.password; // Remove password from response
+
             try {
                 const withTimeout = (promise, ms) => Promise.race([
                     promise,
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
                 ]);
 
-                if (drive.type === 'webdav') {
-                    const client = getWebDAVClient(drive);
+                if (internalDrive.type === 'webdav') {
+                    const client = getWebDAVClient(internalDrive);
                     const quota = await withTimeout(client.getQuota(), 2000); 
                     if (quota && quota.used !== undefined && quota.available !== undefined) {
                         const used = parseInt(quota.used, 10) || 0;
                         const available = parseInt(quota.available, 10) || 0;
-                        return { ...drive, quota: { used, total: used + available } };
+                        return { ...publicDrive, quota: { used, total: used + available } };
                     }
-                } else if (drive.type === 'local') {
+                } else if (internalDrive.type === 'local') {
                     const stats = await fs.statfs(STORAGE_DIR);
                     const total = stats.blocks * stats.bsize;
                     const available = stats.bfree * stats.bsize;
-                    return { ...drive, quota: { used: total - available, total } };
+                    return { ...publicDrive, quota: { used: total - available, total } };
                 }
             } catch (e) {}
-            return { ...drive, quota: null };
+            return { ...publicDrive, quota: null };
         }));
+        
+        // Log without sensitive data
         console.log('[DEBUG] Drives Quota:', JSON.stringify(drivesWithQuota.map(d => ({id: d.id, quota: d.quota})), null, 2));
         res.json(drivesWithQuota);
     } catch (err) {
-        res.json(drives);
+        // Fallback: strip passwords even on error
+        const safeDrives = drives.map(d => {
+            const safe = { ...d };
+            delete safe.password;
+            return safe;
+        });
+        res.json(safeDrives);
     }
 });
 
@@ -93,7 +117,9 @@ const crypto = require('crypto');
 app.post('/api/drives', async (req, res) => {
     try {
         const newDrive = req.body;
-        console.log('[DEBUG] POST /api/drives payload:', newDrive);
+        // Don't log password!
+        const logSafeDrive = { ...newDrive, password: '***' };
+        console.log('[DEBUG] POST /api/drives payload:', logSafeDrive);
         
         let drives = [];
         try {
@@ -114,6 +140,11 @@ app.post('/api/drives', async (req, res) => {
             return res.status(409).json({ error: 'Display Name is already taken' });
         }
 
+        // Encrypt Password
+        if (newDrive.password) {
+            newDrive.password = encrypt(newDrive.password);
+        }
+
         // Assign reliable ID
         newDrive.id = crypto.randomUUID();
         
@@ -121,7 +152,10 @@ app.post('/api/drives', async (req, res) => {
         await fs.writeJson(CONFIG_FILE, drives, { spaces: 2 });
         console.log('[DEBUG] Write success. New count:', drives.length);
         
-        res.json(newDrive);
+        // Return safe object (no password or masked)
+        const safeResponse = { ...newDrive };
+        delete safeResponse.password;
+        res.json(safeResponse);
     } catch (err) {
         console.error('[ERROR] Add Drive Failed:', err);
         res.status(500).json({ error: err.message });
@@ -131,6 +165,7 @@ app.post('/api/drives', async (req, res) => {
 app.post('/api/drives/test', async (req, res) => {
     try {
         const config = req.body;
+        // Config comes plain text from client request body
         const client = createClient(config.url, {
             username: config.username,
             password: config.password
@@ -172,6 +207,8 @@ app.patch('/api/drives/:id', async (req, res) => {
         }
 
         drives[driveIndex].name = name;
+        // Password remains untouched (encrypted)
+        
         console.log('[DEBUG] Renaming drive:', id, 'to', name, '. Total drives:', drives.length);
         await fs.writeJson(CONFIG_FILE, drives, { spaces: 2 });
         res.json({ success: true });
@@ -185,7 +222,7 @@ app.patch('/api/drives/:id', async (req, res) => {
 // Helper: Safe path resolution
 const resolveSafePath = (userPath) => {
     // Remove leading slashes to ensure it's relative
-    const safeSuffix = path.normalize(userPath).replace(/^(\.\.[\/\\])+/, '').replace(/^[\/\\]+/, '');
+    const safeSuffix = path.normalize(userPath).replace(/^(\.\.[/\\])+/, '').replace(/^[/\]+/, '');
     const absolutePath = path.resolve(STORAGE_DIR, safeSuffix);
     if (!absolutePath.startsWith(STORAGE_DIR)) {
         throw new Error('Access denied: Path traversal detected');

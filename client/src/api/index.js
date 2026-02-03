@@ -4,6 +4,7 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Preferences } from '@capacitor/preferences';
 import { createClient } from 'webdav';
 import { Buffer } from 'buffer';
+import { encrypt, decrypt } from '../utils/clientCrypto';
 
 // --- Native Plugin Interface ---
 const WebDavNative = registerPlugin('WebDavNative');
@@ -293,14 +294,17 @@ class NativeWebDAVClient {
 const getWebDAVClient = (driveConfig) => {
     console.log(`[WebDAV] Creating client for: ${driveConfig.url}`);
     
+    // Decrypt password (handles both encrypted storage and plain text form input)
+    const password = decrypt(driveConfig.password);
+
     // If on Mobile (Native), use our Custom Native Client
     if (Capacitor.isNativePlatform()) {
-        return new NativeWebDAVClient(driveConfig);
+        return new NativeWebDAVClient({ ...driveConfig, password });
     }
 
     return createClient(driveConfig.url, {
         username: driveConfig.username,
-        password: driveConfig.password
+        password: password
     });
 };
 
@@ -722,7 +726,9 @@ const NativeAPI = {
 
   addDrive: async (drive) => {
     const drives = await NativeAPI.getDrives();
-    const newDrive = { ...drive, id: crypto.randomUUID() };
+    // Encrypt password before storage
+    const encryptedPassword = encrypt(drive.password);
+    const newDrive = { ...drive, password: encryptedPassword, id: crypto.randomUUID() };
     drives.push(newDrive);
     await Preferences.set({ key: 'drives', value: JSON.stringify(drives) });
     return newDrive;
