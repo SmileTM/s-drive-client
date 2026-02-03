@@ -26,7 +26,35 @@ function log(msg) {
 ipcMain.on('ondragstart', async (event, files, driveId) => {
     log(`[IPC] ondragstart: ${files.length} items from ${driveId}`);
     
-    // Call Server to prepare paths (resolve local or download remote)
+    const iconPath = path.join(__dirname, '../client/assets/icon.png');
+    
+    // Strategy 1: Instant Local Drag
+    if (driveId === 'local') {
+        try {
+            // Local storage root
+            const storageDir = require('os').homedir();
+            
+            const absFiles = files.map(f => {
+                // Remove leading slashes and resolve against Home
+                const rel = f.replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
+                return path.join(storageDir, rel);
+            }).filter(p => fs.existsSync(p));
+
+            if (absFiles.length > 0) {
+                log(`[Drag] Starting LOCAL drag for ${absFiles.length} files`);
+                event.sender.startDrag({
+                    file: absFiles[0],
+                    files: absFiles, // macOS support
+                    icon: iconPath
+                });
+            }
+        } catch (e) {
+            log(`[Drag] Local resolution failed: ${e.message}`);
+        }
+        return;
+    }
+
+    // Strategy 2: Remote/WebDAV Drag (Async Download)
     try {
         const response = await fetch(`http://127.0.0.1:${serverPort}/api/prepare-drag`, {
             method: 'POST',
@@ -37,11 +65,10 @@ ipcMain.on('ondragstart', async (event, files, driveId) => {
         if (response.ok) {
             const result = await response.json();
             if (result.files && result.files.length > 0) {
-                const iconPath = path.join(__dirname, '../client/assets/icon.png');
-                log(`[Drag] Starting drag for: ${JSON.stringify(result.files)}`);
+                log(`[Drag] Starting REMOTE drag for: ${JSON.stringify(result.files)}`);
                 event.sender.startDrag({
-                    file: result.files[0], // Primary file
-                    files: result.files,   // Multi-file support
+                    file: result.files[0],
+                    files: result.files,
                     icon: iconPath
                 });
             }
