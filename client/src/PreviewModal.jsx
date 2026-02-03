@@ -11,9 +11,9 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   const fileType = file.type || '';
   const isHeic = fileType === 'image/heic' || fileType === 'image/heif' || /\.(heic|heif)$/i.test(file.name);
   const isImage = (fileType.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(file.name)) && !isHeic;
-  const isVideo = fileType.startsWith('video/');
-  const isAudio = fileType.startsWith('audio/');
-  const isPDF = fileType === 'application/pdf';
+  const isVideo = fileType.startsWith('video/') || /\.(mp4|webm|ogg|mov)$/i.test(file.name);
+  const isAudio = fileType.startsWith('audio/') || /\.(mp3|wav|aac|flac|m4a)$/i.test(file.name);
+  const isPDF = fileType === 'application/pdf' || /\.pdf$/i.test(file.name);
   const isText = fileType.startsWith('text/') || 
                  /\.(json|js|jsx|ts|tsx|py|md|css|html|xml|yml|yaml|ini|conf|sh|bash|zsh)$/i.test(file.name);
 
@@ -123,7 +123,7 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         )}
 
         {/* Fallback for unsupported types */}
-        {!isImage && !isVideo && !isAudio && !isPDF && !isText && (
+        {!isImage && !isHeic && !isVideo && !isAudio && !isPDF && !isText && (
           <div className="bg-white p-10 rounded-2xl shadow-2xl flex flex-col items-center gap-6">
             <DocumentIcon className="w-20 h-20 text-slate-300" />
             <div className="text-center">
@@ -144,7 +144,7 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         )}
 
         {/* Download Button (Overlay for supported types) */}
-        {(isImage || isVideo || isAudio || isPDF || isText) && url && (
+        {(isImage || isHeic || isVideo || isAudio || isPDF || isText) && url && (
           <a 
             href={url} 
             download={file.name}
