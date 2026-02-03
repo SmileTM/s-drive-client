@@ -1,6 +1,6 @@
 {
-  "appId": "com.webdev.client",
-  "appName": "WebDevClient",
+  "appId": "com.android.drive",
+  "appName": "WebDavClient",
   "webDir": "dist",
   "plugins": {
     "CapacitorHttp": {

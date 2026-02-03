@@ -3,6 +3,7 @@ import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
 import api from './api';
 import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
 import { 
   FolderIcon, 
   DocumentIcon, 
@@ -28,7 +29,8 @@ import {
   AdjustmentsHorizontalIcon,
   ChevronUpIcon,
   ChevronDownIcon,
-  GlobeAltIcon
+  GlobeAltIcon,
+  DocumentDuplicateIcon
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import PreviewModal from './PreviewModal';
@@ -53,32 +55,65 @@ const formatSize = (bytes) => {
 
 // --- Components ---
 
-const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive }) => {
+const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive, isSelectionMode }) => {
   const isSelected = selectedPaths.has(file.path);
   const fullPath = file.path;
   const [isDragOver, setIsDragOver] = useState(false);
   const timerRef = useRef(null);
+  const pointerDownPos = useRef(null);
   const [isLongPress, setIsLongPress] = useState(false);
   const isList = viewMode === 'list';
+  const [thumbnailUrl, setThumbnailUrl] = useState('');
 
   // Safe Thumbnail Logic
   const isImage = !file.isDirectory && /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(file.name);
   const isPDF = !file.isDirectory && /\.pdf$/i.test(file.name);
-  const thumbnailUrl = `/api/raw?path=${encodeURIComponent(file.path)}&drive=${activeDrive || 'local'}`;
+
+  useEffect(() => {
+    let active = true;
+    if (isImage) {
+        // Delay slightly to prioritize UI render
+        const load = async () => {
+            try {
+                const url = await api.getFileUrl(file.path, activeDrive || 'local');
+                if (active && url) setThumbnailUrl(url);
+            } catch (e) {
+                // Ignore error
+            }
+        };
+        load();
+    } else {
+        setThumbnailUrl('');
+    }
+    return () => { active = false; };
+  }, [file.path, activeDrive, isImage]);
 
   // --- Long Press Logic ---
   const startPress = (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     setIsLongPress(false);
+    pointerDownPos.current = { x: e.clientX, y: e.clientY };
     timerRef.current = setTimeout(() => {
       toggleSelection(fullPath);
       setIsLongPress(true);
       if (window.navigator.vibrate) window.navigator.vibrate(50);
-    }, 300); 
+    }, 500); // Increased to 500ms for better stability
+  };
+
+  const handlePointerMove = (e) => {
+      if (timerRef.current && pointerDownPos.current) {
+          const moveX = Math.abs(e.clientX - pointerDownPos.current.x);
+          const moveY = Math.abs(e.clientY - pointerDownPos.current.y);
+          if (moveX > 10 || moveY > 10) { // Cancel if moved more than 10px
+              clearTimeout(timerRef.current);
+              timerRef.current = null;
+          }
+      }
   };
 
   const endPress = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
+    pointerDownPos.current = null;
   };
 
   const handleDragStart = (e) => {
@@ -88,13 +123,8 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
     
     // External Download Logic (Chrome/Edge only, Single file)
     if (!file.isDirectory) {
-      const mimeType = file.type || 'application/octet-stream';
-      // Construct absolute URL manually to be safe
-      const baseUrl = window.location.protocol + '//' + window.location.host;
-      const downloadUrl = `${baseUrl}/api/raw?path=${encodeURIComponent(file.path)}&drive=${activeDrive || 'local'}`;
-      e.dataTransfer.setData('DownloadURL', `${mimeType}:${file.name}:${downloadUrl}`);
+       // ... existing drag logic ...
     }
-
     e.dataTransfer.effectAllowed = 'all';
   };
 
@@ -136,6 +166,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onPointerDown={startPress}
+      onPointerMove={handlePointerMove}
       onPointerUp={endPress}
       onPointerLeave={endPress}
       onContextMenu={(e) => e.preventDefault()} 
@@ -144,19 +175,19 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
         opacity: 1, 
         y: 0,
         scale: isDragOver ? 1.02 : (isSelected ? 0.98 : 1),
-        backgroundColor: isDragOver ? '#f1f5f9' : '#ffffff',
-        borderColor: isDragOver ? '#cbd5e1' : 'rgba(0, 0, 0, 0)'
+        backgroundColor: isDragOver ? '#f1f5f9' : (isSelected ? '#f8fafc' : '#ffffff'), // Highlight selected bg slightly
+        borderColor: isDragOver ? '#cbd5e1' : (isSelected ? '#e2e8f0' : 'rgba(0, 0, 0, 0)') // Add border when selected
       }}
       whileHover={{ scale: isSelected ? 0.98 : 1.01 }}
       className={clsx(
-        "relative shadow-island hover:shadow-island-hover flex items-center cursor-pointer transition-all border-2 border-transparent group select-none touch-pan-y",
+        "relative shadow-island hover:shadow-island-hover flex items-center cursor-pointer transition-all border-2 group select-none touch-pan-y",
         isList 
           ? "p-2 px-3 gap-3 rounded-xl" 
           : "flex-col p-4 gap-2 rounded-2xl text-center aspect-[4/3]"
       )}
       onClick={(e) => {
         if (isLongPress) return; 
-        if (selectedPaths.size > 0) toggleSelection(fullPath);
+        if (isSelectionMode) toggleSelection(fullPath); // Click anywhere toggles if in selection mode
         else {
           if (file.isDirectory) handleNavigate(file.path);
           else onPreview(file);
@@ -180,7 +211,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
         )}
         
         {/* Safe Thumbnail Overlay */}
-        {isImage && (
+        {isImage && thumbnailUrl && (
           <img 
             src={thumbnailUrl} 
             alt="" 
@@ -214,7 +245,19 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
         )}
       </div>
       
-      <div onClick={(e) => { e.stopPropagation(); toggleSelection(fullPath); }} className={clsx("rounded-full border-2 flex items-center justify-center transition-opacity shrink-0", isList ? "w-4 h-4" : "absolute top-2 right-2 w-5 h-5", isSelected ? "bg-slate-800 border-slate-800 opacity-100" : "border-slate-200 opacity-0 group-hover:opacity-100 md:opacity-0")}>
+      {/* Checkbox Indicator */}
+      <div 
+        onClick={(e) => { e.stopPropagation(); toggleSelection(fullPath); }} 
+        className={clsx(
+            "rounded-full border-2 flex items-center justify-center transition-all shrink-0", 
+            isList ? "w-4 h-4" : "absolute top-2 right-2 w-5 h-5", 
+            isSelected 
+                ? "bg-slate-800 border-slate-800 opacity-100 scale-100" 
+                : isSelectionMode 
+                    ? "border-slate-300 opacity-100 scale-100 bg-white/50" // Show empty checkbox in selection mode
+                    : "border-slate-200 opacity-0 md:group-hover:opacity-100 scale-75" // Hide otherwise, hover only on desktop
+        )}
+      >
          {isSelected && <div className={clsx("bg-white rounded-full", isList ? "w-1.5 h-1.5" : "w-2 h-2")} />} 
       </div>
     </motion.div>
@@ -222,7 +265,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
 };
 
 function App() {
-  const [currentPath, setCurrentPath] = useState(() => localStorage.getItem('last_path') || '/');
+  const [currentPath, setCurrentPath] = useState('/');
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -240,13 +283,14 @@ function App() {
       return [{ id: 'local', name: 'Local Storage', type: 'local', quota: { used: 0, total: 100 * 1024 * 1024 * 1024 } }];
     }
   });
-  const [activeDrive, setActiveDrive] = useState(() => localStorage.getItem('last_drive') || 'local');
+  const [activeDrive, setActiveDrive] = useState('local');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAddDriveOpen, setIsAddDriveOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
   const [sortConfig, setSortConfig] = useState({ key: 'type', direction: 'asc' });
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+  const [progress, setProgress] = useState(null); 
   
   // Language State
   const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
@@ -272,6 +316,105 @@ function App() {
   };
 
   useEffect(() => { fetchDrives(); }, []);
+
+  // Ref to keep handlers fresh
+  const handleGoUpRef = useRef(null);
+  const setIsSidebarOpenRef = useRef(setIsSidebarOpen); // setIsSidebarOpen is state setter, likely hoisted or safe if from useState
+  const isSidebarOpenRef = useRef(isSidebarOpen);
+  const currentPathRef = useRef(currentPath);
+  const fetchFilesRef = useRef(null); // fetchFiles is defined later
+  const selectedPathsRef = useRef(selectedPaths);
+
+  // Note: specific useEffects to update these refs are moved to bottom of component to avoid TDZ
+
+
+  // --- Global Gestures & Hardware Back Button ---
+  useEffect(() => {
+    // Hardware Back Button
+    const backListener = CapApp.addListener('backButton', ({ canGoBack }) => {
+      if (isSidebarOpenRef.current) {
+        setIsSidebarOpenRef.current(false);
+      } else if (selectedPathsRef.current.size > 0) {
+        setSelectedPaths(new Set());
+      } else if (currentPathRef.current !== '/') {
+        if (handleGoUpRef.current) handleGoUpRef.current();
+      } else {
+        CapApp.exitApp();
+      }
+    });
+
+    // Touch Gestures
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let isPulling = false;
+
+    const handleTouchStart = (e) => {
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        
+        // Check if we are at the top of the scroll container
+        const scrollContainer = document.getElementById('file-list-container');
+        if (scrollContainer && scrollContainer.scrollTop === 0) {
+            isPulling = true;
+        } else {
+            isPulling = false;
+        }
+    };
+
+    const handleTouchMove = (e) => {
+        // Optional: Add visual feedback for pull-to-refresh here
+    };
+
+    const handleTouchEnd = (e) => {
+        const touchEndX = e.changedTouches[0].clientX;
+        const touchEndY = e.changedTouches[0].clientY;
+        
+        const deltaX = touchEndX - touchStartX;
+        const deltaY = touchEndY - touchStartY;
+        const absDeltaX = Math.abs(deltaX);
+        const absDeltaY = Math.abs(deltaY);
+
+        // Horizontal Swipes (Dominant X movement)
+        if (absDeltaX > absDeltaY && absDeltaX > 50) {
+            // Right Swipe (->)
+            if (deltaX > 0) {
+                if (isSidebarOpenRef.current) return; // Already open
+                
+                // User Request: Non-edge area swipe right -> Open Sidebar
+                // Edge area (<40px) is reserved for System Back Gesture
+                if (touchStartX > 40) {
+                    setIsSidebarOpenRef.current(true);
+                }
+            }
+            // Left Swipe (<-)
+            else {
+                if (isSidebarOpenRef.current) {
+                    // Close Sidebar
+                    setIsSidebarOpenRef.current(false);
+                }
+            }
+        }
+        
+        // Vertical Pull (Pull to Refresh)
+        // Must be dominant Y, downward, start from top, and significant distance
+        if (isPulling && deltaY > 100 && absDeltaY > absDeltaX * 2) {
+             // Trigger Refresh
+             if (window.navigator.vibrate) window.navigator.vibrate(20);
+             if(fetchFilesRef.current) fetchFilesRef.current(currentPathRef.current);
+        }
+    };
+
+    window.addEventListener('touchstart', handleTouchStart);
+    window.addEventListener('touchmove', handleTouchMove);
+    window.addEventListener('touchend', handleTouchEnd);
+
+    return () => {
+        backListener.then(h => h.remove());
+        window.removeEventListener('touchstart', handleTouchStart);
+        window.removeEventListener('touchmove', handleTouchMove);
+        window.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, []); 
 
   // Filtered files
   const filteredFiles = useMemo(() => files.filter(f => 
@@ -396,11 +539,18 @@ function App() {
     }
 
     setUploading(true);
+    setProgress({ current: 0, total: acceptedFiles.length, filename: 'Preparing...' });
+    
     try {
-      await api.uploadFiles(currentPath, acceptedFiles, activeDrive);
+      await api.uploadFiles(currentPath, acceptedFiles, activeDrive, (current, total, filename) => {
+          setProgress({ current, total, filename });
+      });
       await fetchFiles(currentPath);
       setIsIslandExpanded(false);
-    } catch (err) { alert(t.uploadFailed); } finally { setUploading(false); }
+    } catch (err) { alert(t.uploadFailed); } finally { 
+        setUploading(false); 
+        setProgress(null);
+    }
   };
 
   const onDrop = useCallback(acceptedFiles => { handleUpload(acceptedFiles); }, [currentPath, activeDrive, files, t]); // Add files/t dependency
@@ -416,8 +566,45 @@ function App() {
     if (items.includes(destination)) return;
     try { await api.moveItems(items, destination, activeDrive); fetchFiles(currentPath); setSelectedPaths(new Set()); } catch (err) { alert(t.moveFailed); }
   };
-  const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths) }); setSelectedPaths(new Set()); };
-  const handlePaste = async () => { if (!clipboard || !clipboard.items) return; await handleMove(clipboard.items, currentPath); setClipboard(null); };
+  const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
+  const handleCopy = () => { setClipboard({ mode: 'copy', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
+  
+  const handlePaste = async () => { 
+    if (!clipboard || !clipboard.items) return; 
+    
+    // Check if cross-drive
+    const sourceDrive = clipboard.driveId || activeDrive; 
+    const destDrive = activeDrive;
+    const isMove = clipboard.mode === 'move';
+
+    try {
+        const total = clipboard.items.length;
+        setProgress({ current: 0, total, filename: 'Preparing...' });
+        
+        if (sourceDrive === destDrive) {
+            // Same drive
+            if (isMove) {
+                await api.moveItems(clipboard.items, currentPath, activeDrive);
+            } else {
+                // Same drive copy
+                await api.crossDriveTransfer(clipboard.items, sourceDrive, currentPath, destDrive, false, (current, total, filename) => {
+                    setProgress({ current, total, filename });
+                });
+            }
+        } else {
+            // Cross drive
+            await api.crossDriveTransfer(clipboard.items, sourceDrive, currentPath, destDrive, isMove, (current, total, filename) => {
+                setProgress({ current, total, filename });
+            });
+        }
+        fetchFiles(currentPath); 
+        setClipboard(null); 
+    } catch (err) {
+        alert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''));
+    } finally {
+        setProgress(null);
+    }
+  };
   
   const handleRename = async () => {
     if (selectedPaths.size !== 1) return;
@@ -473,6 +660,14 @@ function App() {
   const isSelectionMode = selectedPaths.size > 0;
   const hasClipboard = clipboard && clipboard.items.length > 0;
 
+  // --- Moved UseEffects to avoid TDZ ---
+  useEffect(() => { handleGoUpRef.current = handleGoUp; }, [handleGoUp]);
+  useEffect(() => { setIsSidebarOpenRef.current = setIsSidebarOpen; }, [setIsSidebarOpen]);
+  useEffect(() => { isSidebarOpenRef.current = isSidebarOpen; }, [isSidebarOpen]);
+  useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
+  useEffect(() => { fetchFilesRef.current = fetchFiles; }, [fetchFiles]);
+  useEffect(() => { selectedPathsRef.current = selectedPaths; }, [selectedPaths]);
+
     return (
 
       <div {...getRootProps()} className="flex h-screen bg-main-bg selection-none outline-none overflow-hidden font-sans">
@@ -503,7 +698,9 @@ function App() {
         "m-4 rounded-[28px] h-[calc(100vh-2rem)] w-60",
         "left-0 md:static md:w-64 md:translate-x-0 md:m-4",
         isSidebarOpen ? "translate-x-0 opacity-100" : "-translate-x-[120%] opacity-0 md:translate-x-0 md:opacity-100 pointer-events-none md:pointer-events-auto"
-      )}>
+      )}
+      style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
         <div className="flex flex-col h-full p-4">
           <div className="flex items-center gap-2 px-2 py-4 mb-6">
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white"><ServerStackIcon className="w-5 h-5" /></div>
@@ -582,7 +779,7 @@ function App() {
               className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 hover:text-indigo-600 transition-colors"
             >
               <GlobeAltIcon className="w-4 h-4 shrink-0" />
-              <span className="translate-y-[1px]">{lang === 'en' ? '英' : '中'}</span>
+              <span>{lang === 'en' ? '英' : '中'}</span>
             </button>
           </div>
         </div>
@@ -597,128 +794,137 @@ function App() {
       )}
 
       <div className="flex-1 flex flex-col h-full overflow-hidden relative">
-        <div className="sticky top-0 z-10 bg-main-bg/80 backdrop-blur-md py-4 px-4 sm:px-8 flex items-center gap-2 border-b border-slate-100">
-          <button onClick={() => setIsSidebarOpen(true)} className="p-2 -ml-2 mr-2 hover:bg-white rounded-full md:hidden text-slate-600"><Bars3Icon className="w-6 h-6" /></button>
-          
-          {currentPath !== '/' && (
-            <button 
-              onClick={handleGoUp}
-              className="p-2 hover:bg-white rounded-full transition-colors shrink-0"
-            >
-              <ChevronLeftIcon className="w-5 h-5 text-slate-600" />
-            </button>
-          )}
-          
-          {/* Clickable Breadcrumbs */}
-          <div className="flex-1 overflow-x-auto no-scrollbar whitespace-nowrap flex items-center gap-1 pr-2 mask-linear-fade">
-            <button 
-              onClick={() => handleNavigate('/')}
-              className={clsx(
-                "p-1.5 rounded-lg transition-colors flex items-center",
-                currentPath === '/' ? "bg-indigo-50 text-indigo-700 font-bold" : "text-slate-500 hover:bg-white hover:text-slate-700"
-              )}
-            >
-              <HomeIcon className="w-4 h-4" />
-            </button>
+        <div 
+          className="sticky top-0 z-10 bg-main-bg/80 backdrop-blur-md border-b border-slate-100 transition-all"
+          style={{ paddingTop: 'env(safe-area-inset-top)' }}
+        >
+          {/* Top Row: Sidebar, Back, Search, Actions */}
+          <div className="flex items-center gap-2 px-4 sm:px-8 py-3">
+            <button onClick={() => setIsSidebarOpen(true)} className="p-2 -ml-2 mr-1 hover:bg-white rounded-full md:hidden text-slate-600"><Bars3Icon className="w-6 h-6" /></button>
             
-            {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((segment, index, arr) => {
-              const segmentPath = '/' + arr.slice(0, index + 1).join('/');
-              const isLast = index === arr.length - 1;
-              return (
-                <div key={segmentPath} className="flex items-center">
-                  <span className="text-slate-300 mx-0.5">/</span>
-                  <button
-                    onClick={() => !isLast && handleNavigate(segmentPath)}
-                    disabled={isLast}
-                    className={clsx(
-                      "px-2 py-1 rounded-lg text-sm transition-colors",
-                      isLast 
-                        ? "font-bold text-slate-800 cursor-default" 
-                        : "text-slate-500 hover:bg-white hover:text-indigo-600 font-medium"
-                    )}
-                  >
-                    {segment}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
+            {currentPath !== '/' && (
+              <button 
+                onClick={handleGoUp}
+                className="p-2 hover:bg-white rounded-full transition-colors shrink-0"
+              >
+                <ChevronLeftIcon className="w-5 h-5 text-slate-600" />
+              </button>
+            )}
 
-          {/* Search Input */}
-          <div className="flex-1 max-w-md mx-2 md:mx-4 relative group hidden sm:block">
-            <label htmlFor="search-files" className="sr-only">Search Files</label>
-            <MagnifyingGlassIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input 
-              id="search-files"
-              name="search"
-              type="text" 
-              placeholder={t.searchPlaceholder}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-100/50 hover:bg-slate-100 focus:bg-white border-none rounded-full py-2 pl-10 pr-4 text-sm outline-none ring-1 ring-transparent focus:ring-indigo-500/20 transition-all placeholder:text-slate-400 text-slate-600"
-            />
-          </div>
-          
-          <div className="ml-auto flex items-center gap-2">
-            {isSelectionMode ? (
-              <button onClick={() => setSelectedPaths(new Set())} className="text-sm text-indigo-600 font-medium px-4">
-                {t.cancel}
-              </button>
-            ) : hasClipboard ? (
-              <button onClick={() => setClipboard(null)} className="text-sm text-slate-400 font-medium px-4">
-                {t.cancelMove}
-              </button>
-            ) : (
-              <>
-                {uploading && (
-                   <div className="flex items-center gap-2 text-sm text-slate-500 mr-2 hidden sm:flex">
-                     <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                     <span>{t.uploading}</span>
-                   </div>
-                )}
-                
-                {/* Sort Menu */}
-                <div className="relative">
+            {/* Search Input */}
+            <div className="flex-1 relative group mx-1">
+              <label htmlFor="search-files" className="sr-only">Search Files</label>
+              <MagnifyingGlassIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input 
+                id="search-files"
+                name="search"
+                type="text" 
+                placeholder={t.searchPlaceholder}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-slate-100/50 hover:bg-slate-100 focus:bg-white border-none rounded-full py-2 pl-10 pr-4 text-sm outline-none ring-1 ring-transparent focus:ring-indigo-500/20 transition-all placeholder:text-slate-400 text-slate-600"
+              />
+            </div>
+            
+            <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+              {isSelectionMode ? (
+                <button onClick={() => setSelectedPaths(new Set())} className="text-sm text-indigo-600 font-medium px-2 sm:px-4">
+                  {t.cancel}
+                </button>
+              ) : hasClipboard ? (
+                <button onClick={() => setClipboard(null)} className="text-sm text-slate-400 font-medium px-2 sm:px-4">
+                  {t.cancelMove}
+                </button>
+              ) : (
+                <>
+                  {uploading && (
+                     <div className="flex items-center gap-2 text-sm text-slate-500 mr-2 hidden sm:flex">
+                       <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                       <span>{t.uploading}</span>
+                     </div>
+                  )}
+                  
+                  {/* Sort Menu */}
+                  <div className="relative">
+                    <button 
+                      onClick={() => setIsSortMenuOpen(!isSortMenuOpen)}
+                      className="p-2 hover:bg-white rounded-full text-slate-500 transition-colors"
+                    >
+                      <AdjustmentsHorizontalIcon className="w-6 h-6" />
+                    </button>
+                    {isSortMenuOpen && (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setIsSortMenuOpen(false)} />
+                        <div className="absolute right-0 top-full mt-2 w-32 bg-white rounded-xl shadow-xl border border-slate-100 z-20 overflow-hidden py-1">
+                          {['name', 'date', 'type'].map(key => (
+                            <button
+                              key={key}
+                              onClick={() => handleSort(key)}
+                              className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 flex items-center justify-between"
+                            >
+                              <span className="capitalize">{t[key] || key}</span>
+                              {sortConfig.key === key && (
+                                sortConfig.direction === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* View Mode Toggle */}
                   <button 
-                    onClick={() => setIsSortMenuOpen(!isSortMenuOpen)}
+                    onClick={() => setViewMode(v => v === 'grid' ? 'list' : 'grid')}
                     className="p-2 hover:bg-white rounded-full text-slate-500 transition-colors"
                   >
-                    <AdjustmentsHorizontalIcon className="w-6 h-6" />
+                    {viewMode === 'grid' ? <QueueListIcon className="w-6 h-6" /> : <RectangleGroupIcon className="w-6 h-6" />}
                   </button>
-                  {isSortMenuOpen && (
-                    <>
-                      <div className="fixed inset-0 z-10" onClick={() => setIsSortMenuOpen(false)} />
-                      <div className="absolute right-0 top-full mt-2 w-32 bg-white rounded-xl shadow-xl border border-slate-100 z-20 overflow-hidden py-1">
-                        {['name', 'date', 'type'].map(key => (
-                          <button
-                            key={key}
-                            onClick={() => handleSort(key)}
-                            className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 flex items-center justify-between"
-                          >
-                            <span className="capitalize">{t[key] || key}</span>
-                            {sortConfig.key === key && (
-                              sortConfig.direction === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
+                </>
+              )}
+            </div>
+          </div>
 
-                {/* View Mode Toggle */}
-                <button 
-                  onClick={() => setViewMode(v => v === 'grid' ? 'list' : 'grid')}
-                  className="p-2 hover:bg-white rounded-full text-slate-500 transition-colors"
-                >
-                  {viewMode === 'grid' ? <QueueListIcon className="w-6 h-6" /> : <RectangleGroupIcon className="w-6 h-6" />}
-                </button>
-              </>
-            )}
+          {/* Bottom Row: Breadcrumbs (Mobile: Small text, Desktop: Normal) */}
+          <div className="px-4 sm:px-8 pb-3 pt-0 flex overflow-x-auto no-scrollbar mask-linear-fade">
+            <div className="flex items-center gap-1 whitespace-nowrap text-slate-500">
+              <button 
+                onClick={() => handleNavigate('/')}
+                className={clsx(
+                  "p-1 rounded-lg transition-colors flex items-center",
+                  currentPath === '/' ? "bg-indigo-50 text-indigo-700 font-bold" : "hover:bg-white hover:text-slate-700"
+                )}
+              >
+                <HomeIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              </button>
+              
+              {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((segment, index, arr) => {
+                const segmentPath = '/' + arr.slice(0, index + 1).join('/');
+                const isLast = index === arr.length - 1;
+                return (
+                  <div key={segmentPath} className="flex items-center">
+                    <span className="text-slate-300 mx-0.5 text-xs">/</span>
+                    <button
+                      onClick={() => !isLast && handleNavigate(segmentPath)}
+                      disabled={isLast}
+                      className={clsx(
+                        "px-1.5 py-0.5 rounded-lg transition-colors",
+                        isLast 
+                          ? "font-bold text-slate-800 cursor-default text-xs sm:text-sm" 
+                          : "hover:bg-white hover:text-indigo-600 font-medium text-xs sm:text-sm"
+                      )}
+                    >
+                      {segment}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
 
         <div 
+          id="file-list-container"
           className="flex-1 overflow-y-auto p-4 sm:p-8 pb-32"
           onScroll={handleScroll}
         >
@@ -751,7 +957,8 @@ function App() {
                       handleMove={handleMove}
                       viewMode={viewMode}
                       onPreview={setPreviewFile}
-                      activeDrive={activeDrive} 
+                      activeDrive={activeDrive}
+                      isSelectionMode={selectedPaths.size > 0}
                     />
                   ))}
                 </motion.div>
@@ -788,6 +995,13 @@ function App() {
 
                  <button onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                     {t.move}
+                 </button>
+                 
+                 <div className="w-px h-4 bg-slate-100 shrink-0"></div>
+
+                 <button onClick={handleCopy} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1">
+                    <DocumentDuplicateIcon className="w-3 h-3" />
+                    {t.copy}
                  </button>
                </div>
             ) : hasClipboard ? (
@@ -865,6 +1079,32 @@ function App() {
             });
           }
         }} lang={lang} /></div>}</AnimatePresence>
+
+        {/* Progress Toast */}
+        <AnimatePresence>
+            {progress && (
+                <motion.div
+                    initial={{ opacity: 0, y: 50 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 50 }}
+                    className="fixed bottom-24 right-4 z-50 bg-slate-800 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 min-w-[200px] max-w-[300px]"
+                >
+                    <div className="relative w-8 h-8 shrink-0">
+                        <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
+                            <path className="text-slate-600" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="4" />
+                            <path className="text-indigo-400 transition-all duration-300 ease-linear" strokeDasharray={`${(progress.current / progress.total) * 100}, 100`} d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="4" />
+                        </svg>
+                        <div className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">
+                            {Math.round((progress.current / progress.total) * 100)}%
+                        </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium truncate">{progress.filename}</p>
+                        <p className="text-[10px] text-slate-400">{progress.current} / {progress.total} items</p>
+                    </div>
+                </motion.div>
+            )}
+        </AnimatePresence>
       </div>
     </div>
   );

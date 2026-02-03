@@ -15,46 +15,293 @@ if (typeof window !== 'undefined') {
     window.global = window.global || window; 
 }
 
-// --- Custom Native Request Handler for WebDAV ---
-// This bypasses CapacitorHttp (which breaks PROPFIND) and uses our Native OkHttp plugin
-const customNativeRequest = async (config) => {
-    try {
+// --- Custom Native WebDAV Client (Bypasses CORS & CapacitorHttp) ---
+class NativeWebDAVClient {
+    constructor(config) {
+        // Normalize URL: remove ALL trailing slashes
+        this.url = config.url.replace(/\/+$/, ''); 
+        
+        // Extract the base path from the URL (e.g. "https://host/dav" -> "/dav")
+        try {
+            const urlObj = new URL(this.url);
+            this.origin = urlObj.origin; // https://host
+            this.basePath = urlObj.pathname.replace(/\/+$/, ''); // /dav
+            if (this.basePath === '/') this.basePath = '';
+        } catch (e) {
+            this.origin = this.url;
+            this.basePath = '';
+        }
+
+        this.username = config.username;
+        this.password = config.password;
+        const creds = `${this.username}:${this.password}`;
+        this.authHeader = 'Basic ' + btoa(encodeURIComponent(creds).replace(/%([0-9A-F]{2})/g,
+            function toSolidBytes(match, p1) {
+                return String.fromCharCode('0x' + p1);
+        }));
+    }
+
+    _resolveUrl(path) {
+        // If path is empty or root, return base URL
+        if (!path || path === '/') return this.url + '/';
+
+        // Ensure path starts with /
+        const cleanPath = path.startsWith('/') ? path : '/' + path;
+        
+        // Helper to encode path segments but keep slashes
+        // However, input 'path' from webdav lib (or our UI) is usually NOT encoded
+        // But if it IS encoded, we shouldn't encode again.
+        // Simple heuristic: decode it first, then encode.
+        const encodedPath = cleanPath.split('/').map(p => encodeURIComponent(decodeURIComponent(p))).join('/');
+
+        // Check if path already starts with our base path (e.g. /dav/folder1)
+        if (this.basePath && cleanPath.startsWith(this.basePath)) {
+             // Re-encode the base path part too if needed? 
+             // Ideally we just construct full URL.
+             // Let's assume input 'path' is human-readable (not encoded).
+             
+             // If input was absolute path matching basepath
+             if (cleanPath === this.basePath || cleanPath === this.basePath + '/') {
+                 return this.url + '/';
+             }
+             
+             // It's tricky because cleanPath might be /dav/中文
+             // We want https://host/dav/%E4%B8%AD%E6%96%87
+             
+             // If cleanPath starts with basePath, strip basePath and append to url
+             if (cleanPath.startsWith(this.basePath)) {
+                 const relPath = cleanPath.substring(this.basePath.length);
+                 const encodedRel = relPath.split('/').map(p => encodeURIComponent(decodeURIComponent(p))).join('/');
+                 return this.url + encodedRel;
+             }
+        }
+
+        // Relative path case
+        // encode the path parts
+        const encodedRelative = cleanPath.split('/').map(p => encodeURIComponent(decodeURIComponent(p))).join('/');
+        return this.url + encodedRelative;
+    }
+
+    async putFileContents(path, content) {
+        // content is expected to be Base64 string if it's binary data
+        await this._request('PUT', path, {
+             data: content,
+             headers: { 'Content-Type': 'application/octet-stream' },
+             bodyIsBase64: true // Tell native plugin to decode
+        });
+    }
+
+    // Update _request to pass bodyIsBase64
+    async _request(method, path, options = {}) {
+        const fullUrl = this._resolveUrl(path);
+        const headers = {
+            'Authorization': this.authHeader,
+            ...options.headers
+        };
+
+        console.log(`[NativeWebDAV] ${method} ${fullUrl} (Path: ${path})`);
+
         const res = await WebDavNative.request({
-            url: config.url,
-            method: config.method,
-            headers: config.headers,
-            body: config.data // webdav lib passes body as 'data'
+            url: fullUrl,
+            method: method,
+            headers: headers,
+            body: options.data || '',
+            bodyIsBase64: !!options.bodyIsBase64,
+            responseType: options.responseType || 'text'
+        });
+
+        if (res.status >= 400) {
+            const err = new Error(`WebDAV Error: ${res.status}`);
+            err.response = { status: res.status, data: res.data };
+            throw err;
+        }
+        return res;
+    }
+
+    async getDirectoryContents(path) {
+        // Ensure directory path ends with slash for PROPFIND (good practice)
+        // But _request handles resolution.
+        const res = await this._request('PROPFIND', path, {
+            headers: { 'Depth': '1', 'Content-Type': 'application/xml' }
         });
         
-        // Adapt response to what axios/webdav expects
-        return {
-            status: res.status,
-            statusText: res.status === 200 ? 'OK' : 'Status ' + res.status,
-            headers: {}, // TODO: Pass headers back if needed
-            data: res.data,
-            config: config
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(res.data, "text/xml");
+        
+        // Helper to find elements regardless of namespace prefix (dav:response, d:response, or just response)
+        const getEls = (parent, tagName) => {
+            const list = [];
+            for (let i = 0; i < parent.children.length; i++) {
+                const node = parent.children[i];
+                if (node.localName === tagName) list.push(node);
+            }
+            return list;
         };
-    } catch (err) {
-        console.error('[WebDavNative] Request Failed:', err);
-        throw err;
+        const getEl = (parent, tagName) => getEls(parent, tagName)[0];
+        const getText = (parent, tagName) => {
+            const el = getEl(parent, tagName);
+            return el ? el.textContent : '';
+        };
+
+        // Find <response> elements (usually under <multistatus>)
+        let responses = [];
+        const multiStatus = getEl(xmlDoc, 'multistatus') || xmlDoc.documentElement;
+        if (multiStatus) responses = getEls(multiStatus, 'response');
+        
+        const items = [];
+        for (const resp of responses) {
+            const href = getText(resp, 'href');
+            const propstat = getEl(resp, 'propstat');
+            if (!propstat) continue;
+            const prop = getEl(propstat, 'prop');
+            if (!prop) continue;
+            
+            const resType = getEl(prop, 'resourcetype');
+            const isDir = resType && getEl(resType, 'collection') !== undefined;
+            
+            const size = parseInt(getText(prop, 'getcontentlength')) || 0;
+            const lastMod = getText(prop, 'getlastmodified');
+
+            // Extract basename
+            const decodedHref = decodeURIComponent(href).replace(/\/$/, '');
+            const basename = decodedHref.split('/').pop();
+            
+            items.push({
+                basename: basename || '', 
+                filename: decodeURIComponent(href), 
+                type: isDir ? 'directory' : 'file',
+                size: size,
+                lastmod: lastMod,
+                mime: isDir ? null : 'application/octet-stream'
+            });
+        }
+        
+        // Filter out the requested directory itself
+        // We resolve the requested path to its absolute href form to compare
+        
+        // Construct the expected href for the requested path
+        // If path is "/", expected href is basePath/
+        let reqHref = this._resolveUrl(path).replace(this.origin, '');
+        // Normalize: ensure it ends with / for directory comparison
+        if (!reqHref.endsWith('/')) reqHref += '/';
+        // Normalize: decode URI to compare with our decoded item filenames
+        reqHref = decodeURIComponent(reqHref);
+        
+        return items.filter(item => {
+             // item.filename is already decoded in previous loop
+             let itemHref = item.filename;
+             if (item.type === 'directory' && !itemHref.endsWith('/')) itemHref += '/';
+             
+             // Compare with requested href (case sensitive? usually yes)
+             if (itemHref === reqHref) return false;
+             
+             return true;
+        });
     }
-};
+
+    async createDirectory(path) {
+        await this._request('MKCOL', path);
+    }
+
+    async deleteFile(path) {
+        await this._request('DELETE', path);
+    }
+
+    async moveFile(oldPath, newPath) {
+        // Destination header must be full URL
+        const destUrl = this._resolveUrl(newPath);
+        await this._request('MOVE', oldPath, {
+            headers: { 'Destination': destUrl, 'Overwrite': 'T' }
+        });
+    }
+    
+    async putFileContents(path, content) {
+        await this._request('PUT', path, {
+             data: content.toString(),
+             headers: { 'Content-Type': 'application/octet-stream' },
+             bodyIsBase64: true 
+        });
+    }
+
+    async getFileContents(path, options = {}) {
+        const res = await this._request('GET', path, {
+            ...options,
+            responseType: options.format === 'binary' ? 'base64' : 'text'
+        });
+        return res.data; // Base64 string if format is binary
+    }
+
+    async getQuota() {
+        try {
+            const res = await this._request('PROPFIND', '/', {
+                headers: { 
+                    'Depth': '0', 
+                    'Content-Type': 'application/xml',
+                    // Request specific quota properties
+                    // Some servers need explicit body to return quota
+                },
+                data: `<?xml version="1.0" encoding="utf-8" ?>
+                    <D:propfind xmlns:D="DAV:">
+                        <D:prop>
+                            <D:quota-available-bytes/>
+                            <D:quota-used-bytes/>
+                        </D:prop>
+                    </D:propfind>`
+            });
+
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(res.data, "text/xml");
+            
+            const getText = (tagName) => {
+                const els = xmlDoc.getElementsByTagName(tagName);
+                if (els.length === 0) {
+                    // Try with namespace prefix 'D:' or 'd:' if simple tag fail
+                    const elsNS = xmlDoc.getElementsByTagNameNS("DAV:", tagName);
+                    return elsNS.length > 0 ? elsNS[0].textContent : null;
+                }
+                return els[0].textContent;
+            };
+            
+            // Try to find quota props deeply
+            // They might be namespaced like <D:quota-used-bytes>
+            
+            // Helper to search text content of a localName ignoring namespace
+            const findVal = (name) => {
+                const all = xmlDoc.getElementsByTagName("*");
+                for (let i=0; i<all.length; i++) {
+                    if (all[i].localName === name) return all[i].textContent;
+                }
+                return null;
+            }
+
+            const used = parseInt(findVal('quota-used-bytes')) || 0;
+            const available = parseInt(findVal('quota-available-bytes')) || 0;
+            
+            // If available is huge or missing, server might not report it correctly
+            if (used || available) {
+                return { used, available, total: used + available };
+            }
+            return null;
+        } catch (e) {
+            console.warn('[WebDAV] Failed to get quota:', e);
+            return null;
+        }
+    }
+}
 
 // --- Helper: Get WebDAV Client ---
 const getWebDAVClient = (driveConfig) => {
     console.log(`[WebDAV] Creating client for: ${driveConfig.url}`);
     
-    const clientConfig = {
-        username: driveConfig.username,
-        password: driveConfig.password
-    };
-
-    // If on Mobile (Native), inject custom request handler
+    // If on Mobile (Native), use our Custom Native Client
     if (Capacitor.isNativePlatform()) {
-        clientConfig.customRequest = customNativeRequest;
+        return new NativeWebDAVClient(driveConfig);
     }
 
-    return createClient(driveConfig.url, clientConfig);
+    return createClient(driveConfig.url, {
+        username: driveConfig.username,
+        password: driveConfig.password
+    });
 };
 
 // --- Helper: Normalize Native File Object ---
@@ -150,14 +397,24 @@ const NativeAPI = {
       try {
         const permStatus = await Filesystem.requestPermissions();
         console.log('[Native] Permission Status:', permStatus);
+        
+        // Request MANAGE_EXTERNAL_STORAGE for Android 11+
+        if (Capacitor.getPlatform() === 'android') {
+             try {
+                 await WebDavNative.requestManageStoragePermission();
+             } catch (e) { console.warn('Failed to request manage storage', e); }
+        }
       } catch (e) {
         console.warn('[Native] Failed to request permissions:', e);
       }
 
-      console.log(`[Native] Listing files in ${Directory.Documents} at path: ${reqPath}`);
+      // Use ExternalStorage to see root of /storage/emulated/0
+      const targetDir = Directory.ExternalStorage; 
+
+      console.log(`[Native] Listing files in ${targetDir} at path: ${reqPath}`);
       const res = await Filesystem.readdir({
         path: reqPath,
-        directory: Directory.Documents
+        directory: targetDir
       });
       console.log(`[Native] Found ${res.files.length} items.`);
       
@@ -179,7 +436,7 @@ const NativeAPI = {
     }
     await Filesystem.mkdir({
       path: path,
-      directory: Directory.Documents,
+      directory: Directory.ExternalStorage,
       recursive: true // Like ensureDir
     });
   },
@@ -195,7 +452,7 @@ const NativeAPI = {
     await Promise.all(items.map(itemPath => 
       Filesystem.deleteFile({
         path: itemPath,
-        directory: Directory.Documents
+        directory: Directory.ExternalStorage
       })
     ));
   },
@@ -224,7 +481,7 @@ const NativeAPI = {
       await Filesystem.rename({
           from: oldPath,
           to: newPath,
-          directory: Directory.Documents
+          directory: Directory.ExternalStorage
       });
   },
 
@@ -240,11 +497,128 @@ const NativeAPI = {
         }));
         return;
       }
-      // Not easily implemented without full path logic, skip for now or use copy+delete
-      throw new Error("Move not fully implemented in Native mode prototype");
+      
+      // Implement Local Move
+      await Promise.all(items.map(async itemPath => {
+          const fileName = itemPath.split('/').pop();
+          // Construct destination path
+          // Destination is a folder path like /Download
+          // New path should be /Download/fileName
+          const destPath = (destination === '/' ? '' : destination) + '/' + fileName;
+          
+          if (itemPath !== destPath) {
+              await Filesystem.rename({
+                  from: itemPath,
+                  to: destPath,
+                  directory: Directory.ExternalStorage,
+                  toDirectory: Directory.ExternalStorage
+              });
+          }
+      }));
   },
 
-  uploadFiles: async (path, files, driveId) => {
+  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress) => {
+      console.log(`[CrossDrive] Transferring ${items.length} items from ${sourceDriveId} to ${destDriveId} (Move: ${isMove})`);
+      
+      let transferredBytes = 0;
+      const startTime = Date.now();
+
+      // ... (readContent and writeContent helpers remain same) ...
+      // Helper to read content
+      const readContent = async (path, driveId) => {
+          if (driveId === 'local') {
+              const res = await Filesystem.readFile({
+                  path: path,
+                  directory: Directory.ExternalStorage
+              });
+              return res.data; // Base64 string
+          } else {
+              const drives = await NativeAPI.getDrives();
+              const config = drives.find(d => d.id === driveId);
+              const client = getWebDAVClient(config);
+              
+              // Get Base64 content
+              const base64Data = await client.getFileContents(path, { format: 'binary' });
+              return base64Data;
+          }
+      };
+
+      // Helper to write content
+      const writeContent = async (path, content, driveId) => {
+          const fileName = path.split('/').pop();
+          const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
+          const targetPath = cleanDest + '/' + fileName;
+
+          if (driveId === 'local') {
+              await Filesystem.writeFile({
+                  path: targetPath,
+                  data: content,
+                  directory: Directory.ExternalStorage,
+                  recursive: true // Ensure folders exist
+              });
+          } else {
+              const drives = await NativeAPI.getDrives();
+              const config = drives.find(d => d.id === driveId);
+              const client = getWebDAVClient(config);
+              // Ensure we pass bodyIsBase64: true
+              await client.putFileContents(targetPath, content);
+          }
+      };
+
+      // Execution Loop
+      for (let i = 0; i < items.length; i++) {
+          const itemPath = items[i];
+          const itemName = itemPath.split('/').pop();
+          // Report start of item (speed keeps previous value or 0)
+          const currentSpeed = (transferredBytes > 0 && (Date.now() - startTime) > 0) 
+              ? transferredBytes / ((Date.now() - startTime) / 1000) 
+              : 0;
+          if (onProgress) onProgress(i + 1, items.length, itemName, currentSpeed);
+
+          try {
+              console.log(`[CrossDrive] 1. Reading ${itemPath}`);
+              // 1. Read
+              const content = await readContent(itemPath, sourceDriveId);
+              
+              // 2. Write
+              console.log(`[CrossDrive] 2. Writing to ${destDriveId}`);
+              await writeContent(itemPath, content, destDriveId);
+              
+              // Update stats (content is Base64, size is approx * 0.75)
+              transferredBytes += Math.round(content.length * 0.75);
+              
+              // 3. Delete Source (Only if Move)
+              if (isMove) {
+                  console.log(`[CrossDrive] 3. Deleting source ${itemPath}`);
+                  if (sourceDriveId === 'local') {
+                      await Filesystem.deleteFile({ path: itemPath, directory: Directory.ExternalStorage });
+                  } else {
+                      const drives = await NativeAPI.getDrives();
+                      const config = drives.find(d => d.id === sourceDriveId);
+                      const client = getWebDAVClient(config);
+                      await client.deleteFile(itemPath);
+                  }
+              }
+              console.log(`[CrossDrive] Transfer complete for ${itemPath}`);
+          } catch (e) {
+              console.error(`[CrossDrive] Failed to transfer ${itemPath}:`, e);
+              throw e;
+          }
+      }
+  },
+
+  uploadFiles: async (path, files, driveId, onProgress) => {
+    let transferredBytes = 0;
+    const startTime = Date.now();
+
+    const reportProgress = (index, filename, bytes) => {
+        if (!onProgress) return;
+        transferredBytes += bytes;
+        const elapsed = (Date.now() - startTime) / 1000; // seconds
+        const speed = elapsed > 0 ? transferredBytes / elapsed : 0; // bytes/s
+        onProgress(index, files.length, filename, speed);
+    };
+
     // Handling File Objects in Native is tricky. 
     // Usually involves reading file into base64 and writing.
     if (driveId !== 'local') {
@@ -252,20 +626,40 @@ const NativeAPI = {
         const config = drives.find(d => d.id === driveId);
         const client = getWebDAVClient(config);
 
-        await Promise.all(files.map(async file => {
+        await Promise.all(files.map(async (file, index) => {
+            if (onProgress) onProgress(index + 1, files.length, file.name, 0); // Start
             const arrayBuffer = await file.arrayBuffer();
             const buffer = Buffer.from(arrayBuffer);
             const remotePath = `${path}/${file.name}`.replace('//', '/');
             await client.putFileContents(remotePath, buffer);
+            reportProgress(index + 1, file.name, file.size);
         }));
         return;
     }
 
-    for (const file of files) {
-       // Quick and dirty: Read as DataURL (if small) or need a plugin to handle blobs
-       // This is a complex part often requiring a specific 'FilePicker' plugin instead of standard HTML input
-       console.warn("Direct upload in Native mode requires FilePicker plugin integration.");
-    }
+    // Local Upload
+    await Promise.all(files.map(async (file, index) => {
+       if (onProgress) onProgress(index + 1, files.length, file.name, 0);
+       const destPath = (path === '/' ? '' : path) + '/' + file.name;
+       
+       // Convert File to Base64
+       const toBase64 = (file) => new Promise((resolve, reject) => {
+           const reader = new FileReader();
+           reader.readAsDataURL(file);
+           reader.onload = () => resolve(reader.result.split(',')[1]); // Remove data:mime;base64,
+           reader.onerror = error => reject(error);
+       });
+
+       const data = await toBase64(file);
+       
+       await Filesystem.writeFile({
+           path: destPath,
+           data: data,
+           directory: Directory.ExternalStorage,
+           recursive: true 
+       });
+       reportProgress(index + 1, file.name, file.size);
+    }));
   },
 
   getDrives: async () => {
@@ -277,14 +671,46 @@ const NativeAPI = {
     if (!drives.find(d => d.id === 'local')) {
       drives.unshift({ id: 'local', name: 'On My Phone', type: 'local', path: '/' });
     }
-    return drives;
+
+    // Fetch Quota for WebDAV drives in parallel
+    const drivesWithQuota = await Promise.all(drives.map(async (drive) => {
+        if (drive.type === 'local') {
+            try {
+                const info = await WebDavNative.getStorageInfo();
+                return { ...drive, quota: { used: info.used, total: info.total } };
+            } catch (e) {
+                console.warn('[Native] Failed to get storage info:', e);
+                return drive;
+            }
+        }
+        
+        // WebDAV
+        try {
+            const client = getWebDAVClient(drive);
+            // Timeout promise 2s
+            const quota = await Promise.race([
+                client.getQuota(),
+                new Promise(resolve => setTimeout(() => resolve(null), 2000))
+            ]);
+            
+            if (quota) {
+                return { ...drive, quota: { used: quota.used, total: quota.total } };
+            }
+        } catch (e) {
+            // Ignore quota errors
+        }
+        return drive;
+    }));
+
+    return drivesWithQuota;
   },
 
   addDrive: async (drive) => {
     const drives = await NativeAPI.getDrives();
-    drives.push({ ...drive, id: crypto.randomUUID() });
+    const newDrive = { ...drive, id: crypto.randomUUID() };
+    drives.push(newDrive);
     await Preferences.set({ key: 'drives', value: JSON.stringify(drives) });
-    return drive;
+    return newDrive;
   },
 
   updateDrive: async (id, data) => {
@@ -333,7 +759,7 @@ const NativeAPI = {
       try {
           const file = await Filesystem.readFile({
               path: path,
-              directory: Directory.Documents
+              directory: Directory.ExternalStorage
           });
           // Guess mime type roughly or assume generic
           // Filesystem returns 'data' which is base64
@@ -351,7 +777,7 @@ const NativeAPI = {
       }
       const file = await Filesystem.readFile({
           path: path,
-          directory: Directory.Documents,
+          directory: Directory.ExternalStorage,
           encoding: Encoding.UTF8
       });
       return file.data;

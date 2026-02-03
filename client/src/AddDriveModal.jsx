@@ -64,15 +64,15 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
       onClose();
     } catch (err) {
       console.error(err);
+      const msg = err.response?.data?.error || err.message || JSON.stringify(err);
       if (err.response?.status === 409) {
-        const msg = err.response?.data?.error || '';
         if (msg.includes('Name')) {
           alert(t.nameTaken);
         } else {
           alert(t.driveAccountAdded);
         }
       } else {
-        alert(t.failedToAdd + ': ' + (err.message));
+        alert(`${t.failedToAdd}: ${msg}`);
       }
     } finally {
       setLoading(false);
