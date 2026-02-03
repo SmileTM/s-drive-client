@@ -600,9 +600,9 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
             for (const file of uploadedFiles) {
                 try {
                     console.log(`[Upload] Transferring to WebDAV: ${file.filename}`);
-                    // Strip leading slash to avoid double slash with base URL
-                    const cleanReqPath = reqPath.replace(/^\/+/, '');
-                    const remotePath = path.posix.join(cleanReqPath, file.filename);
+                    // Ensure remote path is absolute (starts with /)
+                    // path.posix.join handles slash deduplication
+                    const remotePath = path.posix.join('/', reqPath, file.filename);
                     
                     const fileBuffer = await fs.readFile(file.path);
                     await client.putFileContents(remotePath, fileBuffer);
