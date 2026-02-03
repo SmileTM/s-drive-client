@@ -189,30 +189,38 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
             )}
           </div>
         )}
+      </div>
 
-        {/* Download Button (Overlay for supported types) - Bottom Right */}
-        {(isImage || isHeic || isVideo || isAudio || isPDF || isText) && url && (
+      {/* Unified Bottom Controls - Centered for Mobile Ergonomics */}
+      <div 
+        className="fixed left-1/2 -translate-x-1/2 flex items-center gap-6 z-50 px-6 py-3 rounded-full bg-white/10 backdrop-blur-md border border-white/10 shadow-2xl"
+        style={{ bottom: 'calc(2rem + env(safe-area-inset-bottom))' }}
+      >
+        {/* Close Button */}
+        <button 
+          onClick={onClose}
+          className="flex items-center justify-center p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all active:scale-95"
+          title="Close"
+        >
+          <XMarkIcon className="w-6 h-6" />
+        </button>
+
+        {/* Divider */}
+        <div className="w-px h-6 bg-white/20" />
+
+        {/* Download Button */}
+        {url && (
           <a 
             href={url} 
             download={file.name}
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-0 right-0 bg-white/10 hover:bg-white/20 text-white p-3 rounded-full backdrop-blur-md transition-colors"
+            className="flex items-center justify-center p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all active:scale-95"
             title="Download"
           >
             <ArrowDownTrayIcon className="w-6 h-6" />
           </a>
         )}
-
       </div>
-
-      {/* Close Button - Bottom Center (Easy Reach) */}
-      <button 
-        onClick={onClose}
-        className="absolute bottom-8 left-1/2 -translate-x-1/2 p-4 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors z-50 backdrop-blur-md border border-white/10 shadow-lg"
-        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
-      >
-        <XMarkIcon className="w-8 h-8" />
-      </button>
 
     </div>
   );
