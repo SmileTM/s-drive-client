@@ -28,6 +28,8 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
     },
+    titleBarStyle: 'hidden',
+    trafficLightPosition: { x: 24, y: 24 }, // Position inside the floating sidebar
     autoHideMenuBar: true,
     icon: path.join(__dirname, '../client/assets/icon.png')
   });
