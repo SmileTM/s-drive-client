@@ -96,28 +96,19 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" onClick={onClose}>
       
-      {/* Close Button */}
-      <button 
-        onClick={onClose}
-        className="absolute right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors z-50"
-        style={{ top: 'calc(1rem + env(safe-area-inset-top))' }}
-      >
-        <XMarkIcon className="w-6 h-6" />
-      </button>
-
       {/* Main Content Area */}
       <div 
-        className="relative max-w-5xl max-h-[90vh] w-full flex flex-col items-center justify-center"
+        className="relative max-w-5xl max-h-[85vh] w-full flex flex-col items-center justify-center pb-16"
         onClick={e => e.stopPropagation()} // Prevent closing when clicking content
       >
         
         {/* Preview Renderers */}
         {(isImage || isHeic) && url && (
-          <img src={url} alt={file.name} className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl" />
+          <img src={url} alt={file.name} className="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl" />
         )}
 
         {isVideo && url && (
-          <video src={url} controls autoPlay className="max-w-full max-h-[85vh] rounded-lg shadow-2xl bg-black" />
+          <video src={url} controls autoPlay className="max-w-full max-h-[80vh] rounded-lg shadow-2xl bg-black" />
         )}
 
         {isAudio && url && (
@@ -131,11 +122,11 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         )}
 
         {isPDF && url && (
-          <iframe src={url} className="w-full h-[85vh] bg-white rounded-lg shadow-2xl" title="PDF Preview" />
+          <iframe src={url} className="w-full h-[80vh] bg-white rounded-lg shadow-2xl" title="PDF Preview" />
         )}
 
         {isText && (
-          <div className="w-full h-[85vh] bg-white rounded-lg shadow-2xl overflow-auto p-4 font-mono text-sm text-slate-700 whitespace-pre-wrap">
+          <div className="w-full h-[80vh] bg-white rounded-lg shadow-2xl overflow-auto p-4 font-mono text-sm text-slate-700 whitespace-pre-wrap">
             {loading ? 'Loading...' : content}
           </div>
         )}
@@ -161,13 +152,13 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
           </div>
         )}
 
-        {/* Download Button (Overlay for supported types) */}
+        {/* Download Button (Overlay for supported types) - Bottom Right */}
         {(isImage || isHeic || isVideo || isAudio || isPDF || isText) && url && (
           <a 
             href={url} 
             download={file.name}
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-4 right-4 bg-white/10 hover:bg-white/20 text-white p-3 rounded-full backdrop-blur-md transition-colors"
+            className="absolute bottom-0 right-0 bg-white/10 hover:bg-white/20 text-white p-3 rounded-full backdrop-blur-md transition-colors"
             title="Download"
           >
             <ArrowDownTrayIcon className="w-6 h-6" />
@@ -175,6 +166,16 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         )}
 
       </div>
+
+      {/* Close Button - Bottom Center (Easy Reach) */}
+      <button 
+        onClick={onClose}
+        className="absolute bottom-8 left-1/2 -translate-x-1/2 p-4 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors z-50 backdrop-blur-md border border-white/10 shadow-lg"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+      >
+        <XMarkIcon className="w-8 h-8" />
+      </button>
+
     </div>
   );
 };
