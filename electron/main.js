@@ -23,52 +23,34 @@ function log(msg) {
 // ... (getPort and getLogContent functions remain the same)
 
 // IPC: Handle Native Drag Start
-ipcMain.on('ondragstart', (event, files, driveId) => {
+ipcMain.on('ondragstart', async (event, files, driveId) => {
     log(`[IPC] ondragstart: ${files.length} items from ${driveId}`);
     
     // Call Server to prepare paths (resolve local or download remote)
-    const req = net.request({
-        method: 'POST',
-        protocol: 'http:',
-        hostname: '127.0.0.1',
-        port: serverPort,
-        path: '/api/prepare-drag',
-        headers: {
-            'Content-Type': 'application/json'
-        }
-    });
-
-    req.on('response', (response) => {
-        let data = '';
-        response.on('data', (chunk) => { data += chunk; });
-        response.on('end', () => {
-            if (response.statusCode === 200) {
-                try {
-                    const result = JSON.parse(data);
-                    if (result.files && result.files.length > 0) {
-                        const iconPath = path.join(__dirname, '../client/assets/icon.png');
-                        log(`[Drag] Starting drag for: ${JSON.stringify(result.files)}`);
-                        event.sender.startDrag({
-                            file: result.files[0], // Primary file
-                            files: result.files,   // Multi-file support
-                            icon: iconPath
-                        });
-                    }
-                } catch (e) {
-                    log(`[Drag] Failed to parse response: ${e.message}`);
-                }
-            } else {
-                log(`[Drag] Server returned ${response.statusCode}`);
-            }
+    try {
+        const response = await fetch(`http://127.0.0.1:${serverPort}/api/prepare-drag`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: files, drive: driveId })
         });
-    });
 
-    req.on('error', (err) => {
-        log(`[Drag] Request failed: ${err.message}`);
-    });
-
-    req.write(JSON.stringify({ items: files, drive: driveId }));
-    req.end();
+        if (response.ok) {
+            const result = await response.json();
+            if (result.files && result.files.length > 0) {
+                const iconPath = path.join(__dirname, '../client/assets/icon.png');
+                log(`[Drag] Starting drag for: ${JSON.stringify(result.files)}`);
+                event.sender.startDrag({
+                    file: result.files[0], // Primary file
+                    files: result.files,   // Multi-file support
+                    icon: iconPath
+                });
+            }
+        } else {
+            log(`[Drag] Server returned ${response.status}`);
+        }
+    } catch (e) {
+        log(`[Drag] Request failed: ${e.message}`);
+    }
 });
 
 // Helper to find a free port
