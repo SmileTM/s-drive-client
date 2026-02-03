@@ -574,28 +574,29 @@ app.post('/api/prepare-drag', async (req, res) => {
                 }
             }
         } else {
-            // WebDAV: Download to Temp
+            // WebDAV: Download to Temp in Parallel
             const client = getWebDAVClient(config);
             const tempDir = path.join(os.tmpdir(), 'webdav-drag-cache');
             await fs.ensureDir(tempDir);
 
-            for (const itemPath of items) {
+            // Parallelize downloads
+            const downloadPromises = items.map(async (itemPath) => {
                 try {
                     const fileName = path.basename(itemPath);
                     const tempFilePath = path.join(tempDir, fileName);
                     
-                    // WebDAV path cleanup
-                    // itemPath from UI is like "/folder/img.png"
-                    // WebDAV lib expects "/folder/img.png" (absolute)
-                    
                     console.log(`[Drag] Downloading ${itemPath} to ${tempFilePath}`);
                     const content = await client.getFileContents(itemPath, { format: 'binary' });
                     await fs.writeFile(tempFilePath, content);
-                    resolvedFiles.push(tempFilePath);
+                    return tempFilePath;
                 } catch (e) {
                     console.error(`[Drag] Failed to download ${itemPath}:`, e.message);
+                    return null;
                 }
-            }
+            });
+
+            const results = await Promise.all(downloadPromises);
+            resolvedFiles.push(...results.filter(p => p !== null));
         }
 
         res.json({ files: resolvedFiles });
