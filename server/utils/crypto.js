@@ -15,6 +15,7 @@ if (!fs.existsSync(APP_DATA_DIR)) {
 }
 
 const SECRET_FILE = path.join(APP_DATA_DIR, '.secret.key');
+console.log('[Server] Crypto Key Path:', SECRET_FILE);
 const ALGORITHM = 'aes-256-cbc';
 
 // Ensure we have a persistent secret key
