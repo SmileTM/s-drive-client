@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
-import { App } from '@capacitor/app';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -82,24 +81,12 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
 
   // Handle Hardware Back Button (Android) and ESC key
   useEffect(() => {
-    let backHandler;
-
-    const setupBackListener = async () => {
-        // App.addListener intercepts the native back button event
-        // causing the app NOT to exit or navigate back in history if we handle it.
-        backHandler = await App.addListener('backButton', (data) => {
-            onClose();
-        });
-    };
-    setupBackListener();
-
     const handleEsc = (e) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handleEsc);
     
     return () => {
-        if (backHandler) backHandler.remove();
         window.removeEventListener('keydown', handleEsc);
     };
   }, [onClose]);

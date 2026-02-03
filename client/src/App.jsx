@@ -324,6 +324,7 @@ function App() {
   const currentPathRef = useRef(currentPath);
   const fetchFilesRef = useRef(null); // fetchFiles is defined later
   const selectedPathsRef = useRef(selectedPaths);
+  const previewFileRef = useRef(previewFile);
 
   // Note: specific useEffects to update these refs are moved to bottom of component to avoid TDZ
 
@@ -332,7 +333,9 @@ function App() {
   useEffect(() => {
     // Hardware Back Button
     const backListener = CapApp.addListener('backButton', ({ canGoBack }) => {
-      if (isSidebarOpenRef.current) {
+      if (previewFileRef.current) {
+        setPreviewFile(null);
+      } else if (isSidebarOpenRef.current) {
         setIsSidebarOpenRef.current(false);
       } else if (selectedPathsRef.current.size > 0) {
         setSelectedPaths(new Set());
@@ -667,6 +670,7 @@ function App() {
   useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
   useEffect(() => { fetchFilesRef.current = fetchFiles; }, [fetchFiles]);
   useEffect(() => { selectedPathsRef.current = selectedPaths; }, [selectedPaths]);
+  useEffect(() => { previewFileRef.current = previewFile; }, [previewFile]);
 
     return (
 
