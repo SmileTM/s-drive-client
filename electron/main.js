@@ -118,7 +118,7 @@ function createWindow() {
       devTools: true // Enable DevTools
     },
     titleBarStyle: 'hidden',
-    trafficLightPosition: { x: 18, y: 18 }, 
+    trafficLightPosition: { x: 10, y: 10 }, 
     autoHideMenuBar: true,
     icon: path.join(__dirname, '../client/assets/icon.png')
   });
