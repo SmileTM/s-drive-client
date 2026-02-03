@@ -1,14 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
+import { Document, Page, pdfjs } from 'react-pdf';
+import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
+import 'react-pdf/dist/esm/Page/TextLayer.css';
 import api from './api';
+
+// Configure PDF Worker
+// Standard way for Vite: use import meta url or CDN
+// Using CDN for simplicity and reliability in diverse build environments
+pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(false);
   const [url, setUrl] = useState('');
+  
+  // PDF State
+  const [numPages, setNumPages] = useState(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [pdfScale, setPdfScale] = useState(1.0);
 
   const fileType = file.type || '';
   const isHeic = fileType === 'image/heic' || fileType === 'image/heif' || /\.(heic|heif)$/i.test(file.name);
@@ -93,6 +106,11 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
     };
   }, [onClose]);
 
+  function onDocumentLoadSuccess({ numPages }) {
+    setNumPages(numPages);
+    setPageNumber(1);
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" onClick={onClose}>
       
@@ -122,7 +140,49 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         )}
 
         {isPDF && url && (
-          <iframe src={url} className="w-full h-[80vh] bg-white rounded-lg shadow-2xl" title="PDF Preview" />
+          <div className="relative w-full h-[80vh] bg-slate-100 rounded-lg shadow-2xl overflow-hidden flex flex-col items-center">
+            <div className="flex-1 overflow-auto w-full flex justify-center p-4">
+               <Document
+                  file={url}
+                  onLoadSuccess={onDocumentLoadSuccess}
+                  loading={<div className="text-slate-500 mt-10">Loading PDF...</div>}
+                  error={<div className="text-red-500 mt-10">Failed to load PDF.</div>}
+                  className="shadow-lg"
+                >
+                  <Page 
+                    pageNumber={pageNumber} 
+                    scale={pdfScale}
+                    width={window.innerWidth > 800 ? 800 : window.innerWidth - 60}
+                    renderTextLayer={false} 
+                    renderAnnotationLayer={false}
+                    className="bg-white"
+                  />
+                </Document>
+            </div>
+            
+            {/* PDF Controls */}
+            {numPages && (
+              <div className="bg-white/90 backdrop-blur shadow-lg border-t w-full p-3 flex items-center justify-between px-6 z-10">
+                <button 
+                  disabled={pageNumber <= 1}
+                  onClick={() => setPageNumber(p => p - 1)}
+                  className="p-2 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors"
+                >
+                  <ChevronLeftIcon className="w-6 h-6 text-slate-700" />
+                </button>
+                <span className="text-slate-700 font-medium">
+                  {pageNumber} / {numPages}
+                </span>
+                <button 
+                  disabled={pageNumber >= numPages}
+                  onClick={() => setPageNumber(p => p + 1)}
+                  className="p-2 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors"
+                >
+                  <ChevronRightIcon className="w-6 h-6 text-slate-700" />
+                </button>
+              </div>
+            )}
+          </div>
         )}
 
         {isText && (
