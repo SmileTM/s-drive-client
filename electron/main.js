@@ -42,11 +42,16 @@ ipcMain.on('ondragstart', async (event, files, driveId) => {
 
             if (absFiles.length > 0) {
                 log(`[Drag] Starting LOCAL drag for ${absFiles.length} files`);
-                event.sender.startDrag({
+                
+                const dragOptions = {
                     file: absFiles[0],
-                    files: absFiles, // macOS support
-                    icon: iconPath
-                });
+                    files: absFiles
+                };
+                if (fs.existsSync(iconPath)) {
+                    dragOptions.icon = iconPath;
+                }
+
+                event.sender.startDrag(dragOptions);
             }
         } catch (e) {
             log(`[Drag] Local resolution failed: ${e.message}`);
@@ -66,11 +71,18 @@ ipcMain.on('ondragstart', async (event, files, driveId) => {
             const result = await response.json();
             if (result.files && result.files.length > 0) {
                 log(`[Drag] Starting REMOTE drag for: ${JSON.stringify(result.files)}`);
-                event.sender.startDrag({
+                
+                const dragOptions = {
                     file: result.files[0],
-                    files: result.files,
-                    icon: iconPath
-                });
+                    files: result.files
+                };
+                if (fs.existsSync(iconPath)) {
+                    dragOptions.icon = iconPath;
+                } else {
+                    log(`[Drag] Warning: Icon not found at ${iconPath}`);
+                }
+
+                event.sender.startDrag(dragOptions);
             }
         } else {
             log(`[Drag] Server returned ${response.status}`);

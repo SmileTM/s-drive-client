@@ -25,6 +25,7 @@
       "electron/**/*",
       "server/**/*",
       "client/dist/**/*",
+      "client/assets/**/*",
       "package.json"
     ],
     "directories": {
