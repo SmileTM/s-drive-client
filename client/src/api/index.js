@@ -1,21 +1,60 @@
 import axios from 'axios';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Preferences } from '@capacitor/preferences';
 import { createClient } from 'webdav';
 import { Buffer } from 'buffer';
 
-// Polyfill Buffer for webdav library in browser environment if needed
+// --- Native Plugin Interface ---
+const WebDavNative = registerPlugin('WebDavNative');
+
+// --- Critical Polyfill for Mobile ---
+// Ensure Buffer is available globally
 if (typeof window !== 'undefined') {
     window.Buffer = window.Buffer || Buffer;
+    window.global = window.global || window; 
 }
+
+// --- Custom Native Request Handler for WebDAV ---
+// This bypasses CapacitorHttp (which breaks PROPFIND) and uses our Native OkHttp plugin
+const customNativeRequest = async (config) => {
+    try {
+        const res = await WebDavNative.request({
+            url: config.url,
+            method: config.method,
+            headers: config.headers,
+            body: config.data // webdav lib passes body as 'data'
+        });
+        
+        // Adapt response to what axios/webdav expects
+        return {
+            status: res.status,
+            statusText: res.status === 200 ? 'OK' : 'Status ' + res.status,
+            headers: {}, // TODO: Pass headers back if needed
+            data: res.data,
+            config: config
+        };
+    } catch (err) {
+        console.error('[WebDavNative] Request Failed:', err);
+        throw err;
+    }
+};
 
 // --- Helper: Get WebDAV Client ---
 const getWebDAVClient = (driveConfig) => {
-    return createClient(driveConfig.url, {
+    console.log(`[WebDAV] Creating client for: ${driveConfig.url}`);
+    
+    const clientConfig = {
         username: driveConfig.username,
         password: driveConfig.password
-    });
+    };
+
+    // If on Mobile (Native), inject custom request handler
+    if (Capacitor.isNativePlatform()) {
+        clientConfig.customRequest = customNativeRequest;
+    }
+
+    return createClient(driveConfig.url, clientConfig);
 };
 
 // --- Helper: Normalize Native File Object ---
@@ -105,17 +144,27 @@ const NativeAPI = {
     
     // Convert Web Path to Native Path
     // Native Root is usually 'Documents' or 'ExternalStorage'
-    // Here we map '/' to Directory.Documents
     
     try {
+      // Request permissions first
+      try {
+        const permStatus = await Filesystem.requestPermissions();
+        console.log('[Native] Permission Status:', permStatus);
+      } catch (e) {
+        console.warn('[Native] Failed to request permissions:', e);
+      }
+
+      console.log(`[Native] Listing files in ${Directory.Documents} at path: ${reqPath}`);
       const res = await Filesystem.readdir({
         path: reqPath,
         directory: Directory.Documents
       });
+      console.log(`[Native] Found ${res.files.length} items.`);
       
       return res.files.map(f => normalizeNativeFile(f, reqPath));
     } catch (e) {
-      console.error("Native Read Error:", e);
+      console.error("[Native] Read Error:", e);
+      // If we can't read root, maybe return empty or throw to show UI error
       return [];
     }
   },
@@ -248,8 +297,17 @@ const NativeAPI = {
   },
 
   testConnection: async (config) => {
-      const client = getWebDAVClient(config);
-      await client.getDirectoryContents('/'); 
+      console.log('[WebDAV] Testing connection...');
+      try {
+          const client = getWebDAVClient(config);
+          const items = await client.getDirectoryContents('/'); 
+          console.log(`[WebDAV] Success! Found ${items.length} items in root.`);
+      } catch (err) {
+          console.error('[WebDAV] Test Failed:', err);
+          // Log object details for debugging
+          if (err.response) console.error('[WebDAV] Response:', err.response);
+          throw err;
+      }
   },
 
   removeDrive: async (id) => {
