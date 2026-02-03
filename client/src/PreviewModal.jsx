@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
-import { App } from '@capacitor/app';
-import { Capacitor } from '@capacitor/core';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -81,36 +79,51 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
     }
   }, [file.path, drive, isText, isHeic]);
 
-  // Handle Hardware Back Button (Android) and ESC key
+  // Handle Browser History Back / Android Back Button
   useEffect(() => {
-    let backListener;
+    // Push a new history entry for the modal
+    window.history.pushState({ modal: true }, '', '#preview');
 
-    const setupBackListener = async () => {
-        if (Capacitor.isNativePlatform()) {
-            backListener = await App.addListener('backButton', () => {
-                onClose();
-            });
-        }
+    const handlePopState = () => {
+      // User pressed back button, history popped
+      onClose();
     };
-    setupBackListener();
+
+    window.addEventListener('popstate', handlePopState);
 
     const handleEsc = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+          // Determine if we need to pop history manually
+          if (window.location.hash === '#preview') {
+               window.history.back(); // This triggers popstate -> onClose
+          } else {
+               onClose();
+          }
+      }
     };
     window.addEventListener('keydown', handleEsc);
     
     return () => {
+        window.removeEventListener('popstate', handlePopState);
         window.removeEventListener('keydown', handleEsc);
-        if (backListener) backListener.remove();
+        
+        // If unmounting but hash is still present (e.g. manual close button clicked), remove it
+        if (window.location.hash === '#preview') {
+             window.history.back();
+        }
     };
-  }, [onClose]);
+  }, []); // Empty dependency array: run once on mount
 
   function onDocumentLoadSuccess({ numPages }) {
     setNumPages(numPages);
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" onClick={() => {
+        // Handle click outside (like Esc)
+        if (window.location.hash === '#preview') window.history.back();
+        else onClose();
+    }}>
       
       {/* Main Content Area */}
       <div 
