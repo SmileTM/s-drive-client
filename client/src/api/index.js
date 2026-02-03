@@ -339,6 +339,20 @@ const ServerAPI = {
   moveItems: async (items, destination, driveId) => {
     await axios.post('/api/move', { items, destination, drive: driveId });
   },
+  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress) => {
+      for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const fileName = item.split('/').pop();
+          if (onProgress) onProgress(i + 1, items.length, fileName);
+          await axios.post('/api/transfer', {
+              items: [item],
+              sourceDrive: sourceDriveId,
+              destDrive: destDriveId,
+              destPath: destPath,
+              move: isMove
+          });
+      }
+  },
   uploadFiles: async (path, files, driveId) => {
     const formData = new FormData();
     files.forEach(f => formData.append('files', f));

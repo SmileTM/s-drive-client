@@ -453,6 +453,64 @@ app.post('/api/move', async (req, res) => {
     }
 });
 
+const { pipeline } = require('stream/promises');
+
+// POST /api/transfer (Cross-drive copy/move)
+app.post('/api/transfer', async (req, res) => {
+    try {
+        const { items, sourceDrive, destDrive, destPath, move } = req.body;
+        if (!items || !sourceDrive || !destDrive) return res.status(400).json({ error: 'Missing parameters' });
+
+        const srcConfig = await getDriveConfig(sourceDrive);
+        const dstConfig = await getDriveConfig(destDrive);
+
+        for (const itemPath of items) {
+            const fileName = path.basename(itemPath);
+            // Construct target path (WebDAV is posix, Local depends on OS but internal logic uses /)
+            // We use path.posix.join for consistency in URL/Virtual paths
+            const targetPath = path.posix.join(destPath, fileName);
+
+            // 1. Get Read Stream
+            let readStream;
+            if (srcConfig.type === 'local') {
+                const absPath = resolveSafePath(itemPath);
+                if (!fs.existsSync(absPath)) continue; // Skip missing
+                readStream = fs.createReadStream(absPath);
+            } else {
+                const client = getWebDAVClient(srcConfig);
+                readStream = client.createReadStream(itemPath);
+            }
+
+            // 2. Write Stream
+            if (dstConfig.type === 'local') {
+                const absDestDir = resolveSafePath(destPath);
+                await fs.ensureDir(absDestDir);
+                const absDestFile = path.join(absDestDir, fileName);
+                const writeStream = fs.createWriteStream(absDestFile);
+                await pipeline(readStream, writeStream);
+            } else {
+                const client = getWebDAVClient(dstConfig);
+                // webdav lib putFileContents accepts stream
+                await client.putFileContents(targetPath, readStream);
+            }
+
+            // 3. Delete Source if Move
+            if (move) {
+                if (srcConfig.type === 'local') {
+                    await fs.remove(resolveSafePath(itemPath));
+                } else {
+                    const client = getWebDAVClient(srcConfig);
+                    await client.deleteFile(itemPath);
+                }
+            }
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[Transfer Error]', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // POST /api/rename
 app.post('/api/rename', async (req, res) => {
     try {
