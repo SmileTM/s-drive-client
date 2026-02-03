@@ -85,8 +85,7 @@ jobs:
       - name: Build Electron App
         # Assuming build targets linux by default on ubuntu-latest. 
         # Configure targets in package.json or command line if needed (e.g. --linux --mac --win)
-        run: npm run electron:build 
-
+        run: npm run electron:build -- -p never
       - name: Upload Electron Artifacts
         uses: actions/upload-artifact@v4
         with:
