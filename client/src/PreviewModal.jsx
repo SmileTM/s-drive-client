@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
+import { App } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import api from './api';
 
 const PreviewModal = ({ file, onClose, drive = 'local' }) => {
@@ -67,13 +69,28 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
     }
   }, [file.path, drive, isText, isHeic]);
 
-  // Handle ESC key
+  // Handle Hardware Back Button (Android) and ESC key
   useEffect(() => {
+    let backListener;
+
+    const setupBackListener = async () => {
+        if (Capacitor.isNativePlatform()) {
+            backListener = await App.addListener('backButton', () => {
+                onClose();
+            });
+        }
+    };
+    setupBackListener();
+
     const handleEsc = (e) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
+    
+    return () => {
+        window.removeEventListener('keydown', handleEsc);
+        if (backListener) backListener.remove();
+    };
   }, [onClose]);
 
   return (
@@ -82,7 +99,8 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
       {/* Close Button */}
       <button 
         onClick={onClose}
-        className="absolute top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors z-50"
+        className="absolute right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors z-50"
+        style={{ top: 'calc(1rem + env(safe-area-inset-top))' }}
       >
         <XMarkIcon className="w-6 h-6" />
       </button>
