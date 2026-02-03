@@ -1,0 +1,14 @@
+{
+  "name": "webdev-client-pro",
+  "version": "1.0.0",
+  "description": "Local Cloud Drive Manager (Web + WebDAV)",
+  "scripts": {
+    "install-all": "npm install && cd server && npm install && cd ../client && npm install",
+    "dev": "concurrently \"npm run server --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm run build --prefix client",
+    "start": "npm run start --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}
