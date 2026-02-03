@@ -35,6 +35,7 @@ import {
 import clsx from 'clsx';
 import PreviewModal from './PreviewModal';
 import AddDriveModal from './AddDriveModal';
+import InputModal from './InputModal';
 import { translations } from './i18n';
 
 // --- Icons Helper ---
@@ -322,7 +323,8 @@ function App() {
   const [sortConfig, setSortConfig] = useState({ key: 'type', direction: 'asc' });
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [progress, setProgress] = useState(null); 
-  
+  const [inputModal, setInputModal] = useState({ isOpen: false, title: '', defaultValue: '', onConfirm: () => {} });
+
   // Language State
   const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
   const t = translations[lang];
@@ -538,7 +540,8 @@ function App() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
-        if (previewFile) setPreviewFile(null);
+        if (inputModal.isOpen) setInputModal(prev => ({ ...prev, isOpen: false }));
+        else if (previewFile) setPreviewFile(null);
         else if (isAddDriveOpen) setIsAddDriveOpen(false);
         else if (isIslandExpanded) setIsIslandExpanded(false);
         else if (selectedPaths.size > 0) setSelectedPaths(new Set());
@@ -546,7 +549,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [previewFile, isAddDriveOpen, isIslandExpanded, selectedPaths]);
+  }, [previewFile, isAddDriveOpen, isIslandExpanded, selectedPaths, inputModal.isOpen]);
 
   // Handle activeDrive persistence
   const handleDriveChange = (id) => {
@@ -646,23 +649,28 @@ function App() {
     }
   };
   
-  const handleRename = async () => {
+  const handleRename = () => {
     if (selectedPaths.size !== 1) return;
     const oldPath = Array.from(selectedPaths)[0];
     const oldName = oldPath.split('/').pop();
-    const newName = prompt(t.renamePrompt, oldName);
     
-    if (newName && newName !== oldName) {
-      if (files.some(f => f.name === newName)) {
-        alert(t.fileExists);
-        return;
+    setInputModal({
+      isOpen: true,
+      title: t.renamePrompt,
+      defaultValue: oldName,
+      onConfirm: async (newName) => {
+        if (!newName || newName === oldName) return;
+        if (files.some(f => f.name === newName)) {
+            alert(t.fileExists);
+            return;
+        }
+        try {
+            await api.renameItem(oldPath, newName, currentPath, activeDrive);
+            fetchFiles(currentPath);
+            setSelectedPaths(new Set());
+        } catch (err) { alert(t.renameFailed); }
       }
-      try {
-        await api.renameItem(oldPath, newName, currentPath, activeDrive);
-        fetchFiles(currentPath);
-        setSelectedPaths(new Set());
-      } catch (err) { alert(t.renameFailed); }
-    }
+    });
   };
 
   const removeDrive = async (id, e) => {
@@ -680,21 +688,24 @@ function App() {
     } catch (err) { alert('Failed to remove drive'); }
   };
 
-  const handleEditDrive = async (id, currentName, e) => {
+  const handleEditDrive = (id, currentName, e) => {
     e.stopPropagation();
-    const newName = prompt(t.renamePrompt, currentName); // Reuse 'Rename to:' translation
-    if (newName && newName !== currentName) {
-      try {
-        await api.updateDrive(id, { name: newName });
-        // Optimistic Update
-        setDrives(prev => prev.map(d => d.id === id ? { ...d, name: newName } : d));
-        // Verify later
-        // fetchDrives(); 
-      } catch (err) {
-        if (err.response?.status === 409) alert(t.nameTaken);
-        else alert('Failed to update name');
-      }
-    }
+    
+    setInputModal({
+        isOpen: true,
+        title: t.renamePrompt,
+        defaultValue: currentName,
+        onConfirm: async (newName) => {
+            if (!newName || newName === currentName) return;
+            try {
+                await api.updateDrive(id, { name: newName });
+                setDrives(prev => prev.map(d => d.id === id ? { ...d, name: newName } : d));
+            } catch (err) {
+                if (err.response?.status === 409) alert(t.nameTaken);
+                else alert('Failed to update name');
+            }
+        }
+    });
   };
 
   const isSelectionMode = selectedPaths.size > 0;
@@ -1078,18 +1089,25 @@ function App() {
                   <div className="w-full flex justify-around px-4 items-center h-full">
                       <button className="flex flex-col items-center gap-1 text-slate-500 hover:text-indigo-600 transition-colors"
                         onClick={async () => {
-                          const name = prompt(t.folderNamePrompt);
-                          if(name) {
-                            if (files.some(f => f.name === name)) {
-                              alert(t.folderExists);
-                              return;
-                            }
-                            try {
-                              await api.createFolder(`${currentPath}/${name}`, activeDrive);
-                              fetchFiles(currentPath);
-                              setIsIslandExpanded(false);
-                            } catch (err) { alert(t.createFolderFailed); }
-                          }
+                          setInputModal({
+                              isOpen: true,
+                              title: t.folderNamePrompt,
+                              defaultValue: '',
+                              onConfirm: async (name) => {
+                                  if (!name) return;
+                                  if (files.some(f => f.name === name)) {
+                                      alert(t.folderExists);
+                                      return;
+                                  }
+                                  try {
+                                      // Ensure clean path construction
+                                      const newPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+                                      await api.createFolder(newPath, activeDrive);
+                                      fetchFiles(currentPath);
+                                      setIsIslandExpanded(false);
+                                  } catch (err) { alert(t.createFolderFailed); }
+                              }
+                          });
                         }}
                       >
                         <FolderIcon className="w-6 h-6" />
@@ -1119,6 +1137,19 @@ function App() {
             )}
           </motion.div>
         </div>
+
+        <AnimatePresence>
+            {inputModal.isOpen && (
+                <InputModal
+                    isOpen={inputModal.isOpen}
+                    title={inputModal.title}
+                    defaultValue={inputModal.defaultValue}
+                    onConfirm={inputModal.onConfirm}
+                    onClose={() => setInputModal(prev => ({ ...prev, isOpen: false }))}
+                    lang={lang}
+                />
+            )}
+        </AnimatePresence>
 
         <AnimatePresence>{previewFile && <div className="fixed inset-0 z-50"><PreviewModal file={{...previewFile, path: previewFile.path}} onClose={() => setPreviewFile(null)} drive={activeDrive} lang={lang} /></div>}</AnimatePresence>
         <AnimatePresence>{isAddDriveOpen && <div className="fixed inset-0 z-[60]"><AddDriveModal onClose={() => setIsAddDriveOpen(false)} onAdded={(newDrive) => {
