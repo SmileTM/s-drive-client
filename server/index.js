@@ -10,7 +10,7 @@ const multer = require('multer');
 const { encrypt, decrypt } = require('./utils/crypto');
 
 const app = express();
-const PORT = 8000;
+const PORT = process.env.PORT || 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
 const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
 const CONFIG_FILE = path.join(APP_DATA_DIR, 'drives.json');

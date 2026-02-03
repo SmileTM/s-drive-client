@@ -3,11 +3,11 @@ const path = require('path');
 const { fork } = require('child_process');
 const waitOn = require('wait-on');
 const fs = require('fs');
+const net = require('net');
 
 let mainWindow;
 let serverProcess;
-
-const SERVER_PORT = 8000; // Must match server/index.js
+let serverPort = 8000; // Default, will be updated
 
 // Setup Logging
 const LOG_PATH = path.join(app.getPath('userData'), 'app.log');
@@ -20,13 +20,57 @@ function log(msg) {
   logStream.write(message);
 }
 
-function startServer() {
+// Helper to find a free port
+function getPort(startPort) {
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.listen(startPort, '127.0.0.1', () => {
+            server.close(() => resolve(startPort));
+        });
+        server.on('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+                resolve(getPort(startPort + 1));
+            } else {
+                reject(err);
+            }
+        });
+    });
+}
+
+function getLogContent() {
+    try {
+        if (fs.existsSync(LOG_PATH)) {
+            const stats = fs.statSync(LOG_PATH);
+            const size = stats.size;
+            const bufferSize = Math.min(10000, size); // Read last 10KB
+            const buffer = Buffer.alloc(bufferSize);
+            const fd = fs.openSync(LOG_PATH, 'r');
+            fs.readSync(fd, buffer, 0, bufferSize, size - bufferSize);
+            fs.closeSync(fd);
+            return buffer.toString('utf8');
+        }
+        return 'Log file not found.';
+    } catch (e) {
+        return `Error reading log: ${e.message}`;
+    }
+}
+
+async function startServer() {
   const serverPath = path.join(__dirname, '../server/index.js');
   log(`Starting server from: ${serverPath}`);
   
   if (!fs.existsSync(serverPath)) {
       log('CRITICAL: Server file not found!');
       return;
+  }
+
+  // Find a free port
+  try {
+      serverPort = await getPort(8000);
+      log(`Found free port: ${serverPort}`);
+  } catch (err) {
+      log(`Failed to find free port: ${err.message}`);
+      serverPort = 8000; // Fallback
   }
 
   // Start the server as a child process
@@ -36,7 +80,8 @@ function startServer() {
       ...process.env, 
       NODE_ENV: 'production',
       USER_DATA_PATH: app.getPath('userData'),
-      ELECTRON_LOG_PATH: LOG_PATH
+      ELECTRON_LOG_PATH: LOG_PATH,
+      PORT: serverPort.toString()
     }
   });
 
@@ -79,7 +124,7 @@ function createWindow() {
   });
 
   // Use 127.0.0.1 for reliability
-  const url = `http://127.0.0.1:${SERVER_PORT}`;
+  const url = `http://127.0.0.1:${serverPort}`;
 
   // Wait for server to be ready before loading URL
   log(`Waiting for ${url}...`);
@@ -87,19 +132,22 @@ function createWindow() {
     .then(() => {
       log('Server is ready, loading window...');
       mainWindow.loadURL(url);
-      // mainWindow.webContents.openDevTools(); // Optional: Auto-open devtools for debug
     })
     .catch((err) => {
       log(`Server timeout or error: ${err}`);
+      
+      const logContent = getLogContent().replace(/\n/g, '<br/>');
+      
       // Load error page
       const errorHtml = `
         <html>
         <body style="font-family: sans-serif; padding: 2rem; text-align: center;">
           <h1 style="color: #ef4444;">Application Failed to Start</h1>
           <p>The internal server could not be reached.</p>
-          <p style="background: #f1f5f9; padding: 1rem; border-radius: 8px; text-align: left; font-family: monospace;">
-            Error: ${err.message}<br/>
-            Log: ${LOG_PATH}
+          <p style="background: #f1f5f9; padding: 1rem; border-radius: 8px; text-align: left; font-family: monospace; max-height: 400px; overflow-y: auto;">
+            <strong>Error:</strong> ${err.message}<br/><br/>
+            <strong>Log (${LOG_PATH}):</strong><br/>
+            <div style="white-space: pre-wrap; font-size: 10px;">${logContent}</div>
           </p>
           <button onclick="location.reload()" style="padding: 10px 20px; cursor: pointer;">Retry</button>
         </body>
@@ -113,8 +161,8 @@ function createWindow() {
   });
 }
 
-app.on('ready', () => {
-  startServer();
+app.on('ready', async () => {
+  await startServer();
   createWindow();
 });
 
