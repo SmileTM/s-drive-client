@@ -602,7 +602,10 @@ app.use(webdavServer.extensions.express('/webdav', server));
 
 // Serve static files from React app (for production/electron)
 const CLIENT_BUILD_PATH = path.join(__dirname, '../client/dist');
+console.log(`[Server] Checking Client Build Path: ${CLIENT_BUILD_PATH}`);
+
 if (fs.existsSync(CLIENT_BUILD_PATH)) {
+    console.log('[Server] Client Build found. Serving static files.');
     app.use(express.static(CLIENT_BUILD_PATH));
     
     // Handle SPA routing: return index.html for any unknown non-API routes
@@ -612,8 +615,11 @@ if (fs.existsSync(CLIENT_BUILD_PATH)) {
         }
         res.sendFile(path.join(CLIENT_BUILD_PATH, 'index.html'));
     });
+} else {
+    console.error(`[Server ERROR] Client Build NOT found at ${CLIENT_BUILD_PATH}`);
 }
 
-app.listen(PORT, () => {
-    console.log(`🚀 Multi-Drive Server running at http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Multi-Drive Server running at http://0.0.0.0:${PORT}`);
+    console.log(`[Server] User Data Path: ${APP_DATA_DIR}`);
 });
