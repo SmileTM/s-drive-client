@@ -758,7 +758,7 @@ const NativeAPI = {
   },
 
   getFileUrl: async (path, driveId) => {
-      // Returns a Promise resolving to a src string (Data URI)
+      // Returns a Promise resolving to a src string (Data URI or Native URL)
       if (driveId !== 'local') {
           try {
             const drives = await NativeAPI.getDrives();
@@ -772,14 +772,15 @@ const NativeAPI = {
           } catch (e) { return ''; }
       }
       try {
-          const file = await Filesystem.readFile({
+          const { uri } = await Filesystem.getUri({
               path: path,
               directory: Directory.ExternalStorage
           });
-          // Guess mime type roughly or assume generic
-          // Filesystem returns 'data' which is base64
-          return `data:application/octet-stream;base64,${file.data}`;
-      } catch (e) { return ''; }
+          return Capacitor.convertFileSrc(uri);
+      } catch (e) { 
+          console.error('[Native] getFileUrl failed', e);
+          return ''; 
+      }
   },
 
   getFileBlob: async (path, driveId) => {

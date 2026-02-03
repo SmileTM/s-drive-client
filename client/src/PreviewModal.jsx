@@ -11,7 +11,7 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   const fileType = file.type || '';
   const isHeic = fileType === 'image/heic' || fileType === 'image/heif' || /\.(heic|heif)$/i.test(file.name);
   const isImage = (fileType.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(file.name)) && !isHeic;
-  const isVideo = fileType.startsWith('video/') || /\.(mp4|webm|ogg|mov)$/i.test(file.name);
+  const isVideo = fileType.startsWith('video/') || /\.(mp4|webm|ogg|mov|avi|mkv|3gp)$/i.test(file.name);
   const isAudio = fileType.startsWith('audio/') || /\.(mp3|wav|aac|flac|m4a)$/i.test(file.name);
   const isPDF = fileType === 'application/pdf' || /\.pdf$/i.test(file.name);
   const isText = fileType.startsWith('text/') || 
