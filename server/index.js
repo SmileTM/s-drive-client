@@ -554,6 +554,57 @@ app.post('/api/rename', async (req, res) => {
     }
 });
 
+// POST /api/prepare-drag (For Native Drag & Drop)
+app.post('/api/prepare-drag', async (req, res) => {
+    try {
+        const { items, drive: driveId = 'local' } = req.body;
+        console.log(`[Drag] Preparing ${items?.length} items from ${driveId}`);
+        
+        if (!items || items.length === 0) return res.json({ files: [] });
+
+        const config = await getDriveConfig(driveId);
+        const resolvedFiles = [];
+
+        if (config.type === 'local') {
+            // Return absolute local paths
+            for (const itemPath of items) {
+                const absPath = resolveSafePath(itemPath);
+                if (fs.existsSync(absPath)) {
+                    resolvedFiles.push(absPath);
+                }
+            }
+        } else {
+            // WebDAV: Download to Temp
+            const client = getWebDAVClient(config);
+            const tempDir = path.join(os.tmpdir(), 'webdav-drag-cache');
+            await fs.ensureDir(tempDir);
+
+            for (const itemPath of items) {
+                try {
+                    const fileName = path.basename(itemPath);
+                    const tempFilePath = path.join(tempDir, fileName);
+                    
+                    // WebDAV path cleanup
+                    // itemPath from UI is like "/folder/img.png"
+                    // WebDAV lib expects "/folder/img.png" (absolute)
+                    
+                    console.log(`[Drag] Downloading ${itemPath} to ${tempFilePath}`);
+                    const content = await client.getFileContents(itemPath, { format: 'binary' });
+                    await fs.writeFile(tempFilePath, content);
+                    resolvedFiles.push(tempFilePath);
+                } catch (e) {
+                    console.error(`[Drag] Failed to download ${itemPath}:`, e.message);
+                }
+            }
+        }
+
+        res.json({ files: resolvedFiles });
+    } catch (err) {
+        console.error('[Drag Error]', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Multer & Upload
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const { fork } = require('child_process');
 const waitOn = require('wait-on');
@@ -19,6 +19,57 @@ function log(msg) {
   console.log(msg);
   logStream.write(message);
 }
+
+// ... (getPort and getLogContent functions remain the same)
+
+// IPC: Handle Native Drag Start
+ipcMain.on('ondragstart', (event, files, driveId) => {
+    log(`[IPC] ondragstart: ${files.length} items from ${driveId}`);
+    
+    // Call Server to prepare paths (resolve local or download remote)
+    const req = net.request({
+        method: 'POST',
+        protocol: 'http:',
+        hostname: '127.0.0.1',
+        port: serverPort,
+        path: '/api/prepare-drag',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    });
+
+    req.on('response', (response) => {
+        let data = '';
+        response.on('data', (chunk) => { data += chunk; });
+        response.on('end', () => {
+            if (response.statusCode === 200) {
+                try {
+                    const result = JSON.parse(data);
+                    if (result.files && result.files.length > 0) {
+                        const iconPath = path.join(__dirname, '../client/assets/icon.png');
+                        log(`[Drag] Starting drag for: ${JSON.stringify(result.files)}`);
+                        event.sender.startDrag({
+                            file: result.files[0], // Primary file
+                            files: result.files,   // Multi-file support
+                            icon: iconPath
+                        });
+                    }
+                } catch (e) {
+                    log(`[Drag] Failed to parse response: ${e.message}`);
+                }
+            } else {
+                log(`[Drag] Server returned ${response.statusCode}`);
+            }
+        });
+    });
+
+    req.on('error', (err) => {
+        log(`[Drag] Request failed: ${err.message}`);
+    });
+
+    req.write(JSON.stringify({ items: files, drive: driveId }));
+    req.end();
+});
 
 // Helper to find a free port
 function getPort(startPort) {
@@ -115,7 +166,8 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      devTools: true // Enable DevTools
+      devTools: true, // Enable DevTools
+      preload: path.join(__dirname, 'preload.js') // Register Preload
     },
     titleBarStyle: 'hidden',
     trafficLightPosition: { x: 10, y: 10 }, 

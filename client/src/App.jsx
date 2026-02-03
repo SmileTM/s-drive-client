@@ -122,6 +122,13 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
     const itemsToMove = isSelected && selectedPaths.size > 0 ? Array.from(selectedPaths) : [fullPath];
     e.dataTransfer.setData('application/json', JSON.stringify({ items: itemsToMove }));
     
+    // Electron Native Drag (Drag-Out)
+    if (window.electron && window.electron.startDrag) {
+        e.preventDefault();
+        window.electron.startDrag(itemsToMove, activeDrive || 'local');
+        return;
+    }
+    
     // External Download Logic (Chrome/Edge only, Single file)
     if (!file.isDirectory) {
        // ... existing drag logic ...
