@@ -224,7 +224,7 @@ app.patch('/api/drives/:id', async (req, res) => {
 // Helper: Safe path resolution
 const resolveSafePath = (userPath) => {
     // Remove leading slashes to ensure it's relative
-    const safeSuffix = path.normalize(userPath).replace(/^(\.\.[/\\])+/, '').replace(/^[/\]+/, '');
+    const safeSuffix = path.normalize(userPath).replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
     const absolutePath = path.resolve(STORAGE_DIR, safeSuffix);
     if (!absolutePath.startsWith(STORAGE_DIR)) {
         throw new Error('Access denied: Path traversal detected');
