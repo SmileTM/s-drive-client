@@ -387,16 +387,20 @@ app.get('/api/raw', async (req, res) => {
 app.post('/api/mkdir', async (req, res) => {
     try {
         const { path: reqPath, drive: driveId = 'local' } = req.body;
+        console.log(`[DEBUG] POST /api/mkdir path="${reqPath}" drive="${driveId}"`);
         const config = await getDriveConfig(driveId);
 
         if (config.type === 'local') {
-            await fs.ensureDir(resolveSafePath(reqPath));
+            const absPath = resolveSafePath(reqPath);
+            console.log(`[Mkdir] Creating local directory: ${absPath}`);
+            await fs.ensureDir(absPath);
         } else {
             const client = getWebDAVClient(config);
             await client.createDirectory(reqPath);
         }
         res.json({ success: true });
     } catch (err) {
+        console.error('[Mkdir Error]', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -405,12 +409,14 @@ app.post('/api/mkdir', async (req, res) => {
 app.post('/api/delete', async (req, res) => {
     try {
         const { items, drive: driveId = 'local' } = req.body;
+        console.log(`[DEBUG] POST /api/delete count=${items?.length} drive="${driveId}"`);
         const config = await getDriveConfig(driveId);
 
         if (config.type === 'local') {
             await Promise.all(items.map(async itemPath => {
-                const safePath = path.normalize(itemPath).replace(/^(\.\.[/\\])+/, '');
-                await fs.remove(path.join(STORAGE_DIR, safePath));
+                const absPath = resolveSafePath(itemPath);
+                console.log(`[Delete] Local item: ${absPath}`);
+                await fs.remove(absPath);
             }));
         } else {
             const client = getWebDAVClient(config);
@@ -418,6 +424,7 @@ app.post('/api/delete', async (req, res) => {
         }
         res.json({ success: true });
     } catch (err) {
+        console.error('[Delete Error]', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -430,15 +437,12 @@ app.post('/api/move', async (req, res) => {
 
         if (config.type === 'local') {
             await Promise.all(items.map(async itemPath => {
-                // ... (existing move logic) ...
-                const safeItem = path.normalize(itemPath).replace(/^(\.\.[/\\])+/, ''); // Simplified relative
-                const absItem = path.join(STORAGE_DIR, safeItem);
-                
+                const absItem = resolveSafePath(itemPath);
                 // Destination is a FOLDER in move API
-                const safeDest = path.normalize(destination).replace(/^(\.\.[/\\])+/, '');
-                const absDestDir = path.join(STORAGE_DIR, safeDest);
-                const absNewPath = path.join(absDestDir, path.basename(safeItem));
+                const absDestDir = resolveSafePath(destination);
+                const absNewPath = path.join(absDestDir, path.basename(absItem));
                 
+                console.log(`[Move] ${absItem} -> ${absNewPath}`);
                 if (absItem !== absNewPath) await fs.move(absItem, absNewPath, { overwrite: true });
             }));
         } else {
@@ -451,6 +455,7 @@ app.post('/api/move', async (req, res) => {
         }
         res.json({ success: true });
     } catch (err) {
+        console.error('[Move Error]', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -517,19 +522,18 @@ app.post('/api/transfer', async (req, res) => {
 app.post('/api/rename', async (req, res) => {
     try {
         const { oldPath, newName, path: currentPath, drive: driveId = 'local' } = req.body;
+        console.log(`[DEBUG] POST /api/rename old="${oldPath}" new="${newName}" drive="${driveId}"`);
         if (!oldPath || !newName) return res.status(400).json({ error: 'Missing parameters' });
 
         const config = await getDriveConfig(driveId);
 
         if (config.type === 'local') {
-            // Local Rename
-            const safeOld = path.normalize(oldPath).replace(/^(\.\.[/\\])+/, '');
-            const absOld = path.join(STORAGE_DIR, safeOld);
-            
-            // Construct new path in the same directory
-            const safeDir = path.dirname(safeOld);
-            const absNew = path.join(STORAGE_DIR, safeDir, newName); // Same dir, new name
+            // Local Rename using resolveSafePath for consistency
+            const absOld = resolveSafePath(oldPath);
+            const absDir = path.dirname(absOld);
+            const absNew = path.join(absDir, newName); // Same dir, new name
 
+            console.log(`[Rename] ${absOld} -> ${absNew}`);
             await fs.rename(absOld, absNew);
         } else {
             // WebDAV Rename
