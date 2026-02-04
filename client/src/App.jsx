@@ -1113,22 +1113,14 @@ function App() {
                  
                  <div className="w-px h-4 bg-slate-100 shrink-0"></div>
 
-                 <AnimatePresence>
                  {selectedPaths.size === 1 && (
-                   <motion.div 
-                    key="single-actions"
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    className="flex items-center gap-2"
-                   >
+                   <div className="flex items-center gap-2">
                      <button onClick={handleRename} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                         {t.rename}
                      </button>
                      <div className="w-px h-4 bg-slate-100 shrink-0"></div>
-                   </motion.div>
+                   </div>
                  )}
-                 </AnimatePresence>
 
                  <button onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                     {t.move}
@@ -1140,22 +1132,14 @@ function App() {
                     {t.copy}
                  </button>
 
-                 <AnimatePresence>
                  {selectedPaths.size === 1 && (
-                   <motion.div 
-                    key="detail-action"
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    className="flex items-center gap-2"
-                   >
+                   <div className="flex items-center gap-2">
                      <div className="w-px h-4 bg-slate-100 shrink-0"></div>
                      <button onClick={handleDetails} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                         {t.details}
                      </button>
-                   </motion.div>
+                   </div>
                  )}
-                 </AnimatePresence>
                </div>
             ) : hasClipboard ? (
                <button onClick={handlePaste} className="w-full h-full flex items-center justify-center gap-2 font-semibold text-indigo-600 hover:bg-indigo-100/50">
