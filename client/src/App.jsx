@@ -386,6 +386,10 @@ function App() {
   const fetchFilesRef = useRef(null); // fetchFiles is defined later
   const selectedPathsRef = useRef(selectedPaths);
   const previewFileRef = useRef(previewFile);
+  const detailsModalRef = useRef(detailsModal);
+  const isAddDriveOpenRef = useRef(isAddDriveOpen);
+  const confirmModalRef = useRef(confirmModal);
+  const inputModalRef = useRef(inputModal);
 
   // Note: specific useEffects to update these refs are moved to bottom of component to avoid TDZ
 
@@ -396,6 +400,14 @@ function App() {
     const backListener = CapApp.addListener('backButton', ({ canGoBack }) => {
       if (previewFileRef.current) {
         setPreviewFile(null);
+      } else if (detailsModalRef.current) {
+        setDetailsModal(null);
+      } else if (confirmModalRef.current.isOpen) {
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      } else if (inputModalRef.current.isOpen) {
+        setInputModal(prev => ({ ...prev, isOpen: false }));
+      } else if (isAddDriveOpenRef.current) {
+        setIsAddDriveOpen(false);
       } else if (isSidebarOpenRef.current) {
         setIsSidebarOpenRef.current(false);
       } else if (selectedPathsRef.current.size > 0) {
@@ -416,9 +428,15 @@ function App() {
         touchStartX = e.touches[0].clientX;
         touchStartY = e.touches[0].clientY;
         
+        const isAnyModalOpen = previewFileRef.current || 
+                               detailsModalRef.current || 
+                               confirmModalRef.current.isOpen || 
+                               inputModalRef.current.isOpen || 
+                               isAddDriveOpenRef.current;
+
         // Check if we are at the top of the scroll container
         const scrollContainer = document.getElementById('file-list-container');
-        if (scrollContainer && scrollContainer.scrollTop === 0) {
+        if (!isAnyModalOpen && scrollContainer && scrollContainer.scrollTop === 0) {
             isPulling = true;
         } else {
             isPulling = false;
@@ -438,8 +456,24 @@ function App() {
         const absDeltaX = Math.abs(deltaX);
         const absDeltaY = Math.abs(deltaY);
 
+        const isAnyModalOpen = previewFileRef.current || 
+                               detailsModalRef.current || 
+                               confirmModalRef.current.isOpen || 
+                               inputModalRef.current.isOpen || 
+                               isAddDriveOpenRef.current;
+
         // Horizontal Swipes (Dominant X movement)
         if (absDeltaX > absDeltaY && absDeltaX > 50) {
+            if (isAnyModalOpen) {
+                // If modal is open, horizontal swipe closes it (acting as a back gesture)
+                if (previewFileRef.current) setPreviewFile(null);
+                else if (detailsModalRef.current) setDetailsModal(null);
+                else if (confirmModalRef.current.isOpen) setConfirmModal(prev => ({ ...prev, isOpen: false }));
+                else if (inputModalRef.current.isOpen) setInputModal(prev => ({ ...prev, isOpen: false }));
+                else if (isAddDriveOpenRef.current) setIsAddDriveOpen(false);
+                return;
+            }
+
             // Right Swipe (->)
             if (deltaX > 0) {
                 if (isSidebarOpenRef.current) return; // Already open
@@ -462,6 +496,7 @@ function App() {
         // Vertical Pull (Pull to Refresh)
         // Must be dominant Y, downward, start from top, and significant distance
         if (isPulling && deltaY > 100 && absDeltaY > absDeltaX * 2) {
+             if (isAnyModalOpen) return; // Prevent refresh if modal is open
              // Trigger Refresh
              if (window.navigator.vibrate) window.navigator.vibrate(20);
              if(fetchFilesRef.current) fetchFilesRef.current(currentPathRef.current);
@@ -812,6 +847,10 @@ function App() {
   useEffect(() => { fetchFilesRef.current = fetchFiles; }, [fetchFiles]);
   useEffect(() => { selectedPathsRef.current = selectedPaths; }, [selectedPaths]);
   useEffect(() => { previewFileRef.current = previewFile; }, [previewFile]);
+  useEffect(() => { detailsModalRef.current = detailsModal; }, [detailsModal]);
+  useEffect(() => { isAddDriveOpenRef.current = isAddDriveOpen; }, [isAddDriveOpen]);
+  useEffect(() => { confirmModalRef.current = confirmModal; }, [confirmModal]);
+  useEffect(() => { inputModalRef.current = inputModal; }, [inputModal]);
 
     return (
 

@@ -59,12 +59,14 @@ const DetailsModal = ({ file, driveName, onClose, lang = 'zh' }) => {
                 <div className="space-y-3 w-full bg-slate-50/50 rounded-2xl p-4 border border-white/10">
                     <div className="flex justify-between items-center text-xs">
                         <span className="text-slate-400">{t.type}</span>
-                        <span className="text-slate-700 font-medium truncate max-w-[70%]">{isFolder ? t.folder : (file.type || 'Unknown')}</span>
+                        <span className="text-slate-700 font-medium truncate max-w-[70%]">
+                            {isFolder ? t.folder : (file.name.includes('.') ? `.${file.name.split('.').pop()}` : (file.type || 'Unknown'))}
+                        </span>
                     </div>
                     
                     <div className="flex justify-between items-center text-xs">
                         <span className="text-slate-400">{t.location}</span>
-                        <span className="text-slate-700 font-medium truncate max-w-[70%]">{driveName}</span>
+                        <span className="text-slate-700 font-medium truncate max-w-[70%]" title={file.path}>{file.path}</span>
                     </div>
 
                     <div className="flex justify-between items-center text-xs">
