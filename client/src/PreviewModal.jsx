@@ -1,19 +1,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
+import clsx from 'clsx';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { Capacitor } from '@capacitor/core';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import api from './api';
+import { translations } from './i18n';
 
 // Configure PDF Worker
 // Standard way for Vite: use import meta url or CDN
 // Using CDN for simplicity and reliability in diverse build environments
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
-const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev }) => {
+const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh' }) => {
+  const t = translations[lang];
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(false);
   const [url, setUrl] = useState('');
@@ -87,7 +90,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
                 const text = await api.readFileText(file.path, drive);
                 setContent(text);
             } catch (e) {
-                setContent('Error loading content');
+                setContent(t.errorLoading);
             } finally {
                 setLoading(false);
             }
@@ -115,12 +118,14 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
 
   // Swipe Handlers
   const onTouchStart = (e) => {
+    e.stopPropagation(); // Prevent sidebar or parent gestures
     if (isZoomed.current) return; // Ignore swipes if zoomed
     touchEnd.current = null; 
     touchStart.current = e.targetTouches[0].clientX;
   };
 
   const onTouchMove = (e) => {
+    e.stopPropagation(); // Prevent sidebar or parent gestures
     if (isZoomed.current) return;
     touchEnd.current = e.targetTouches[0].clientX;
   };
@@ -202,8 +207,8 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
 
         {isAudio && url && (
-          <div className="bg-white p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 min-w-[300px]">
-            <div className="w-24 h-24 bg-indigo-100 rounded-full flex items-center justify-center mb-2">
+          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[32px] shadow-2xl flex flex-col items-center gap-4 min-w-[300px] border border-white/20">
+            <div className="w-24 h-24 bg-indigo-100/50 rounded-full flex items-center justify-center mb-2">
               <DocumentIcon className="w-12 h-12 text-indigo-500" />
             </div>
             <h3 className="font-medium text-slate-800 text-center truncate w-full px-2">{file.name}</h3>
@@ -212,14 +217,26 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
 
         {isPDF && url && (
-          <div className="relative w-full h-[80vh] bg-slate-100 rounded-lg shadow-2xl overflow-hidden flex flex-col items-center">
-            <div className="flex-1 overflow-auto w-full flex flex-col items-center p-4">
+          <div className="relative w-full h-[80vh] flex flex-col items-center">
+            <div className="flex-1 overflow-auto w-full flex flex-col items-center p-4 no-scrollbar">
                <Document
                   file={url}
                   onLoadSuccess={onDocumentLoadSuccess}
-                  loading={<div className="text-slate-500 mt-10">Loading PDF...</div>}
-                  error={<div className="text-red-500 mt-10">Failed to load PDF.</div>}
-                  className="shadow-lg flex flex-col gap-4"
+                  loading={
+                    <div className="flex items-center justify-center p-8">
+                        <div className="bg-white/80 backdrop-blur-xl rounded-2xl px-8 py-4 shadow-xl border border-white/20 text-slate-600 font-medium animate-pulse">
+                            {t.loading}
+                        </div>
+                    </div>
+                  }
+                  error={
+                    <div className="flex items-center justify-center p-8">
+                        <div className="bg-white/80 backdrop-blur-xl rounded-2xl px-8 py-4 shadow-xl border border-white/20 text-red-500 font-medium">
+                            {t.errorLoading}
+                        </div>
+                    </div>
+                  }
+                  className="flex flex-col gap-4"
                 >
                   {Array.from(new Array(numPages), (el, index) => (
                     <Page 
@@ -230,6 +247,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
                       renderTextLayer={false} 
                       renderAnnotationLayer={false}
                       className="bg-white shadow-sm"
+                      loading={null}
                     />
                   ))}
                 </Document>
@@ -238,27 +256,29 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
 
         {isText && (
-          <div className="w-full h-[80vh] bg-white rounded-lg shadow-2xl overflow-auto p-4 font-mono text-sm text-slate-700 whitespace-pre-wrap">
-            {loading ? 'Loading...' : content}
+          <div className="w-full h-[80vh] bg-white/90 backdrop-blur-xl rounded-[32px] shadow-2xl overflow-auto p-6 font-mono text-sm text-slate-700 whitespace-pre-wrap border border-white/20">
+            {loading ? t.loading : content}
           </div>
         )}
 
         {/* Fallback for unsupported types */}
         {!isImage && !isHeic && !isVideo && !isAudio && !isPDF && !isText && (
-          <div className="bg-white p-10 rounded-2xl shadow-2xl flex flex-col items-center gap-6">
-            <DocumentIcon className="w-20 h-20 text-slate-300" />
-            <div className="text-center">
-              <p className="text-lg font-medium text-slate-700">No Preview Available</p>
-              <p className="text-sm text-slate-400 mt-1">{file.name}</p>
+          <div className="glass-bg-default glass-blur p-10 rounded-[32px] shadow-2xl flex flex-col items-center gap-6 border border-white/20 max-w-sm">
+            <div className="w-20 h-20 bg-white/50 rounded-2xl flex items-center justify-center shadow-inner text-slate-300">
+                <DocumentIcon className="w-12 h-12" />
             </div>
-            {url && (
+            <div className="text-center">
+              <p className="text-lg font-semibold text-slate-800">{t.noPreview}</p>
+              <p className="text-sm text-slate-500 mt-1 break-all px-4">{file.name}</p>
+            </div>
+            {url && drive !== 'local' && (
             <a 
               href={url} 
               download={file.name}
-              className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-2.5 rounded-full hover:bg-indigo-700 transition-colors font-medium"
+              className="flex items-center gap-2 bg-indigo-500 text-white px-8 py-3 rounded-2xl hover:bg-indigo-600 transition-all font-medium shadow-lg shadow-indigo-200 active:scale-95 text-sm"
             >
               <ArrowDownTrayIcon className="w-5 h-5" />
-              Download File
+              {t.download}
             </a>
             )}
           </div>
@@ -267,29 +287,39 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
 
       {/* Unified Bottom Controls - Centered for Mobile Ergonomics */}
       <div 
-        className="fixed left-1/2 -translate-x-1/2 flex items-center gap-6 z-50 px-6 py-3 rounded-full bg-white/10 backdrop-blur-md border border-white/10 shadow-2xl"
+        className={clsx(
+            "fixed left-1/2 -translate-x-1/2 z-50 flex items-center transition-all",
+            drive === 'local' 
+                ? "gap-0" // Standalone
+                : "gap-6 px-6 py-3 rounded-full bg-white/10 backdrop-blur-md border border-white/10 shadow-2xl" // Island
+        )}
         style={{ bottom: 'calc(2rem + env(safe-area-inset-bottom))' }}
       >
         {/* Close Button */}
         <button 
           onClick={onClose}
-          className="flex items-center justify-center p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all active:scale-95"
-          title="Close"
+          className={clsx(
+              "flex items-center justify-center rounded-full text-white transition-all active:scale-95",
+              drive === 'local'
+                  ? "p-3 bg-white/10 backdrop-blur-xl border border-white/20 shadow-lg hover:bg-white/20" // Standalone Glass Circle
+                  : "p-3 bg-white/10 hover:bg-white/20" // Island Button
+          )}
+          title={t.close}
         >
-          <XMarkIcon className="w-6 h-6" />
+          <XMarkIcon className={clsx(drive === 'local' ? "w-5 h-5" : "w-6 h-6")} />
         </button>
 
         {/* Divider */}
-        <div className="w-px h-6 bg-white/20" />
+        {drive !== 'local' && <div className="w-px h-6 bg-white/20" />}
 
         {/* Download Button */}
-        {url && (
+        {url && drive !== 'local' && (
           <a 
             href={url} 
             download={file.name}
             onClick={(e) => e.stopPropagation()}
             className="flex items-center justify-center p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all active:scale-95"
-            title="Download"
+            title={t.download}
           >
             <ArrowDownTrayIcon className="w-6 h-6" />
           </a>
