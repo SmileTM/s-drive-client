@@ -404,6 +404,8 @@ const base64ToBlob = (base64, mimeType = 'application/octet-stream') => {
     return new Blob([byteArray], { type: mimeType });
 };
 
+let cachedServerUrl = null;
+
 // --- Strategy 2: Native API (Capacitor) ---
 const NativeAPI = {
   getFiles: async (reqPath, driveId) => {
@@ -881,6 +883,25 @@ const NativeAPI = {
             return URL.createObjectURL(blob);
           } catch (e) { return ''; }
       }
+      
+      // Android Local Video Seeking Fix: Use Custom Local Server
+      if (Capacitor.getPlatform() === 'android') {
+          try {
+              if (!cachedServerUrl) {
+                  const res = await WebDavNative.getServerUrl();
+                  if (res && res.url) cachedServerUrl = res.url;
+              }
+              if (cachedServerUrl) {
+                  // Path must be URL encoded for the server to decode
+                  // Ensure path starts with /
+                  const cleanPath = path.startsWith('/') ? path : '/' + path;
+                  return `${cachedServerUrl}${encodeURI(cleanPath)}`;
+              }
+          } catch (e) {
+              console.warn('[Native] Failed to get local server URL:', e);
+          }
+      }
+
       try {
           const { uri } = await Filesystem.getUri({
               path: path,

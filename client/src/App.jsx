@@ -30,12 +30,14 @@ import {
   ChevronUpIcon,
   ChevronDownIcon,
   GlobeAltIcon,
-  DocumentDuplicateIcon
+  DocumentDuplicateIcon,
+  InformationCircleIcon
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import PreviewModal from './PreviewModal';
 import AddDriveModal from './AddDriveModal';
 import InputModal from './InputModal';
+import DetailsModal from './DetailsModal';
 import { translations } from './i18n';
 
 // --- Icons Helper ---
@@ -340,6 +342,7 @@ function App() {
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [progress, setProgress] = useState(null); 
   const [inputModal, setInputModal] = useState({ isOpen: false, title: '', defaultValue: '', onConfirm: () => {} });
+  const [detailsModal, setDetailsModal] = useState(null);
 
   // Language State
   const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
@@ -722,6 +725,13 @@ function App() {
     });
   };
 
+  const handleDetails = () => {
+      if (selectedPaths.size !== 1) return;
+      const path = Array.from(selectedPaths)[0];
+      const file = files.find(f => f.path === path);
+      if (file) setDetailsModal(file);
+  };
+
   const removeDrive = async (id, e) => {
     e.stopPropagation();
     if (!confirm(t.confirmRemoveDrive)) return;
@@ -1083,39 +1093,71 @@ function App() {
         {/* Dynamic Island */}
         <div className="fixed bottom-8 left-0 right-0 flex justify-center z-40 pointer-events-none">
           <motion.div 
+            layout
             onClick={(e) => e.stopPropagation()}
+            transition={{
+              type: "spring",
+              stiffness: 400,
+              damping: 30
+            }}
             className={clsx(
-              "shadow-[0_20px_50px_rgba(0,0,0,0.1)] backdrop-blur-xl border border-white/20 pointer-events-auto flex items-center overflow-hidden transition-all duration-300 ease-spring",
-              isSelectionMode ? "bg-red-50/90 w-[300px] h-14 rounded-full" : hasClipboard ? "bg-indigo-50/90 w-52 h-14 rounded-full" : isIslandExpanded ? "bg-white/90 w-72 h-20 rounded-[40px]" : "bg-white/80 w-32 h-14 rounded-full"
+              "shadow-[0_20px_50px_rgba(0,0,0,0.1)] backdrop-blur-xl border border-white/20 pointer-events-auto flex items-center overflow-hidden",
+              isSelectionMode ? "bg-white/90 w-[300px] h-14 rounded-full" : hasClipboard ? "bg-indigo-50/90 w-52 h-14 rounded-full" : isIslandExpanded ? "bg-white/90 w-72 h-20 rounded-[40px]" : "bg-white/80 w-32 h-14 rounded-full"
             )}
           >
             {isSelectionMode ? (
                <div className="w-full h-full flex items-center justify-around px-4">
-                 <button onClick={handleDelete} className="text-red-500 font-medium text-xs hover:bg-red-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                 <motion.button layout onClick={handleDelete} className="text-red-500 font-medium text-xs hover:bg-red-100 px-2 py-1 rounded-lg whitespace-nowrap">
                     {t.delete} ({selectedPaths.size})
-                 </button>
+                 </motion.button>
                  
-                 <div className="w-px h-4 bg-red-100 shrink-0"></div>
+                 <motion.div layout className="w-px h-4 bg-slate-100 shrink-0"></motion.div>
 
+                 <AnimatePresence mode="popLayout">
                  {selectedPaths.size === 1 && (
-                   <>
+                   <motion.div 
+                    key="single-actions"
+                    layout
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    className="flex items-center gap-2"
+                   >
                      <button onClick={handleRename} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                         {t.rename}
                      </button>
                      <div className="w-px h-4 bg-slate-100 shrink-0"></div>
-                   </>
+                   </motion.div>
                  )}
+                 </AnimatePresence>
 
-                 <button onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                 <motion.button layout onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                     {t.move}
-                 </button>
+                 </motion.button>
                  
-                 <div className="w-px h-4 bg-slate-100 shrink-0"></div>
+                 <motion.div layout className="w-px h-4 bg-slate-100 shrink-0"></motion.div>
 
-                 <button onClick={handleCopy} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1">
-                    <DocumentDuplicateIcon className="w-3 h-3" />
+                 <motion.button layout onClick={handleCopy} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1">
                     {t.copy}
-                 </button>
+                 </motion.button>
+
+                 <AnimatePresence mode="popLayout">
+                 {selectedPaths.size === 1 && (
+                   <motion.div 
+                    key="detail-action"
+                    layout
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    className="flex items-center gap-2"
+                   >
+                     <div className="w-px h-4 bg-slate-100 shrink-0"></div>
+                     <button onClick={handleDetails} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                        {t.details}
+                     </button>
+                   </motion.div>
+                 )}
+                 </AnimatePresence>
                </div>
             ) : hasClipboard ? (
                <button onClick={handlePaste} className="w-full h-full flex items-center justify-center gap-2 font-semibold text-indigo-600 hover:bg-indigo-100/50">
@@ -1228,6 +1270,18 @@ function App() {
             </div>
           )}
         </AnimatePresence>
+        
+        <AnimatePresence>
+            {detailsModal && (
+                <DetailsModal 
+                    file={detailsModal} 
+                    driveName={drives.find(d => d.id === activeDrive)?.name || activeDrive}
+                    onClose={() => setDetailsModal(null)} 
+                    lang={lang} 
+                />
+            )}
+        </AnimatePresence>
+
         <AnimatePresence>{isAddDriveOpen && <div className="fixed inset-0 z-[60]"><AddDriveModal onClose={() => setIsAddDriveOpen(false)} onAdded={(newDrive) => {
           if (newDrive) {
             setDrives(prev => {
