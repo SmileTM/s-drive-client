@@ -56,7 +56,7 @@ const formatSize = (bytes) => {
 
 // --- Components ---
 
-const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive, isSelectionMode }) => {
+const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive, isSelectionMode, showPath }) => {
   const isSelected = selectedPaths.has(file.path);
   const fullPath = file.path;
   const [isDragOver, setIsDragOver] = useState(false);
@@ -238,6 +238,11 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
           )}>
             {file.name}
           </h3>
+          {showPath && (
+            <p className="text-[9px] text-slate-400 truncate leading-none mt-0.5 opacity-70">
+              {file.path}
+            </p>
+          )}
           {!isList && (
             <p className="text-[9px] text-slate-400 mt-0.5 truncate leading-none">
               {file.isDirectory ? 'Folder' : formatSize(file.size)} • {new Date(file.mtime).toLocaleDateString()}
@@ -568,8 +573,13 @@ function App() {
   };
 
   const handleNavigate = (path) => {
+    setLoading(true);
+    setFiles([]);
     setCurrentPath(path);
     localStorage.setItem('last_path', path);
+    setSearchQuery('');
+    setIsGlobalSearch(false);
+    setSearchResults([]);
   };
 
   const handleGoUp = () => {
@@ -1028,6 +1038,7 @@ function App() {
                       onPreview={setPreviewFile}
                       activeDrive={activeDrive}
                       isSelectionMode={selectedPaths.size > 0}
+                      showPath={isGlobalSearch}
                     />
                   ))}
                 </motion.div>
