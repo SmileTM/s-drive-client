@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
 import { Document, Page, pdfjs } from 'react-pdf';
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
+import { Capacitor } from '@capacitor/core';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import api from './api';
@@ -11,11 +13,17 @@ import api from './api';
 // Using CDN for simplicity and reliability in diverse build environments
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
-const PreviewModal = ({ file, onClose, drive = 'local' }) => {
+const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev }) => {
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(false);
   const [url, setUrl] = useState('');
   
+  // Swipe State
+  const touchStart = useRef(null);
+  const touchEnd = useRef(null);
+  const minSwipeDistance = 50;
+  const isZoomed = useRef(false); // Track zoom state
+
   // PDF State
   const [numPages, setNumPages] = useState(null);
   const [pdfScale, setPdfScale] = useState(1.0);
@@ -29,10 +37,25 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
   const isText = fileType.startsWith('text/') || 
                  /\.(json|js|jsx|ts|tsx|py|md|css|html|xml|yml|yaml|ini|conf|sh|bash|zsh)$/i.test(file.name);
 
+  const isNative = Capacitor.isNativePlatform();
+
   useEffect(() => {
     const load = async () => {
+        // Reset Zoom state on file change
+        isZoomed.current = false;
+
         if (isHeic) {
             setLoading(true);
+            
+            // Server-side Conversion (Web/Electron)
+            if (!isNative) {
+                 const previewUrl = `/api/preview?path=${encodeURIComponent(file.path)}&drive=${drive}`;
+                 setUrl(previewUrl);
+                 setLoading(false);
+                 return;
+            }
+
+            // Client-side Conversion (Native Fallback)
             try {
                 // For HEIC, we need the actual blob to convert
                 const blob = await api.getFileBlob(file.path, drive);
@@ -73,31 +96,78 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
     load();
 
     return () => {
-        if (isHeic && url) {
+        if (isHeic && url && isNative) {
             URL.revokeObjectURL(url);
         }
     }
   }, [file.path, drive, isText, isHeic]);
 
-  // Handle Hardware Back Button (Android) and ESC key
+  // Keyboard Navigation
   useEffect(() => {
-    const handleEsc = (e) => {
+    const handleKeyDown = (e) => {
       if (e.key === 'Escape') onClose();
+      if (e.key === 'ArrowRight' && onNext) onNext();
+      if (e.key === 'ArrowLeft' && onPrev) onPrev();
     };
-    window.addEventListener('keydown', handleEsc);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, onNext, onPrev]);
+
+  // Swipe Handlers
+  const onTouchStart = (e) => {
+    if (isZoomed.current) return; // Ignore swipes if zoomed
+    touchEnd.current = null; 
+    touchStart.current = e.targetTouches[0].clientX;
+  };
+
+  const onTouchMove = (e) => {
+    if (isZoomed.current) return;
+    touchEnd.current = e.targetTouches[0].clientX;
+  };
+
+  const onTouchEnd = () => {
+    if (isZoomed.current) return;
+    if (!touchStart.current || !touchEnd.current) return;
+    const distance = touchStart.current - touchEnd.current;
+    const isLeftSwipe = distance > minSwipeDistance;
+    const isRightSwipe = distance < -minSwipeDistance;
     
-    return () => {
-        window.removeEventListener('keydown', handleEsc);
-    };
-  }, [onClose]);
+    if (isLeftSwipe && onNext) onNext();
+    if (isRightSwipe && onPrev) onPrev();
+  };
 
   function onDocumentLoadSuccess({ numPages }) {
     setNumPages(numPages);
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" onClick={onClose}>
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-2xl p-4 transition-all duration-300" 
+      onClick={onClose}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+    >
       
+      {/* Navigation Arrows (Desktop/Tablet) */}
+      {hasPrev && (
+          <button 
+             onClick={(e) => { e.stopPropagation(); onPrev(); }}
+             className="absolute left-4 top-1/2 -translate-y-1/2 p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all hidden md:flex z-50"
+          >
+              <ChevronLeftIcon className="w-8 h-8" />
+          </button>
+      )}
+      
+      {hasNext && (
+          <button 
+             onClick={(e) => { e.stopPropagation(); onNext(); }}
+             className="absolute right-4 top-1/2 -translate-y-1/2 p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all hidden md:flex z-50"
+          >
+              <ChevronRightIcon className="w-8 h-8" />
+          </button>
+      )}
+
       {/* Main Content Area */}
       <div 
         className="relative max-w-5xl max-h-[85vh] w-full flex flex-col items-center justify-center pb-16"
@@ -106,7 +176,25 @@ const PreviewModal = ({ file, onClose, drive = 'local' }) => {
         
         {/* Preview Renderers */}
         {(isImage || isHeic) && url && (
-          <img src={url} alt={file.name} className="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl" />
+            <div className="w-full h-full flex items-center justify-center overflow-hidden">
+                <TransformWrapper
+                    initialScale={1}
+                    minScale={1}
+                    maxScale={8}
+                    centerOnInit={true}
+                    onTransformed={(ref) => {
+                        isZoomed.current = ref.state.scale > 1.01; // Tiny tolerance
+                    }}
+                >
+                    <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
+                        <img 
+                            src={url} 
+                            alt={file.name} 
+                            className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg shadow-2xl" 
+                        />
+                    </TransformComponent>
+                </TransformWrapper>
+            </div>
         )}
 
         {isVideo && url && (

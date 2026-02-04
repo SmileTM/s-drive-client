@@ -56,7 +56,7 @@ const formatSize = (bytes) => {
 
 // --- Components ---
 
-const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive, isSelectionMode, showPath }) => {
+const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive, isSelectionMode, showPath, t }) => {
   const isSelected = selectedPaths.has(file.path);
   const fullPath = file.path;
   const [isDragOver, setIsDragOver] = useState(false);
@@ -69,6 +69,10 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
   // Safe Thumbnail Logic
   const isImage = !file.isDirectory && /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(file.name);
   const isPDF = !file.isDirectory && /\.pdf$/i.test(file.name);
+
+  const itemInfo = file.isDirectory 
+      ? (file.itemCount !== undefined ? t.items.replace('{count}', file.itemCount) : t.folder)
+      : formatSize(file.size);
 
   useEffect(() => {
     let active = true;
@@ -245,14 +249,14 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
           )}
           {!isList && (
             <p className="text-[9px] text-slate-400 mt-0.5 truncate leading-none">
-              {file.isDirectory ? 'Folder' : formatSize(file.size)} • {new Date(file.mtime).toLocaleDateString()}
+              {itemInfo} • {new Date(file.mtime).toLocaleDateString()}
             </p>
           )}
         </div>
 
         {isList && (
           <div className="flex flex-col items-end text-right shrink-0 leading-tight">
-            <span className="text-[10px] text-slate-500 tabular-nums">{file.isDirectory ? 'Folder' : formatSize(file.size)}</span>
+            <span className="text-[10px] text-slate-500 tabular-nums">{itemInfo}</span>
             <span className="text-[9px] text-slate-400 tabular-nums">{new Date(file.mtime).toLocaleDateString()}</span>
           </div>
         )}
@@ -364,7 +368,10 @@ function App() {
       .catch(() => setDrives([]));
   };
 
-  useEffect(() => { fetchDrives(); }, []);
+  useEffect(() => { 
+      fetchDrives(); 
+      if (api.requestPermissions) api.requestPermissions();
+  }, []);
 
   // Ref to keep handlers fresh
   const handleGoUpRef = useRef(null);
@@ -470,10 +477,12 @@ function App() {
 
   // Filtered files
   const filesToDisplay = isGlobalSearch ? searchResults : files;
-  const filteredFiles = useMemo(() => filesToDisplay.filter(f => 
-    // Always filter by query (refine global results or filter local files)
-    f.name.toLowerCase().includes(searchQuery.toLowerCase())
-  ), [filesToDisplay, searchQuery]);
+  const filteredFiles = useMemo(() => {
+      if (isGlobalSearch) return filesToDisplay;
+      return filesToDisplay.filter(f => 
+        f.name.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+  }, [filesToDisplay, searchQuery, isGlobalSearch]);
 
   // Sorted files
   const sortedFiles = useMemo(() => {
@@ -573,6 +582,7 @@ function App() {
   };
 
   const handleNavigate = (path) => {
+    if (path === currentPath) return;
     setLoading(true);
     setFiles([]);
     setCurrentPath(path);
@@ -619,7 +629,29 @@ function App() {
   const toggleSelection = (path) => { const newSet = new Set(selectedPaths); if (newSet.has(path)) newSet.delete(path); else newSet.add(path); setSelectedPaths(newSet); };
   
   const handleDelete = async () => {
+    const selectedItems = files.filter(f => selectedPaths.has(f.path));
+    const folders = selectedItems.filter(f => f.isDirectory);
+
     if (!confirm(t.confirmDeleteItems.replace('{count}', selectedPaths.size))) return;
+
+    if (folders.length > 0) {
+        let hasNonEmptyFolder = false;
+        for (const folder of folders) {
+            try {
+                const contents = await api.getFiles(folder.path, activeDrive);
+                if (contents && contents.length > 0) {
+                    hasNonEmptyFolder = true;
+                    break;
+                }
+            } catch (e) {
+                console.warn('Failed to check folder contents:', folder.path, e);
+            }
+        }
+        if (hasNonEmptyFolder) {
+            if (!confirm(t.confirmDeleteNonEmptyFolder)) return;
+        }
+    }
+
     try { await api.deleteItems(Array.from(selectedPaths), activeDrive); fetchFiles(currentPath); setSelectedPaths(new Set()); } catch (err) { alert(t.deleteFailed); }
   };
   const handleMove = async (items, destination) => {
@@ -1010,7 +1042,7 @@ function App() {
           <div className={clsx("grid gap-3 transition-all", viewMode === 'grid' ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" : "grid-cols-1")}>
             {loading && files.length === 0 ? (
               <div className="col-span-full py-20 text-center text-slate-400">{t.loading}</div>
-            ) : files.length === 0 ? (
+            ) : !isGlobalSearch && files.length === 0 ? (
               <div className="col-span-full py-20 text-center flex flex-col items-center gap-3">
                  <div className="w-16 h-16 bg-white rounded-full shadow-island flex items-center justify-center"><FolderIcon className="w-8 h-8 text-slate-300" /></div>
                  <p className="text-slate-400">{t.emptyFolder}</p>
@@ -1039,6 +1071,7 @@ function App() {
                       activeDrive={activeDrive}
                       isSelectionMode={selectedPaths.size > 0}
                       showPath={isGlobalSearch}
+                      t={t}
                     />
                   ))}
                 </motion.div>
@@ -1169,7 +1202,32 @@ function App() {
             )}
         </AnimatePresence>
 
-        <AnimatePresence>{previewFile && <div className="fixed inset-0 z-50"><PreviewModal file={{...previewFile, path: previewFile.path}} onClose={() => setPreviewFile(null)} drive={activeDrive} lang={lang} /></div>}</AnimatePresence>
+        <AnimatePresence>
+          {previewFile && (
+            <div className="fixed inset-0 z-50">
+              <PreviewModal 
+                file={{...previewFile, path: previewFile.path}} 
+                onClose={() => setPreviewFile(null)} 
+                drive={activeDrive} 
+                lang={lang} 
+                onNext={() => {
+                   const currentIndex = sortedFiles.findIndex(f => f.path === previewFile.path);
+                   if (currentIndex !== -1 && currentIndex < sortedFiles.length - 1) {
+                       setPreviewFile(sortedFiles[currentIndex + 1]);
+                   }
+                }}
+                onPrev={() => {
+                   const currentIndex = sortedFiles.findIndex(f => f.path === previewFile.path);
+                   if (currentIndex > 0) {
+                       setPreviewFile(sortedFiles[currentIndex - 1]);
+                   }
+                }}
+                hasNext={sortedFiles.findIndex(f => f.path === previewFile.path) < sortedFiles.length - 1}
+                hasPrev={sortedFiles.findIndex(f => f.path === previewFile.path) > 0}
+              />
+            </div>
+          )}
+        </AnimatePresence>
         <AnimatePresence>{isAddDriveOpen && <div className="fixed inset-0 z-[60]"><AddDriveModal onClose={() => setIsAddDriveOpen(false)} onAdded={(newDrive) => {
           if (newDrive) {
             setDrives(prev => {

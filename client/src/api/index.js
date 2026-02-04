@@ -389,7 +389,8 @@ const ServerAPI = {
   searchItems: async (query, driveId, rootPath = '/') => {
     const res = await axios.get(`/api/search?query=${encodeURIComponent(query)}&drive=${driveId}&path=${encodeURIComponent(rootPath)}`);
     return res.data;
-  }
+  },
+  requestPermissions: async () => {}
 };
 
 // --- Helper: Base64 to Blob ---
@@ -458,6 +459,29 @@ const NativeAPI = {
       return res.files.map(f => normalizeNativeFile(f, reqPath));
     } catch (e) {
       console.error("[Native] Read Error:", e);
+      
+      // Fallback: Try Native Plugin for restricted directories (e.g. /Android/data)
+      if (Capacitor.getPlatform() === 'android') {
+           try {
+               console.log(`[Native] Filesystem.readdir failed, trying WebDavNative.listDirectory for ${reqPath}`);
+               const cleanPath = reqPath.startsWith('/') ? reqPath : '/' + reqPath;
+               const res = await WebDavNative.listDirectory({ path: cleanPath });
+               
+               // Normalize Native Plugin result
+               // Assuming res.items is array of { name, isDirectory, size, mtime }
+               return res.items.map(item => ({
+                   name: item.name,
+                   path: cleanPath === '/' ? `/${item.name}` : `${cleanPath}/${item.name}`,
+                   isDirectory: item.isDirectory,
+                   size: item.size || 0,
+                   mtime: item.mtime || Date.now(),
+                   type: item.isDirectory ? 'folder' : 'application/octet-stream'
+               }));
+           } catch (innerErr) {
+               console.warn('[Native] WebDavNative.listDirectory also failed:', innerErr);
+           }
+      }
+
       // If we can't read root, maybe return empty or throw to show UI error
       return [];
     }
@@ -471,11 +495,28 @@ const NativeAPI = {
        await client.createDirectory(path);
        return;
     }
-    await Filesystem.mkdir({
-      path: path,
-      directory: Directory.ExternalStorage,
-      recursive: true // Like ensureDir
-    });
+    try {
+        await Filesystem.mkdir({
+          path: path,
+          directory: Directory.ExternalStorage,
+          recursive: true // Like ensureDir
+        });
+    } catch (e) {
+        // Fallback to Native Plugin for restricted directories (e.g. /Android/data)
+        if (Capacitor.getPlatform() === 'android') {
+            try {
+                console.log(`[Native] Filesystem.mkdir failed, trying WebDavNative.createDirectory for ${path}`);
+                // Ensure path starts with /
+                const cleanPath = path.startsWith('/') ? path : '/' + path;
+                await WebDavNative.createDirectory({ path: cleanPath });
+                return;
+            } catch (innerErr) {
+                console.error('[Native] WebDavNative.createDirectory also failed:', innerErr);
+                throw e; // Throw original error
+            }
+        }
+        throw e;
+    }
   },
 
   deleteItems: async (items, driveId) => {
@@ -486,12 +527,29 @@ const NativeAPI = {
        await Promise.all(items.map(item => client.deleteFile(item)));
        return;
     }
-    await Promise.all(items.map(itemPath => 
-      Filesystem.deleteFile({
-        path: itemPath,
-        directory: Directory.ExternalStorage
-      })
-    ));
+    await Promise.all(items.map(async itemPath => {
+      try {
+        const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
+        if (stat.type === 'directory') {
+          await Filesystem.rmdir({
+            path: itemPath,
+            directory: Directory.ExternalStorage,
+            recursive: true
+          });
+        } else {
+          await Filesystem.deleteFile({
+            path: itemPath,
+            directory: Directory.ExternalStorage
+          });
+        }
+      } catch (e) {
+        console.error('[Native] Delete failed for', itemPath, e);
+        // Fallback: just try deleteFile if stat fails
+        try {
+          await Filesystem.deleteFile({ path: itemPath, directory: Directory.ExternalStorage });
+        } catch (inner) {}
+      }
+    }));
   },
   
   renameItem: async (oldPath, newName, currentPath, driveId) => {
@@ -855,6 +913,17 @@ const NativeAPI = {
     } catch (e) {
         console.warn('[Native] Search failed:', e);
         return [];
+    }
+  },
+
+  requestPermissions: async () => {
+    try {
+        await Filesystem.requestPermissions();
+        if (Capacitor.getPlatform() === 'android') {
+            await WebDavNative.requestManageStoragePermission();
+        }
+    } catch (e) {
+        console.warn('[Native] Failed to request permissions:', e);
     }
   }
 };

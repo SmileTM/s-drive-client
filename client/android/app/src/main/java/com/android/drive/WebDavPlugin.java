@@ -140,6 +140,72 @@ public class WebDavPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void listDirectory(PluginCall call) {
+        String path = call.getString("path");
+        if (path == null) {
+            call.reject("Path is required");
+            return;
+        }
+
+        File root = Environment.getExternalStorageDirectory();
+        File dir = new File(root, path);
+
+        if (!dir.exists() || !dir.isDirectory()) {
+            call.reject("Directory does not exist");
+            return;
+        }
+
+        File[] files = dir.listFiles();
+        com.getcapacitor.JSArray results = new com.getcapacitor.JSArray();
+
+        if (files != null) {
+            for (File f : files) {
+                JSObject item = new JSObject();
+                item.put("name", f.getName());
+                item.put("isDirectory", f.isDirectory());
+                item.put("size", f.length());
+                item.put("mtime", f.lastModified());
+                results.put(item);
+            }
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("items", results);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void createDirectory(PluginCall call) {
+        String path = call.getString("path");
+        if (path == null) {
+            call.reject("Path is required");
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                call.reject("Manage All Files permission is required");
+                return;
+            }
+        }
+
+        File root = Environment.getExternalStorageDirectory();
+        File dir = new File(root, path);
+
+        if (dir.exists()) {
+            call.resolve();
+            return;
+        }
+
+        boolean success = dir.mkdirs();
+        if (success) {
+            call.resolve();
+        } else {
+            call.reject("Failed to create directory: " + dir.getAbsolutePath());
+        }
+    }
+
+    @PluginMethod
     public void request(PluginCall call) {
         String url = call.getString("url");
         String method = call.getString("method", "GET");
