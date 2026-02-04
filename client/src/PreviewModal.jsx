@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon, PlayIcon, PauseIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
 import clsx from 'clsx';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { Capacitor } from '@capacitor/core';
+import { motion } from 'framer-motion';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import api from './api';
@@ -14,6 +15,189 @@ import { translations } from './i18n';
 // Standard way for Vite: use import meta url or CDN
 // Using CDN for simplicity and reliability in diverse build environments
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+const formatTime = (seconds) => {
+    if (!seconds || isNaN(seconds)) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+const CustomAudioPlayer = ({ url, autoPlay = false }) => {
+    const audioRef = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(autoPlay);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+
+    useEffect(() => {
+        const audio = audioRef.current;
+        if (!audio) return;
+
+        if (autoPlay) {
+            audio.play().catch(() => setIsPlaying(false));
+        }
+
+        const updateTime = () => setCurrentTime(audio.currentTime);
+        const updateDuration = () => setDuration(audio.duration);
+        const onEnded = () => setIsPlaying(false);
+
+        audio.addEventListener('timeupdate', updateTime);
+        audio.addEventListener('loadedmetadata', updateDuration);
+        audio.addEventListener('ended', onEnded);
+
+        return () => {
+            audio.removeEventListener('timeupdate', updateTime);
+            audio.removeEventListener('loadedmetadata', updateDuration);
+            audio.removeEventListener('ended', onEnded);
+        };
+    }, [url, autoPlay]);
+
+    const togglePlay = () => {
+        if (!audioRef.current) return;
+        if (isPlaying) {
+            audioRef.current.pause();
+        } else {
+            audioRef.current.play();
+        }
+        setIsPlaying(!isPlaying);
+    };
+
+    const handleSeek = (e) => {
+        const time = parseFloat(e.target.value);
+        if (audioRef.current) {
+            audioRef.current.currentTime = time;
+            setCurrentTime(time);
+        }
+    };
+
+    return (
+        <div className="w-full flex flex-col gap-2 mt-2">
+            <audio ref={audioRef} src={url} className="hidden" />
+            
+            {/* Controls Row */}
+            <div className="flex items-center gap-4">
+                 <button 
+                    onClick={togglePlay}
+                    className="p-3 bg-indigo-500 rounded-full text-white hover:bg-indigo-600 transition-colors shadow-md flex-shrink-0"
+                 >
+                    {isPlaying ? <PauseIcon className="w-6 h-6" /> : <PlayIcon className="w-6 h-6" />}
+                 </button>
+                 
+                 {/* Progress Bar (Line 1) */}
+                 <div className="flex-1 flex flex-col justify-center gap-1">
+                     <input
+                        type="range"
+                        min="0"
+                        max={duration || 0}
+                        value={currentTime}
+                        onChange={handleSeek}
+                        className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:accent-indigo-600"
+                     />
+                     
+                     {/* Time Display (Line 2) */}
+                     <div className="flex justify-between text-xs text-slate-500 font-medium px-0.5">
+                        <span>{formatTime(currentTime)}</span>
+                        <span>{formatTime(duration)}</span>
+                     </div>
+                 </div>
+            </div>
+        </div>
+    );
+};
+
+const CustomVideoPlayer = ({ url, autoPlay = false }) => {
+    const videoRef = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(autoPlay);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video) return;
+
+        // AutoPlay handled by prop on element, but we need to sync state
+        const onPlay = () => setIsPlaying(true);
+        const onPause = () => setIsPlaying(false);
+        const updateTime = () => setCurrentTime(video.currentTime);
+        const updateDuration = () => setDuration(video.duration);
+        const onEnded = () => setIsPlaying(false);
+
+        video.addEventListener('play', onPlay);
+        video.addEventListener('pause', onPause);
+        video.addEventListener('timeupdate', updateTime);
+        video.addEventListener('loadedmetadata', updateDuration);
+        video.addEventListener('ended', onEnded);
+
+        return () => {
+            video.removeEventListener('play', onPlay);
+            video.removeEventListener('pause', onPause);
+            video.removeEventListener('timeupdate', updateTime);
+            video.removeEventListener('loadedmetadata', updateDuration);
+            video.removeEventListener('ended', onEnded);
+        };
+    }, [url]);
+
+    const togglePlay = () => {
+        if (!videoRef.current) return;
+        if (isPlaying) videoRef.current.pause();
+        else videoRef.current.play();
+    };
+
+    const handleSeek = (e) => {
+        const time = parseFloat(e.target.value);
+        if (videoRef.current) {
+            videoRef.current.currentTime = time;
+            setCurrentTime(time);
+        }
+    };
+
+    return (
+        <div className="flex flex-col w-full bg-black/80 backdrop-blur-xl rounded-2xl overflow-hidden shadow-2xl">
+            <div className="relative w-full bg-black" onClick={togglePlay}>
+                <video 
+                    ref={videoRef} 
+                    src={url} 
+                    autoPlay={autoPlay}
+                    className="w-full max-h-[70vh] object-contain"
+                />
+                {/* Overlay Play Button (Fade out if playing?) - simplified: show only when paused */}
+                {!isPlaying && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none">
+                         <div className="p-4 bg-white/20 backdrop-blur-md rounded-full text-white">
+                             <PlayIcon className="w-12 h-12" />
+                         </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Custom Controls Bar */}
+            <div className="p-4 flex items-center gap-4 text-white">
+                 <button 
+                    onClick={togglePlay}
+                    className="p-2 hover:bg-white/10 rounded-full transition-colors flex-shrink-0"
+                 >
+                    {isPlaying ? <PauseIcon className="w-6 h-6" /> : <PlayIcon className="w-6 h-6" />}
+                 </button>
+                 
+                 <div className="flex-1 flex flex-col justify-center gap-1.5">
+                     <input
+                        type="range"
+                        min="0"
+                        max={duration || 0}
+                        value={currentTime}
+                        onChange={handleSeek}
+                        className="w-full h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:accent-indigo-400"
+                     />
+                     
+                     <div className="flex justify-between text-[10px] text-white/60 font-medium px-0.5">
+                        <span>{formatTime(currentTime)}</span>
+                        <span>{formatTime(duration)}</span>
+                     </div>
+                 </div>
+            </div>
+        </div>
+    );
+};
 
 const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh' }) => {
   const t = translations[lang];
@@ -146,8 +330,11 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
   }
 
   return (
-    <div 
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-2xl p-4 transition-all duration-300" 
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-2xl p-4" 
       onClick={onClose}
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
@@ -174,7 +361,11 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
       )}
 
       {/* Main Content Area */}
-      <div 
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        transition={{ type: "spring", stiffness: 300, damping: 30 }}
         className="relative max-w-5xl max-h-[85vh] w-full flex flex-col items-center justify-center pb-16"
         onClick={e => e.stopPropagation()} // Prevent closing when clicking content
       >
@@ -206,16 +397,16 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
 
         {isVideo && url && (
-          <video src={url} controls autoPlay className="max-w-full max-h-[80vh] rounded-lg shadow-2xl bg-black" />
+          <CustomVideoPlayer url={url} autoPlay={true} />
         )}
 
         {isAudio && url && (
-          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[32px] shadow-2xl flex flex-col items-center gap-4 min-w-[300px] border border-white/20">
+          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[32px] shadow-2xl flex flex-col items-center gap-4 min-w-[300px] w-full max-w-md border border-white/20">
             <div className="w-24 h-24 bg-indigo-100/50 rounded-full flex items-center justify-center mb-2">
               <DocumentIcon className="w-12 h-12 text-indigo-500" />
             </div>
             <h3 className="font-medium text-slate-800 text-center truncate w-full px-2">{file.name}</h3>
-            <audio src={url} controls className="w-full" autoPlay />
+            <CustomAudioPlayer url={url} autoPlay={true} />
           </div>
         )}
 
@@ -286,7 +477,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
             )}
           </div>
         )}
-      </div>
+      </motion.div>
 
       {/* Unified Bottom Controls - Centered for Mobile Ergonomics */}
       <div 
@@ -329,7 +520,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
       </div>
 
-    </div>
+    </motion.div>
   );
 };
 
