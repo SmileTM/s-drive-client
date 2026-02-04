@@ -202,3 +202,4 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
     </div>
   );
 };
+export default AddDriveModal;
