@@ -65,12 +65,12 @@ export const translations = {
     name: "Name",
     date: "Date",
     type: "Type",
+    size: "Size",
     items: "{count} items",
     // Details
     details: "Details",
     fileInfo: "File Information",
     path: "Path",
-    size: "Size",
     modified: "Modified",
     location: "Location"
   },
@@ -140,12 +140,12 @@ export const translations = {
     name: "名称",
     date: "日期",
     type: "类型",
+    size: "大小",
     items: "{count} 项",
     // Details
     details: "详情",
     fileInfo: "文件信息",
     path: "路径",
-    size: "大小",
     modified: "修改时间",
     location: "位置"
   }

@@ -34,72 +34,50 @@ const DetailsModal = ({ file, driveName, onClose, lang = 'zh' }) => {
                 initial={{ opacity: 0, scale: 0.95, y: 10 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                transition={{ type: "spring", stiffness: 400, damping: 30 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden"
+                className="bg-white/90 backdrop-blur-2xl rounded-[32px] shadow-2xl w-full max-w-sm overflow-hidden border border-white/20 p-6 flex flex-col gap-4"
             >
-                {/* Header */}
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                    <h3 className="font-semibold text-slate-800">{t.fileInfo}</h3>
-                    <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
-                        <XMarkIcon className="w-5 h-5" />
-                    </button>
+                <div className="text-center">
+                    <h3 className="text-lg font-semibold text-slate-800">{t.fileInfo}</h3>
                 </div>
 
-                {/* Content */}
-                <div className="p-6">
-                    {/* Icon & Name */}
-                    <div className="flex flex-col items-center mb-6">
-                        <div className="w-20 h-20 bg-indigo-50 rounded-2xl flex items-center justify-center mb-3 shadow-inner text-indigo-500">
-                            {isFolder ? <FolderIcon className="w-10 h-10" /> : <DocumentIcon className="w-10 h-10" />}
-                        </div>
-                        <h2 className="text-lg font-medium text-slate-800 text-center break-all px-2">{file.name}</h2>
-                        <p className="text-xs text-slate-400 mt-1">{isFolder ? t.folder : t.file}</p>
+                <div className="flex flex-col items-center">
+                    <div className="w-16 h-16 bg-white/50 rounded-2xl flex items-center justify-center mb-3 shadow-sm border border-white/20 text-indigo-500">
+                        {isFolder ? <FolderIcon className="w-8 h-8" /> : <DocumentIcon className="w-8 h-8" />}
+                    </div>
+                    <h2 className="text-base font-medium text-slate-800 text-center break-all px-2 line-clamp-2">{file.name}</h2>
+                    <p className="text-xs text-slate-400 mt-1">{isFolder ? t.folder : t.file}</p>
+                </div>
+
+                <div className="space-y-3 w-full bg-slate-50/50 rounded-2xl p-4 border border-white/10">
+                    <div className="flex justify-between items-center text-xs">
+                        <span className="text-slate-400">{t.type}</span>
+                        <span className="text-slate-700 font-medium truncate max-w-[70%]">{isFolder ? t.folder : (file.type || 'Unknown')}</span>
+                    </div>
+                    
+                    <div className="flex justify-between items-center text-xs">
+                        <span className="text-slate-400">{t.location}</span>
+                        <span className="text-slate-700 font-medium truncate max-w-[70%]">{driveName}</span>
                     </div>
 
-                    {/* Info Grid */}
-                    <div className="space-y-4">
-                        <div className="flex justify-between items-start text-sm">
-                            <span className="text-slate-400 shrink-0">{t.type}</span>
-                            <span className="text-slate-700 font-medium text-right break-all pl-4">
-                                {isFolder ? t.folder : (file.type || 'Unknown')}
-                            </span>
-                        </div>
-                        <div className="w-full h-px bg-slate-50" />
-                        
-                        <div className="flex justify-between items-start text-sm">
-                            <span className="text-slate-400 shrink-0">{t.location}</span>
-                            <span className="text-slate-700 font-medium text-right pl-4">{driveName}</span>
-                        </div>
-                        <div className="w-full h-px bg-slate-50" />
+                    <div className="flex justify-between items-center text-xs">
+                        <span className="text-slate-400">{t.size}</span>
+                        <span className="text-slate-700 font-medium truncate max-w-[70%]">{sizeDisplay}</span>
+                    </div>
 
-                        <div className="flex justify-between items-start text-sm">
-                            <span className="text-slate-400 shrink-0">{t.path}</span>
-                            <span className="text-slate-700 font-medium text-right break-all pl-4 font-mono text-xs">{file.path}</span>
-                        </div>
-                        <div className="w-full h-px bg-slate-50" />
-
-                        <div className="flex justify-between items-start text-sm">
-                            <span className="text-slate-400 shrink-0">{t.size}</span>
-                            <span className="text-slate-700 font-medium text-right pl-4">{sizeDisplay}</span>
-                        </div>
-                        <div className="w-full h-px bg-slate-50" />
-
-                        <div className="flex justify-between items-start text-sm">
-                            <span className="text-slate-400 shrink-0">{t.modified}</span>
-                            <span className="text-slate-700 font-medium text-right pl-4">{dateDisplay}</span>
-                        </div>
+                    <div className="flex justify-between items-center text-xs">
+                        <span className="text-slate-400">{t.modified}</span>
+                        <span className="text-slate-700 font-medium truncate max-w-[70%]">{dateDisplay}</span>
                     </div>
                 </div>
 
-                {/* Footer */}
-                <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-center">
-                    <button 
-                        onClick={onClose}
-                        className="w-full py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl font-medium hover:bg-slate-50 hover:border-slate-300 transition-all text-sm shadow-sm"
-                    >
-                        {t.close}
-                    </button>
-                </div>
+                <button 
+                    onClick={onClose}
+                    className="w-full py-3 bg-indigo-500 text-white rounded-2xl font-medium hover:bg-indigo-600 transition-all text-sm shadow-lg shadow-indigo-200 mt-2"
+                >
+                    {t.close}
+                </button>
             </motion.div>
         </div>
     );

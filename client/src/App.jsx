@@ -38,6 +38,7 @@ import PreviewModal from './PreviewModal';
 import AddDriveModal from './AddDriveModal';
 import InputModal from './InputModal';
 import DetailsModal from './DetailsModal';
+import ConfirmModal from './ConfirmModal';
 import { translations } from './i18n';
 
 // --- Icons Helper ---
@@ -343,6 +344,7 @@ function App() {
   const [progress, setProgress] = useState(null); 
   const [inputModal, setInputModal] = useState({ isOpen: false, title: '', defaultValue: '', onConfirm: () => {} });
   const [detailsModal, setDetailsModal] = useState(null);
+  const [confirmModal, setConfirmModal] = useState({ isOpen: false, title: '', message: '', type: 'info', onConfirm: () => {} });
 
   // Language State
   const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
@@ -509,6 +511,9 @@ function App() {
           const extB = b.name.split('.').pop();
           res = extA.localeCompare(extB);
           break;
+        case 'size':
+          res = a.size - b.size;
+          break;
         default: break;
       }
       
@@ -631,31 +636,53 @@ function App() {
 
   const toggleSelection = (path) => { const newSet = new Set(selectedPaths); if (newSet.has(path)) newSet.delete(path); else newSet.add(path); setSelectedPaths(newSet); };
   
-  const handleDelete = async () => {
+  const handleDelete = () => {
     const selectedItems = files.filter(f => selectedPaths.has(f.path));
     const folders = selectedItems.filter(f => f.isDirectory);
 
-    if (!confirm(t.confirmDeleteItems.replace('{count}', selectedPaths.size))) return;
+    const executeDelete = async () => {
+        try { 
+            await api.deleteItems(Array.from(selectedPaths), activeDrive); 
+            fetchFiles(currentPath); 
+            setSelectedPaths(new Set()); 
+        } catch (err) { alert(t.deleteFailed); }
+    };
 
-    if (folders.length > 0) {
-        let hasNonEmptyFolder = false;
-        for (const folder of folders) {
-            try {
-                const contents = await api.getFiles(folder.path, activeDrive);
-                if (contents && contents.length > 0) {
-                    hasNonEmptyFolder = true;
-                    break;
+    const checkFoldersAndConfirm = async () => {
+        if (folders.length > 0) {
+            let hasNonEmptyFolder = false;
+            for (const folder of folders) {
+                try {
+                    const contents = await api.getFiles(folder.path, activeDrive);
+                    if (contents && contents.length > 0) {
+                        hasNonEmptyFolder = true;
+                        break;
+                    }
+                } catch (e) {
+                    console.warn('Failed to check folder contents:', folder.path, e);
                 }
-            } catch (e) {
-                console.warn('Failed to check folder contents:', folder.path, e);
+            }
+            if (hasNonEmptyFolder) {
+                setConfirmModal({
+                    isOpen: true,
+                    title: t.delete,
+                    message: t.confirmDeleteNonEmptyFolder,
+                    type: 'danger',
+                    onConfirm: executeDelete
+                });
+                return;
             }
         }
-        if (hasNonEmptyFolder) {
-            if (!confirm(t.confirmDeleteNonEmptyFolder)) return;
-        }
-    }
+        executeDelete();
+    };
 
-    try { await api.deleteItems(Array.from(selectedPaths), activeDrive); fetchFiles(currentPath); setSelectedPaths(new Set()); } catch (err) { alert(t.deleteFailed); }
+    setConfirmModal({
+        isOpen: true,
+        title: t.delete,
+        message: t.confirmDeleteItems.replace('{count}', selectedPaths.size),
+        type: 'danger',
+        onConfirm: checkFoldersAndConfirm
+    });
   };
   const handleMove = async (items, destination) => {
     if (items.includes(destination)) return;
@@ -732,19 +759,26 @@ function App() {
       if (file) setDetailsModal(file);
   };
 
-  const removeDrive = async (id, e) => {
+  const removeDrive = (id, e) => {
     e.stopPropagation();
-    if (!confirm(t.confirmRemoveDrive)) return;
-    try {
-      await api.removeDrive(id);
-      if (activeDrive === id) {
-        setActiveDrive('local');
-        localStorage.setItem('last_drive', 'local');
-        setCurrentPath('/');
-        localStorage.setItem('last_path', '/');
-      }
-      fetchDrives();
-    } catch (err) { alert('Failed to remove drive'); }
+    setConfirmModal({
+        isOpen: true,
+        title: t.settings,
+        message: t.confirmRemoveDrive,
+        type: 'danger',
+        onConfirm: async () => {
+            try {
+              await api.removeDrive(id);
+              if (activeDrive === id) {
+                setActiveDrive('local');
+                localStorage.setItem('last_drive', 'local');
+                setCurrentPath('/');
+                localStorage.setItem('last_path', '/');
+              }
+              fetchDrives();
+            } catch (err) { alert('Failed to remove drive'); }
+        }
+    });
   };
 
   const handleEditDrive = (id, currentName, e) => {
@@ -977,7 +1011,7 @@ function App() {
                       <>
                         <div className="fixed inset-0 z-10" onClick={() => setIsSortMenuOpen(false)} />
                         <div className="absolute right-0 top-full mt-2 w-32 bg-white rounded-xl shadow-xl border border-slate-100 z-20 overflow-hidden py-1">
-                          {['name', 'date', 'type'].map(key => (
+                          {['name', 'date', 'type', 'size'].map(key => (
                             <button
                               key={key}
                               onClick={() => handleSort(key)}
@@ -1260,6 +1294,16 @@ function App() {
                     driveName={drives.find(d => d.id === activeDrive)?.name || activeDrive}
                     onClose={() => setDetailsModal(null)} 
                     lang={lang} 
+                />
+            )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+            {confirmModal.isOpen && (
+                <ConfirmModal 
+                    {...confirmModal}
+                    onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+                    lang={lang}
                 />
             )}
         </AnimatePresence>
