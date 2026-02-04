@@ -81,12 +81,19 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
       <motion.div 
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 10 }}
         transition={{ type: "spring", stiffness: 400, damping: 30 }}
+        onClick={(e) => e.stopPropagation()}
         className="bg-white/90 backdrop-blur-2xl rounded-[32px] shadow-2xl w-full max-w-md overflow-hidden border border-white/20 p-6 flex flex-col gap-4"
       >
         
@@ -199,7 +206,7 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
 
         </form>
       </motion.div>
-    </div>
+    </motion.div>
   );
 };
 export default AddDriveModal;

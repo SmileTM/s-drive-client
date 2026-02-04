@@ -27,7 +27,13 @@ export default function InputModal({ isOpen, title, defaultValue = '', placehold
   }[lang] || { cancel: 'Cancel', confirm: 'Confirm' };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" 
+      onClick={onClose}
+    >
       <motion.div 
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -66,6 +72,6 @@ export default function InputModal({ isOpen, title, defaultValue = '', placehold
           </div>
         </form>
       </motion.div>
-    </div>
+    </motion.div>
   );
 }

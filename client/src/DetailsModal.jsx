@@ -29,7 +29,13 @@ const DetailsModal = ({ file, driveName, onClose, lang = 'zh' }) => {
     });
 
     return (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
+        <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" 
+            onClick={onClose}
+        >
             <motion.div 
                 initial={{ opacity: 0, scale: 0.95, y: 10 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -79,7 +85,7 @@ const DetailsModal = ({ file, driveName, onClose, lang = 'zh' }) => {
                     {t.close}
                 </button>
             </motion.div>
-        </div>
+        </motion.div>
     );
 };
 

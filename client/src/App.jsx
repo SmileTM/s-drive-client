@@ -1262,7 +1262,12 @@ function App() {
 
         <AnimatePresence>
           {previewFile && (
-            <div className="fixed inset-0 z-50">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50"
+            >
               <PreviewModal 
                 file={{...previewFile, path: previewFile.path}} 
                 onClose={() => setPreviewFile(null)} 
@@ -1283,7 +1288,7 @@ function App() {
                 hasNext={sortedFiles.findIndex(f => f.path === previewFile.path) < sortedFiles.length - 1}
                 hasPrev={sortedFiles.findIndex(f => f.path === previewFile.path) > 0}
               />
-            </div>
+            </motion.div>
           )}
         </AnimatePresence>
         
