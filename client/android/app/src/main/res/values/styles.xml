@@ -15,8 +15,18 @@
         <item name="android:background">@null</item>
     </style>
 
-
+    <!-- Updated Splash Screen Theme -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
+        <!-- Background color: White (or transparent if desired, but window needs a color) -->
+        <item name="windowSplashScreenBackground">@android:color/white</item>
+        
+        <!-- The Icon: Use the round launcher icon -->
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_round</item>
+        
+        <!-- Animation Duration: 1000ms -->
+        <item name="windowSplashScreenAnimationDuration">1000</item>
+        
+        <!-- Post-splash theme -->
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
     </style>
 </resources>
