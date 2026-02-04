@@ -430,11 +430,12 @@ const NativeAPI = {
     // Convert Web Path to Native Path
     // Native Root is usually 'Documents' or 'ExternalStorage'
     
+    let nativeFiles = [];
+
     try {
       // Request permissions first
       try {
         const permStatus = await Filesystem.requestPermissions();
-        console.log('[Native] Permission Status:', permStatus);
         
         // Request MANAGE_EXTERNAL_STORAGE for Android 11+
         if (Capacitor.getPlatform() === 'android') {
@@ -456,7 +457,8 @@ const NativeAPI = {
       });
       console.log(`[Native] Found ${res.files.length} items.`);
       
-      return res.files.map(f => normalizeNativeFile(f, reqPath));
+      nativeFiles = res.files.map(f => normalizeNativeFile(f, reqPath));
+
     } catch (e) {
       console.error("[Native] Read Error:", e);
       
@@ -468,8 +470,7 @@ const NativeAPI = {
                const res = await WebDavNative.listDirectory({ path: cleanPath });
                
                // Normalize Native Plugin result
-               // Assuming res.items is array of { name, isDirectory, size, mtime }
-               return res.items.map(item => ({
+               nativeFiles = res.items.map(item => ({
                    name: item.name,
                    path: cleanPath === '/' ? `/${item.name}` : `${cleanPath}/${item.name}`,
                    isDirectory: item.isDirectory,
@@ -481,10 +482,37 @@ const NativeAPI = {
                console.warn('[Native] WebDavNative.listDirectory also failed:', innerErr);
            }
       }
-
-      // If we can't read root, maybe return empty or throw to show UI error
-      return [];
     }
+
+    // Enhance with itemCount for directories
+    if (nativeFiles.length > 0) {
+        await Promise.all(nativeFiles.map(async (file) => {
+            if (file.isDirectory) {
+                try {
+                    // Try Filesystem first
+                    const sub = await Filesystem.readdir({ 
+                        path: file.path, 
+                        directory: Directory.ExternalStorage 
+                    });
+                    file.itemCount = sub.files.length;
+                } catch (e) {
+                    // Fallback to Native Plugin if Filesystem fails (e.g. Android 11+ restrictions)
+                     if (Capacitor.getPlatform() === 'android') {
+                        try {
+                            const sub = await WebDavNative.listDirectory({ path: file.path });
+                            file.itemCount = sub.items.length;
+                        } catch (inner) {
+                            file.itemCount = 0;
+                        }
+                     } else {
+                        file.itemCount = 0;
+                     }
+                }
+            }
+        }));
+    }
+
+    return nativeFiles;
   },
 
   createFolder: async (path, driveId) => {
