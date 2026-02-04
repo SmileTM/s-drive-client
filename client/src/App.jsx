@@ -1102,22 +1102,21 @@ function App() {
             }}
             className={clsx(
               "shadow-[0_20px_50px_rgba(0,0,0,0.1)] backdrop-blur-xl border border-white/20 pointer-events-auto flex items-center overflow-hidden",
-              isSelectionMode ? "bg-white/90 w-[300px] h-14 rounded-full" : hasClipboard ? "bg-indigo-50/90 w-52 h-14 rounded-full" : isIslandExpanded ? "bg-white/90 w-72 h-20 rounded-[40px]" : "bg-white/80 w-32 h-14 rounded-full"
+              isSelectionMode ? "bg-white/90 w-fit min-w-[150px] h-14 rounded-full px-2" : hasClipboard ? "bg-indigo-50/90 w-52 h-14 rounded-full" : isIslandExpanded ? "bg-white/90 w-72 h-20 rounded-[40px]" : "bg-white/80 w-32 h-14 rounded-full"
             )}
           >
             {isSelectionMode ? (
-               <div className="w-full h-full flex items-center justify-around px-4">
-                 <motion.button layout onClick={handleDelete} className="text-red-500 font-medium text-xs hover:bg-red-100 px-2 py-1 rounded-lg whitespace-nowrap">
+               <div className="w-full h-full flex items-center justify-center gap-1 px-2">
+                 <button onClick={handleDelete} className="text-red-500 font-medium text-xs hover:bg-red-100 px-2 py-1 rounded-lg whitespace-nowrap">
                     {t.delete} ({selectedPaths.size})
-                 </motion.button>
+                 </button>
                  
-                 <motion.div layout className="w-px h-4 bg-slate-100 shrink-0"></motion.div>
+                 <div className="w-px h-4 bg-slate-100 shrink-0"></div>
 
-                 <AnimatePresence mode="popLayout">
+                 <AnimatePresence>
                  {selectedPaths.size === 1 && (
                    <motion.div 
                     key="single-actions"
-                    layout
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
@@ -1131,21 +1130,20 @@ function App() {
                  )}
                  </AnimatePresence>
 
-                 <motion.button layout onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                 <button onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
                     {t.move}
-                 </motion.button>
+                 </button>
                  
-                 <motion.div layout className="w-px h-4 bg-slate-100 shrink-0"></motion.div>
+                 <div className="w-px h-4 bg-slate-100 shrink-0"></div>
 
-                 <motion.button layout onClick={handleCopy} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1">
+                 <button onClick={handleCopy} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1">
                     {t.copy}
-                 </motion.button>
+                 </button>
 
-                 <AnimatePresence mode="popLayout">
+                 <AnimatePresence>
                  {selectedPaths.size === 1 && (
                    <motion.div 
                     key="detail-action"
-                    layout
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
