@@ -1101,8 +1101,8 @@ function App() {
               damping: 30
             }}
             className={clsx(
-              "shadow-[0_20px_50px_rgba(0,0,0,0.1)] backdrop-blur-xl border border-white/20 pointer-events-auto flex items-center overflow-hidden",
-              isSelectionMode ? "bg-white/90 w-fit min-w-[150px] h-14 rounded-full px-2" : hasClipboard ? "bg-indigo-50/90 w-52 h-14 rounded-full" : isIslandExpanded ? "bg-white/90 w-72 h-20 rounded-[40px]" : "bg-white/80 w-32 h-14 rounded-full"
+              "shadow-[0_20px_50px_rgba(0,0,0,0.15)] backdrop-blur-2xl border border-white/40 pointer-events-auto flex items-center overflow-hidden",
+              isSelectionMode ? "bg-white/40 w-fit min-w-[150px] h-14 rounded-full px-2" : hasClipboard ? "bg-indigo-50/40 w-52 h-14 rounded-full" : isIslandExpanded ? "bg-white/50 w-72 h-20 rounded-[40px]" : "bg-white/30 w-32 h-14 rounded-full"
             )}
           >
             {isSelectionMode ? (
