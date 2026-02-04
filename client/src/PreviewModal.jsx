@@ -181,7 +181,10 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         
         {/* Preview Renderers */}
         {(isImage || isHeic) && url && (
-            <div className="w-full h-full flex items-center justify-center overflow-hidden">
+            <div 
+                className="w-full h-full flex items-center justify-center overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
+            >
                 <TransformWrapper
                     initialScale={1}
                     minScale={1}

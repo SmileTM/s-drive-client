@@ -378,6 +378,7 @@ const ServerAPI = {
     await axios.delete(`/api/drives/${id}`);
   },
   getFileUrl: (path, driveId) => `/api/raw?path=${encodeURIComponent(path)}&drive=${driveId}`,
+  getThumbnailUrl: (path, driveId) => `/api/preview?path=${encodeURIComponent(path)}&drive=${driveId}`,
   getFileBlob: async (path, driveId) => {
       const res = await axios.get(`/api/raw?path=${encodeURIComponent(path)}&drive=${driveId}`, { responseType: 'blob' });
       return res.data;
@@ -912,6 +913,11 @@ const NativeAPI = {
           console.error('[Native] getFileUrl failed', e);
           return ''; 
       }
+  },
+
+  getThumbnailUrl: async (path, driveId) => {
+      // For now, fallback to full file URL (Native rendering)
+      return NativeAPI.getFileUrl(path, driveId);
   },
 
   getFileBlob: async (path, driveId) => {

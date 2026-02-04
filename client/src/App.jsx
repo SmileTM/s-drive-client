@@ -70,7 +70,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
   const [thumbnailUrl, setThumbnailUrl] = useState('');
 
   // Safe Thumbnail Logic
-  const isImage = !file.isDirectory && /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(file.name);
+  const isImage = !file.isDirectory && /\.(jpg|jpeg|png|gif|webp|svg|bmp|heic|heif)$/i.test(file.name);
   const isPDF = !file.isDirectory && /\.pdf$/i.test(file.name);
 
   const itemInfo = file.isDirectory 
@@ -83,7 +83,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
         // Delay slightly to prioritize UI render
         const load = async () => {
             try {
-                const url = await api.getFileUrl(file.path, activeDrive || 'local');
+                const url = await api.getThumbnailUrl(file.path, activeDrive || 'local');
                 if (active && url) setThumbnailUrl(url);
             } catch (e) {
                 // Ignore error
