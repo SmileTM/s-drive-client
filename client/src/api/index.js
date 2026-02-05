@@ -496,7 +496,7 @@ const NativeAPI = {
            path: item.filename, 
            isDirectory: item.type === 'directory',
            size: item.size,
-           mtime: item.mtime,
+           mtime: item.lastmod ? (new Date(item.lastmod).getTime() || Date.now()) : Date.now(),
            type: item.type === 'directory' ? 'folder' : (item.mime || 'application/octet-stream')
        }));
     }

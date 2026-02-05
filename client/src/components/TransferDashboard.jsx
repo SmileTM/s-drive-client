@@ -31,7 +31,7 @@ export const CircularProgress = ({ progress, onClick, activeCount }) => {
     // If progress is null but activeCount > 0, we can show an indeterminate spinner or just the count.
     
     const percentage = progress && progress.total > 0 
-        ? Math.round((progress.current / progress.total) * 100) 
+        ? Math.min(Math.max(Math.round((progress.current / progress.total) * 100), 0), 100)
         : 0; // Simplified global progress
     
     // Better calculation: We will get detailed stats from the manager context in the future.
