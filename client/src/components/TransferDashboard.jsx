@@ -103,21 +103,27 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
         <AnimatePresence>
             {isOpen && (
                 <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
+                    initial="closed"
+                    animate="open"
+                    exit="closed"
                     className="fixed inset-0 z-[60] flex items-start justify-center pt-20 px-4 pointer-events-none"
                 >
                     {/* Backdrop (Click to close) */}
-                    <div className="absolute inset-0 bg-black/10 backdrop-blur-sm pointer-events-auto" onClick={onClose} />
+                    <motion.div 
+                        variants={{
+                            closed: { opacity: 0 },
+                            open: { opacity: 1, transition: { duration: 0.3 } }
+                        }}
+                        className="absolute inset-0 bg-black/10 backdrop-blur-sm pointer-events-auto" 
+                        onClick={onClose} 
+                    />
 
                     {/* Main Card */}
                     <motion.div 
-                        initial={{ opacity: 0, scale: 0.95, y: -20 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95, y: -20 }}
-                        transition={{ type: 'spring', duration: 0.4 }}
+                        variants={{
+                            closed: { opacity: 0, scale: 0.95, y: -20, transition: { duration: 0.2 } },
+                            open: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', duration: 0.4 } }
+                        }}
                         className="relative w-full max-w-lg max-h-[70vh] flex flex-col pointer-events-auto shadow-2xl rounded-3xl overflow-hidden border border-white/40 ring-1 ring-black/5 bg-white/80 backdrop-blur-xl dark:bg-slate-900/80 dark:border-slate-700/50"
                     >
                         {/* Header */}
