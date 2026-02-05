@@ -180,6 +180,13 @@ public class WebDavPlugin extends Plugin {
         return lineBuf.toString("UTF-8");
     }
 
+    private String formatSpeed(long bytesPerSec) {
+        if (bytesPerSec < 1024 * 1024) {
+            return String.format(java.util.Locale.US, "%.1f KB/s", bytesPerSec / 1024.0);
+        }
+        return String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSec / (1024.0 * 1024.0));
+    }
+
     private class LocalFileServer extends Thread {
         private ServerSocket serverSocket;
         private int port;
@@ -677,20 +684,34 @@ public class WebDavPlugin extends Plugin {
                     try (InputStream in = new java.io.FileInputStream(fileFinal)) {
                         int read;
                         long lastUpdate = 0;
+                        long lastBytes = 0;
                         while ((read = in.read(buffer)) != -1) {
                             sink.write(buffer, 0, read);
                             uploaded += read;
                             
                             long now = System.currentTimeMillis();
-                            if (now - lastUpdate > 200) {
+                            if (now - lastUpdate > 500) {
                                  JSObject ret = new JSObject();
                                  ret.put("uploaded", uploaded);
                                  ret.put("total", fileLength);
                                  if (callbackId != null) ret.put("id", callbackId);
                                  
                                  notifyListeners("uploadProgress", ret);
-                                 doUpdateNotification(9999, "Uploading", fileFinal.getName(), (int)(uploaded/1024), (int)(fileLength/1024));
+                                 
+                                 // Calculate Speed
+                                 long diffBytes = uploaded - lastBytes;
+                                 long diffTime = now - lastUpdate;
+                                 long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                                 String speedStr = formatSpeed(speed);
+                                 
+                                 boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                                 String title = isZh ? "正在上传" : "Uploading";
+                                 String desc = fileFinal.getName() + " (" + speedStr + ")";
+                                 
+                                 doUpdateNotification(9999, title, desc, (int)(uploaded/1024), (int)(fileLength/1024));
+                                 
                                  lastUpdate = now;
+                                 lastBytes = uploaded;
                             }
                         }
                     }
@@ -787,13 +808,14 @@ public class WebDavPlugin extends Plugin {
                     byte[] buffer = new byte[65536];
                     int read;
                     long lastUpdate = 0;
+                    long lastBytes = 0;
 
                     while ((read = in.read(buffer)) != -1) {
                         out.write(buffer, 0, read);
                         downloaded += read;
                         
                         long now = System.currentTimeMillis();
-                        if (now - lastUpdate > 200) {
+                        if (now - lastUpdate > 500) {
                             JSObject ret = new JSObject();
                             ret.put("downloaded", downloaded);
                             ret.put("total", contentLength);
@@ -801,13 +823,23 @@ public class WebDavPlugin extends Plugin {
                             
                             notifyListeners("downloadProgress", ret);
                             
+                            // Calculate Speed
+                            long diffBytes = downloaded - lastBytes;
+                            long diffTime = now - lastUpdate;
+                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                            String speedStr = formatSpeed(speed);
+                            
+                            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                            String title = isZh ? "正在下载" : "Downloading";
+                            
                             if (contentLength > 0) {
-                                 doUpdateNotification(9999, "Downloading", file.getName(), (int)(downloaded/1024), (int)(contentLength/1024));
+                                 doUpdateNotification(9999, title, file.getName() + " (" + speedStr + ")", (int)(downloaded/1024), (int)(contentLength/1024));
                             } else {
-                                 doUpdateNotification(9999, "Downloading", file.getName(), 0, 0);
+                                 doUpdateNotification(9999, title, file.getName() + " (" + speedStr + ")", 0, 0);
                             }
                             
                             lastUpdate = now;
+                            lastBytes = downloaded;
                         }
                     }
                     out.flush();

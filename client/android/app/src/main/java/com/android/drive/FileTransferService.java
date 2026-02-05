@@ -37,9 +37,13 @@ public class FileTransferService extends Service {
     }
 
     private void startForegroundService() {
+        boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+        String title = isZh ? "WebDAV 网盘" : "WebDAV Drive";
+        String text = isZh ? "文件传输进行中..." : "File transfer in progress...";
+
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("WebDAV Drive")
-                .setContentText("File transfer in progress...")
+                .setContentTitle(title)
+                .setContentText(text)
                 .setSmallIcon(com.android.drive.R.drawable.ic_stat_transfer)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)

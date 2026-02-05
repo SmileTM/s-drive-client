@@ -790,13 +790,100 @@ const NativeAPI = {
             const itemPath = items[i].path || items[i]; // Handle object or string
             const itemName = itemPath.split('/').pop();
             
+            // Check if item is directory
+            let isDirectory = false;
+            try {
+                if (sourceDriveId === 'local') {
+                    const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
+                    isDirectory = stat.type === 'directory';
+                } else {
+                    const drives = await NativeAPI.getDrives();
+                    const config = drives.find(d => d.id === sourceDriveId);
+                    const client = getWebDAVClient(config);
+                    const stat = await client.stat(itemPath);
+                    isDirectory = stat.type === 'directory';
+                }
+            } catch (e) {
+                console.warn(`[CrossDrive] Failed to stat ${itemPath}, assuming file:`, e);
+            }
+
+            if (isDirectory) {
+                console.log(`[CrossDrive] Processing directory: ${itemPath}`);
+                // 1. Create destination directory
+                const newDestPath = destPath === '/' ? `/${itemName}` : `${destPath}/${itemName}`;
+                await NativeAPI.createFolder(newDestPath, destDriveId);
+                
+                // 2. Get children
+                const children = await NativeAPI.getFiles(itemPath, sourceDriveId);
+                
+                // 3. Recurse (Keep same task ID logic? Complex. For now, treat children as sub-tasks but maybe we lose granular progress on the folder itself in UI)
+                // We pass children as objects but without ID to generate new ones, or we could try to map them. 
+                // Actually, simply calling recursively is safest.
+                // Note: The UI progress for the *folder* task will effectively be "stuck" or we need to update it.
+                // Current UI only tracks top-level tasks.
+                const childItems = children.map(c => ({ path: c.path, id: null })); // Children get new auto-IDs internally
+                
+                await NativeAPI.crossDriveTransfer(
+                    childItems, 
+                    sourceDriveId, 
+                    newDestPath, 
+                    destDriveId, 
+                    false, // Recursive copy children (handling delete later if move)
+                    (idx, total, name, speed, cur, tot) => {
+                        // Optional: Bubble up progress? 
+                        // It's hard to map child bytes to parent folder total bytes without pre-calc.
+                        // Just report activity on the parent task?
+                        if (onProgress) onProgress(i + 1, items.length, `${itemName}/${name}`, speed, cur, tot);
+                    }
+                );
+                
+                // 4. If Move, delete source directory after recursion
+                if (isMove) {
+                    await NativeAPI.deleteItems([itemPath], sourceDriveId);
+                }
+                
+                continue; // Done with this directory item
+            }
+
             await updateNotify(NOTIFY_ID, isMove ? "Moving Files" : "Copying Files", `Processing ${itemName}`, i, items.length);
 
             // Report start of item
             if (onProgress) onProgress(i + 1, items.length, itemName, 0, 0, 0);
 
             try {
-                if (sourceDriveId === 'local' && destDriveId !== 'local') {
+                if (sourceDriveId === 'local' && destDriveId === 'local') {
+                    // Optimized Local -> Local Copy
+                    console.log(`[CrossDrive] Optimizing Local -> Local Copy for ${itemPath}`);
+                    const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
+                    const targetPath = cleanDest + '/' + itemName;
+                    
+                    await Filesystem.copy({
+                        from: itemPath,
+                        to: targetPath,
+                        directory: Directory.ExternalStorage,
+                        toDirectory: Directory.ExternalStorage
+                    });
+                    
+                    // Delete Source (Only if Move) - Handled by moveItems? 
+                    // No, handlePaste calls crossDriveTransfer with isMove=false for Copy.
+                    // If isMove=true, it calls api.moveItems directly in App.jsx.
+                    // So this block is ONLY for Copy.
+                    
+                    // We need to report progress? Filesystem.copy doesn't report progress.
+                    // We can just report 0 -> 100% or fake it.
+                    // For large files, it might block.
+                    // But it's native, so it's fast and won't OOM JS.
+                    
+                    // Get size for progress
+                    let fileSize = 0;
+                    try {
+                        const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
+                        fileSize = stat.size;
+                    } catch(e) {}
+                    
+                    if (onProgress) onProgress(i + 1, items.length, itemName, 0, fileSize, fileSize);
+
+                } else if (sourceDriveId === 'local' && destDriveId !== 'local') {
                     // Optimized Local -> WebDAV Stream
                     console.log(`[CrossDrive] Optimizing Local -> WebDAV for ${itemPath}`);
                     const drives = await NativeAPI.getDrives();
@@ -908,35 +995,132 @@ const NativeAPI = {
                         await client.deleteFile(itemPath);
                     }
                 } else {
-                    console.log(`[CrossDrive] 1. Reading ${itemPath}`);
-                    // 1. Read
-                    const content = await readContent(itemPath, sourceDriveId, transferId);
+                    // WebDAV -> WebDAV (Cloud Copy via Local Proxy)
+                    // Avoid loading into JS memory (OOM). Use Native Pipe: Remote -> Temp File -> Remote
+                    console.log(`[CrossDrive] Optimizing WebDAV -> WebDAV via Temp for ${itemPath}`);
                     
-                    // 2. Write
-                    console.log(`[CrossDrive] 2. Writing to ${destDriveId}`);
-                    await writeContent(itemPath, content, destDriveId, transferId);
+                    const tempFileName = `cross_${Date.now()}_${itemName}`;
+                    const tempPath = Directory.Cache; // Logical directory
+                    // We need absolute path for streamUploadFile. 
+                    // NativeWebDAV uses getExternalCacheDir if path doesn't exist?
+                    // Let's rely on streamDownloadFile to write to Cache.
                     
-                    // Update stats (content is Base64, size is approx * 0.75)
-                    const bytes = Math.round(content.length * 0.75);
-                    transferredBytes += bytes;
+                    // 1. Download to Temp (Stream)
+                    // We need a path relative to ExternalStorage or absolute.
+                    // NativeAPI.streamDownloadFile uses WebDavNative.download.
+                    // WebDavNative.download: if path starts with root, absolute. Else relative to ExternalStorage.
+                    // It doesn't support CacheDir easily via API logic in `WebDavPlugin.java`.
+                    // But `WebDavPlugin.java` line 670: `File root = Environment.getExternalStorageDirectory();`.
+                    // It forces ExternalStorage.
                     
-                    // Simple average speed for these block transfers
-                    const elapsed = (Date.now() - startTime) / 1000;
-                    const speed = elapsed > 0 ? transferredBytes / elapsed : 0;
+                    // So we must use a temp folder in ExternalStorage (e.g. .WebDavClientTemp).
+                    const tempDir = `.WebDavClientTemp`;
+                    await NativeAPI.createFolder(`/${tempDir}`, 'local');
+                    const localTempPath = `/${tempDir}/${tempFileName}`;
                     
-                    if (onProgress) onProgress(i + 1, items.length, itemName, speed, bytes, bytes);
+                    // Determine Source Client
+                    const drives = await NativeAPI.getDrives();
+                    const srcConfig = drives.find(d => d.id === sourceDriveId);
+                    const srcClient = getWebDAVClient(srcConfig);
+                    
+                    // Determine Dest Client
+                    const dstConfig = drives.find(d => d.id === destDriveId);
+                    const dstClient = getWebDAVClient(dstConfig);
+                    
+                    const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
+                    const targetPath = cleanDest + '/' + itemName;
+
+                    // A. Download Source -> Local Temp
+                    // Use existing logic for WebDAV->Local but manual
+                    const downloadId = transferId + "_down";
+                    
+                    // Register download listener for progress
+                    let lastUpdate = Date.now();
+                    let lastBytes = 0;
+                    let downloadListener = null;
+                    
+                    if (Capacitor.isNativePlatform()) {
+                         downloadListener = await WebDavNative.addListener('downloadProgress', (info) => {
+                             if (info.id === downloadId) {
+                                 if (cancellationMap[transferId]?.cancelled) return;
+                                 const { downloaded, total } = info;
+                                 const now = Date.now();
+                                 const timeDiff = (now - lastUpdate) / 1000;
+                                 
+                                 // Phase 1: Downloading (0-50% of total visual progress?)
+                                 // Or just show downloading activity.
+                                 // Let's map 0-50% for download, 50-100% for upload.
+                                 const phaseTotal = total || 0;
+                                 const visualTotal = phaseTotal * 2;
+                                 
+                                 let speed = 0;
+                                 if (timeDiff > 0) {
+                                     const bytesDiff = downloaded - lastBytes;
+                                     speed = bytesDiff / timeDiff;
+                                 }
+                                 lastUpdate = now;
+                                 lastBytes = downloaded;
+                                 
+                                 if (onProgress) onProgress(i + 1, items.length, `${itemName} (Downloading)`, speed, downloaded, visualTotal);
+                             }
+                         });
+                    }
+                    
+                    try {
+                        await srcClient.streamDownloadFile(itemPath, localTempPath, downloadId);
+                    } finally {
+                        if (downloadListener) downloadListener.remove();
+                    }
+                    
+                    if (cancellationMap[transferId]?.cancelled) throw new Error("Cancelled");
+
+                    // B. Upload Local Temp -> Dest
+                    // Use existing logic for Local->WebDAV
+                    const uploadId = transferId + "_up";
+                    lastUpdate = Date.now();
+                    lastBytes = 0;
+                    
+                    // Get temp file size for accurate progress
+                    let tempSize = 0;
+                    try {
+                        const stat = await Filesystem.stat({ path: localTempPath, directory: Directory.ExternalStorage });
+                        tempSize = stat.size;
+                    } catch(e) {}
+
+                    uploadCallbacks[uploadId] = (info) => {
+                        if (cancellationMap[transferId]?.cancelled) return;
+                        const { uploaded, total } = info;
+                        const now = Date.now();
+                        const timeDiff = (now - lastUpdate) / 1000;
+                        
+                        let speed = 0;
+                        if (timeDiff > 0) {
+                             const bytesDiff = uploaded - lastBytes;
+                             speed = bytesDiff / timeDiff;
+                        }
+                        lastUpdate = now;
+                        lastBytes = uploaded;
+                        
+                        // Phase 2: Uploading (starts at 50%)
+                        const visualCurrent = tempSize + uploaded;
+                        const visualTotal = tempSize * 2;
+
+                        if (onProgress) onProgress(i + 1, items.length, `${itemName} (Uploading)`, speed, visualCurrent, visualTotal);
+                    };
+                    
+                    try {
+                        await dstClient.streamUploadFile(targetPath, localTempPath, uploadId);
+                    } finally {
+                        delete uploadCallbacks[uploadId];
+                        // Cleanup Temp
+                        try {
+                            await Filesystem.deleteFile({ path: localTempPath, directory: Directory.ExternalStorage });
+                        } catch(e) {}
+                    }
                     
                     // 3. Delete Source (Only if Move)
                     if (isMove) {
-                        console.log(`[CrossDrive] 3. Deleting source ${itemPath}`);
-                        if (sourceDriveId === 'local') {
-                            await Filesystem.deleteFile({ path: itemPath, directory: Directory.ExternalStorage });
-                        } else {
-                            const drives = await NativeAPI.getDrives();
-                            const config = drives.find(d => d.id === sourceDriveId);
-                            const client = getWebDAVClient(config);
-                            await client.deleteFile(itemPath);
-                        }
+                        await srcClient.deleteFile(itemPath);
                     }
                 }
                 console.log(`[CrossDrive] Transfer complete for ${itemPath}`);
