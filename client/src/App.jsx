@@ -542,8 +542,8 @@ function App() {
           res = new Date(a.mtime) - new Date(b.mtime);
           break;
         case 'type':
-          const extA = a.name.split('.').pop();
-          const extB = b.name.split('.').pop();
+          const extA = a.name.includes('.') ? a.name.split('.').pop().toLowerCase() : '';
+          const extB = b.name.includes('.') ? b.name.split('.').pop().toLowerCase() : '';
           res = extA.localeCompare(extB);
           break;
         case 'size':

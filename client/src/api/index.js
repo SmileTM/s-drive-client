@@ -880,7 +880,7 @@ const NativeAPI = {
             // Get file link (download link) usually requires auth.
             // Better to download content and convert to blob URL
             const buffer = await client.getFileContents(path, { format: 'binary' });
-            const blob = new Blob([buffer]);
+            const blob = base64ToBlob(buffer);
             return URL.createObjectURL(blob);
           } catch (e) { return ''; }
       }
@@ -926,7 +926,7 @@ const NativeAPI = {
           const config = drives.find(d => d.id === driveId);
           const client = getWebDAVClient(config);
           const buffer = await client.getFileContents(path, { format: 'binary' });
-          return new Blob([buffer]);
+          return base64ToBlob(buffer);
       }
       const file = await Filesystem.readFile({
           path: path,

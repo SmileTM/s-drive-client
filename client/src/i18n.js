@@ -58,6 +58,8 @@ export const translations = {
     // Preview
     noPreview: "No Preview Available",
     download: "Download File",
+    downloadSuccess: "Download Successful",
+    downloadFailed: "Download Failed",
     errorLoading: "Error loading content",
     viewMode: "View Mode",
     localDriveName: "Local Storage",
@@ -133,6 +135,8 @@ export const translations = {
     // Preview
     noPreview: "无法预览",
     download: "下载文件",
+    downloadSuccess: "下载成功",
+    downloadFailed: "下载失败",
     errorLoading: "加载内容出错",
     viewMode: "视图模式",
     localDriveName: "本地存储",
