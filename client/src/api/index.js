@@ -44,8 +44,12 @@ if (typeof window !== 'undefined') {
     window.global = window.global || window; 
 }
 
+// --- Cancellation System ---
+const cancellationMap = {}; // taskId -> { cancelled: true, nativeId: string }
+
 // --- Custom Native WebDAV Client (Bypasses CORS & CapacitorHttp) ---
 class NativeWebDAVClient {
+    // ... existing methods ...
     constructor(config) {
         // Normalize URL: remove ALL trailing slashes
         this.url = config.url.replace(/\/+$/, ''); 
@@ -713,7 +717,7 @@ const NativeAPI = {
   crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete) => {
       console.log(`[CrossDrive] Transferring ${items.length} items from ${sourceDriveId} to ${destDriveId} (Move: ${isMove})`);
       
-      const NOTIFY_ID = 1001;
+      const NOTIFY_ID = 9999;
       let transferredBytes = 0;
       const startTime = Date.now();
       
@@ -768,7 +772,15 @@ const NativeAPI = {
       try {
         // Execution Loop
         for (let i = 0; i < items.length; i++) {
-            const itemPath = items[i];
+            // Check cancellation before starting item
+            const taskId = items[i].id; // Passed from App.jsx
+            if (taskId && cancellationMap[taskId]?.cancelled) {
+                console.log(`[CrossDrive] Task ${taskId} cancelled before start.`);
+                if (onProgress) onProgress(i + 1, items.length, items[i].path.split('/').pop(), 0, 0, 0); // Update UI?
+                continue; // Skip
+            }
+
+            const itemPath = items[i].path || items[i]; // Handle object or string
             const itemName = itemPath.split('/').pop();
             
             await updateNotify(NOTIFY_ID, isMove ? "Moving Files" : "Copying Files", `Processing ${itemName}`, i, items.length);
@@ -788,7 +800,8 @@ const NativeAPI = {
                     const targetPath = cleanDest + '/' + itemName;
                     
                     // Generate unique ID for this transfer
-                    const transferId = `transfer_${Date.now()}_${i}`;
+                    // Use taskId if available, otherwise generate
+                    const transferId = taskId || `transfer_${Date.now()}_${i}`;
                     let fileSize = 0;
                     try {
                         const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
@@ -800,6 +813,7 @@ const NativeAPI = {
 
                     // Register temporary callback
                     uploadCallbacks[transferId] = (info) => {
+                        if (cancellationMap[transferId]?.cancelled) return;
                         const { uploaded, total } = info;
                         const now = Date.now();
                         const timeDiff = (now - lastUpdate) / 1000;
@@ -845,7 +859,7 @@ const NativeAPI = {
                     const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
                     const targetPath = cleanDest + '/' + itemName;
                     
-                    const transferId = `transfer_${Date.now()}_${i}`;
+                    const transferId = taskId || `transfer_${Date.now()}_${i}`;
                     let downloadListener = null;
                     let lastUpdate = Date.now();
                     let lastBytes = 0; // Bytes within this file
@@ -854,6 +868,7 @@ const NativeAPI = {
                     if (Capacitor.isNativePlatform()) {
                          downloadListener = await WebDavNative.addListener('downloadProgress', (info) => {
                              if (info.id === transferId) {
+                                 if (cancellationMap[transferId]?.cancelled) return;
                                  const { downloaded, total } = info;
                                  const now = Date.now();
                                  const timeDiff = (now - lastUpdate) / 1000;
@@ -924,8 +939,14 @@ const NativeAPI = {
                 console.log(`[CrossDrive] Transfer complete for ${itemPath}`);
                 if (onItemComplete) onItemComplete(itemName); // Notify item complete
             } catch (e) {
-                console.error(`[CrossDrive] Failed to transfer ${itemPath}:`, e);
-                throw e;
+                // If cancelled (Socket closed), ignore error
+                if (taskId && cancellationMap[taskId]?.cancelled) {
+                    console.log(`[CrossDrive] Task ${taskId} was cancelled during execution.`);
+                    // UI already updated by handleCancelTask
+                } else {
+                    console.error(`[CrossDrive] Failed to transfer ${itemPath}:`, e);
+                    throw e;
+                }
             }
         }
       } finally {
@@ -940,7 +961,7 @@ const NativeAPI = {
   },
 
   uploadFiles: async (path, files, driveId, onProgress, onItemComplete) => {
-    const NOTIFY_ID = 1002;
+    const NOTIFY_ID = 9999;
     let transferredBytes = 0; // Bytes fully completed from previous files
     const startTime = Date.now();
     
@@ -1053,12 +1074,21 @@ const NativeAPI = {
             // Upload sequentially
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
+                // Check cancellation
+                const taskId = file.taskId;
+                if (taskId && cancellationMap[taskId]?.cancelled) {
+                    console.log(`[Upload] Task ${taskId} cancelled before start.`);
+                    if (onProgress) onProgress(i + 1, files.length, file.name, 0, 0, 0); 
+                    continue;
+                }
+
                 await updateNotify(NOTIFY_ID, "Uploading Files", `Uploading ${file.name}`, i, files.length);
 
                 if (onProgress) onProgress(i + 1, files.length, file.name, 0, 0, file.size); // Start
                 
                 let temp = null;
-                const uploadId = `upload_${Date.now()}_${i}`;
+                // Use taskId as uploadId if available
+                const uploadId = taskId || `upload_${Date.now()}_${i}`;
                 
                 let lastUpdate = Date.now();
                 let lastBytes = 0;
@@ -1066,6 +1096,7 @@ const NativeAPI = {
                 // Register Global Callback for this upload
                 console.log('[NativeWebDAV] Registering callback for:', uploadId);
                 uploadCallbacks[uploadId] = (info) => {
+                    if (cancellationMap[uploadId]?.cancelled) return;
                     // console.log('[NativeWebDAV] Callback executing for:', uploadId);
                     const { uploaded, total } = info;
                     const now = Date.now();
@@ -1100,8 +1131,12 @@ const NativeAPI = {
                     reportFinished(file.size);
                     if (onItemComplete) onItemComplete(file.name); // Notify item complete
                 } catch (e) {
-                    console.error("Upload failed", e);
-                    throw e; 
+                    if (taskId && cancellationMap[taskId]?.cancelled) {
+                        console.log(`[Upload] Task ${taskId} cancelled during execution.`);
+                    } else {
+                        console.error("Upload failed", e);
+                        throw e; 
+                    }
                 } finally {
                     // Wait longer to ensure all native events are flushed
                     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -1373,6 +1408,20 @@ const NativeAPI = {
         console.warn('[Native] Search failed:', e);
         return [];
     }
+  },
+
+  cancelTask: async (taskId) => {
+      console.log(`[API] Cancelling task: ${taskId}`);
+      cancellationMap[taskId] = { cancelled: true };
+      
+      if (Capacitor.isNativePlatform()) {
+          // Attempt to cancel native call if it matches taskId (we used taskId as native ID)
+          try {
+              await WebDavNative.cancel({ id: taskId });
+          } catch(e) {
+              console.warn('[Native] Cancel failed:', e);
+          }
+      }
   },
 
   requestPermissions: async () => {

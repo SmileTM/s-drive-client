@@ -47,7 +47,7 @@ const getFileIcon = (file) => {
   if (file.isDirectory) return <FolderIcon className="w-8 h-8 text-indigo-400" />;
   if (file.type?.startsWith('image')) return <PhotoIcon className="w-8 h-8 text-pink-400" />;
   if (file.type?.startsWith('video')) return <VideoCameraIcon className="w-8 h-8 text-blue-400" />;
-  return <DocumentIcon className="w-8 h-8 text-slate-400" />;
+  return <DocumentIcon className="w-8 h-8 text-slate-500" />;
 };
 
 const formatSize = (bytes) => {
@@ -249,7 +249,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
       <div className={clsx("pointer-events-none w-full", isList ? "flex-1 min-w-0 flex items-center justify-between gap-4" : "")}>
         <div className={clsx("min-w-0 flex-1", isList ? "" : "px-1")}>
           <h3 className={clsx(
-            "font-medium text-slate-700 truncate", 
+            "font-medium text-slate-500 truncate", 
             isList ? "text-sm" : "text-[11px] sm:text-xs"
           )}>
             {file.name}
@@ -260,7 +260,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
             </p>
           )}
           {!isList && (
-            <p className="text-[9px] text-slate-400 mt-0.5 truncate leading-none">
+            <p className="text-[9px] text-slate-500 mt-0.5 truncate leading-none">
               {itemInfo} • {new Date(file.mtime).toLocaleDateString()}
             </p>
           )}
@@ -269,7 +269,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
         {isList && (
           <div className="flex flex-col items-end text-right shrink-0 leading-tight">
             <span className="text-[10px] text-slate-500 tabular-nums">{itemInfo}</span>
-            <span className="text-[9px] text-slate-400 tabular-nums">{new Date(file.mtime).toLocaleDateString()}</span>
+            <span className="text-[9px] text-slate-500 tabular-nums">{new Date(file.mtime).toLocaleDateString()}</span>
           </div>
         )}
       </div>
@@ -680,9 +680,19 @@ function App() {
     setTasks(prev => [...newTasks, ...prev]); // Add new tasks to top
 
     // 2. Start Non-blocking Upload
+    // Map files to include their IDs for cancellation targeting
+    const filesWithId = acceptedFiles.map((f, i) => {
+        // Create a proxy object or attach id to file (less clean but works)
+        // Or better: modify api to accept objects { file, id }
+        // Current API expects File objects for uploadFiles. 
+        // We will monkey-patch the File object with the ID since JS allows it.
+        f.taskId = newTasks[i].id;
+        return f;
+    });
+
     api.uploadFiles(
         currentPath, 
-        acceptedFiles, 
+        filesWithId, 
         activeDrive, 
         (index, total, name, speed, currentBytes, totalBytes) => {
             // Update Task Progress
@@ -694,6 +704,7 @@ function App() {
                 
                 setTasks(prev => prev.map(t => {
                     if (t.id === taskId) {
+                        if (t.status === 'error') return t; // Ignore if cancelled/failed
                         const isDone = currentBytes === totalBytes && totalBytes > 0;
                         return { 
                             ...t, 
@@ -825,6 +836,12 @@ function App() {
     }));
     setTasks(prev => [...newTasks, ...prev]);
 
+    // Prepare items with IDs
+    const itemsWithId = items.map((path, i) => ({
+        path: path,
+        id: newTasks[i].id
+    }));
+
     // 2. Start Transfer
     const onProgress = (index, total, name, speed, currentBytes, totalBytes) => {
         const taskIndex = index - 1;
@@ -832,6 +849,7 @@ function App() {
             const taskId = newTasks[taskIndex].id;
             setTasks(prev => prev.map(t => {
                 if (t.id === taskId) {
+                    if (t.status === 'error') return t; // Ignore if cancelled/failed
                     const isDone = currentBytes === totalBytes && totalBytes > 0;
                     return { 
                         ...t, 
@@ -862,8 +880,8 @@ function App() {
     const transferPromise = (sourceDrive === destDrive) 
         ? (isMove 
             ? api.moveItems(items, targetPath, activeDrive) 
-            : api.crossDriveTransfer(items, sourceDrive, targetPath, destDrive, false, onProgress, onComplete))
-        : api.crossDriveTransfer(items, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete);
+            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete))
+        : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete);
     
     transferPromise.catch(err => {
         setTasks(prev => prev.map(t => {
@@ -949,6 +967,19 @@ function App() {
     });
   };
 
+  const handleCancelTask = (taskId) => {
+      // 1. Notify API to cancel
+      api.cancelTask(taskId);
+      
+      // 2. Update UI immediately
+      setTasks(prev => prev.map(t => {
+          if (t.id === taskId) {
+              return { ...t, status: 'error', name: t.name + ' (Cancelled)' }; 
+          }
+          return t;
+      }));
+  };
+
   const isSelectionMode = selectedPaths.size > 0;
   const hasClipboard = clipboard && clipboard.items.length > 0;
 
@@ -1006,7 +1037,7 @@ function App() {
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-100">
               <ServerStackIcon className="w-6 h-6" />
             </div>
-            <span className="text-lg font-bold text-slate-800 tracking-tight">{t.appTitle}</span>
+            <span className="text-lg font-bold text-slate-500 tracking-tight">{t.appTitle}</span>
           </div>
           <div className="flex-1 overflow-y-auto space-y-1">
             <p className="px-3 text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">{t.drives}</p>
@@ -1021,11 +1052,11 @@ function App() {
                   "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all group cursor-pointer",
                   activeDrive === drive.id 
                     ? "bg-indigo-50 text-indigo-700 shadow-sm" 
-                    : "text-slate-600 hover:bg-slate-100"
+                    : "text-slate-500 hover:bg-slate-100"
                 )}
               >
                 <div className="shrink-0 pt-0.5">
-                  <ServerStackIcon className={clsx("w-5 h-5", activeDrive === drive.id ? "text-indigo-600" : "text-slate-400")} />
+                  <ServerStackIcon className={clsx("w-5 h-5", activeDrive === drive.id ? "text-indigo-600" : "text-slate-500")} />
                 </div>
                 
                 <div className="flex-1 min-w-0 flex flex-col items-start gap-1">
@@ -1040,7 +1071,7 @@ function App() {
                       </div>
                       <div className="w-full h-1 bg-slate-200 rounded-full overflow-hidden">
                         <div 
-                          className={clsx("h-full rounded-full", activeDrive === drive.id ? "bg-indigo-500" : "bg-slate-400")}
+                          className={clsx("h-full rounded-full", activeDrive === drive.id ? "bg-indigo-500" : "bg-slate-500")}
                           style={{ width: `${Math.min((drive.quota.used / drive.quota.total) * 100, 100)}%` }}
                         ></div>
                       </div>
@@ -1052,14 +1083,14 @@ function App() {
                   <div className="flex items-center shrink-0 gap-1 opacity-0 group-hover:opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-all">
                     <button 
                       onClick={(e) => handleEditDrive(drive.id, drive.name, e)}
-                      className="p-1.5 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-600 focus:opacity-100"
+                      className="p-1.5 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-700 focus:opacity-100"
                       title={t.rename}
                     >
                       <PencilIcon className="w-3.5 h-3.5" />
                     </button>
                     <button 
                       onClick={(e) => removeDrive(drive.id, e)}
-                      className="p-1.5 rounded-full hover:bg-red-100 text-slate-400 hover:text-red-500 focus:opacity-100"
+                      className="p-1.5 rounded-full hover:bg-red-100 text-slate-500 hover:text-red-500 focus:opacity-100"
                       title={t.delete}
                     >
                       <TrashIcon className="w-3.5 h-3.5" />
@@ -1119,7 +1150,7 @@ function App() {
               {isSearching ? (
                   <ArrowPathIcon className="w-5 h-5 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2 animate-spin" />
               ) : (
-                  <MagnifyingGlassIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <MagnifyingGlassIcon className="w-5 h-5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
               )}
               <input 
                 id="search-files"
@@ -1129,16 +1160,16 @@ function App() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleGlobalSearch()}
-                className="w-full bg-slate-100/50 hover:bg-slate-100 focus:bg-white border-none rounded-full py-2 pl-10 pr-4 text-sm outline-none ring-1 ring-transparent focus:ring-indigo-500/20 transition-all placeholder:text-slate-400 text-slate-600"
+                className="w-full bg-slate-100/50 hover:bg-slate-100 focus:bg-white border-none rounded-full py-2 pl-10 pr-4 text-sm outline-none ring-1 ring-transparent focus:ring-indigo-500/20 transition-all placeholder:text-xs placeholder:text-slate-400 text-slate-500"
               />
             </div>
             
-            <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            <div className="flex items-center gap-0.5 shrink-0">
                {/* New Circular Progress */}
                <CircularProgress 
                   progress={{ 
-                      current: tasks.filter(t => t.status === 'done').length, 
-                      total: tasks.length 
+                      current: tasks.reduce((acc, t) => acc + (t.currentBytes || 0), 0), 
+                      total: tasks.reduce((acc, t) => acc + (t.totalBytes || 0), 0)
                   }} 
                   activeCount={tasks.filter(t => t.status === 'active' || t.status === 'pending').length}
                   onClick={() => setIsDashboardOpen(true)}
@@ -1177,7 +1208,7 @@ function App() {
                             <button
                               key={key}
                               onClick={() => handleSort(key)}
-                              className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 flex items-center justify-between"
+                              className="w-full text-left px-4 py-2 text-sm text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 flex items-center justify-between"
                             >
                               <span className="capitalize">{t[key] || key}</span>
                               {sortConfig.key === key && (
@@ -1483,6 +1514,7 @@ function App() {
             onClose={() => setIsDashboardOpen(false)} 
             tasks={tasks}
             onClearCompleted={() => setTasks(prev => prev.filter(t => t.status !== 'done' && t.status !== 'error'))}
+            onCancel={handleCancelTask}
             lang={lang}
         />
       </div>

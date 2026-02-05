@@ -47,6 +47,9 @@ import android.app.NotificationManager;
 import android.content.Context;
 import androidx.core.app.NotificationCompat;
 
+import java.util.concurrent.ConcurrentHashMap;
+import okhttp3.Call;
+
 @CapacitorPlugin(
     name = "WebDavNative",
     permissions = {
@@ -59,9 +62,12 @@ import androidx.core.app.NotificationCompat;
 public class WebDavPlugin extends Plugin {
 
     private final AtomicInteger activeTransfers = new AtomicInteger(0);
+    private final ConcurrentHashMap<String, Call> activeCalls = new ConcurrentHashMap<>();
 
     private void startTransfer() {
-        if (activeTransfers.getAndIncrement() == 0) {
+        int count = activeTransfers.getAndIncrement();
+        android.util.Log.d("WebDavNative", "startTransfer, count before increment: " + count);
+        if (count == 0) {
             Context context = getContext();
             Intent intent = new Intent(context, FileTransferService.class);
             intent.setAction(FileTransferService.ACTION_START);
@@ -74,11 +80,18 @@ public class WebDavPlugin extends Plugin {
     }
 
     private void endTransfer() {
-        if (activeTransfers.decrementAndGet() == 0) {
+        int count = activeTransfers.decrementAndGet();
+        android.util.Log.d("WebDavNative", "endTransfer, count after decrement: " + count);
+        if (count <= 0) {
+            activeTransfers.set(0);
             Context context = getContext();
             Intent intent = new Intent(context, FileTransferService.class);
             intent.setAction(FileTransferService.ACTION_STOP);
             context.startService(intent);
+            
+            // Force cancel notification ID 9999
+            NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            manager.cancel(9999);
         }
     }
 
@@ -118,7 +131,29 @@ public class WebDavPlugin extends Plugin {
 
     @PluginMethod
     public void stopBackgroundWork(PluginCall call) {
-        endTransfer();
+        // Force reset and stop
+        activeTransfers.set(0);
+        Context context = getContext();
+        Intent intent = new Intent(context, FileTransferService.class);
+        intent.setAction(FileTransferService.ACTION_STOP);
+        context.startService(intent);
+        
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        manager.cancel(9999);
+        
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void cancel(PluginCall call) {
+        String id = call.getString("id");
+        if (id != null) {
+            Call c = activeCalls.get(id);
+            if (c != null) {
+                c.cancel();
+                activeCalls.remove(id);
+            }
+        }
         call.resolve();
     }
 
@@ -483,15 +518,35 @@ public class WebDavPlugin extends Plugin {
     
     private void doUpdateNotification(int id, String title, String description, int progress, int max) {
         Context context = getContext();
+        
+        // Log for debugging
+        android.util.Log.d("WebDavNotification", "Updating notification ID: " + id + " Title: " + title + " Progress: " + progress + "/" + max);
+
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel("file_ops", "File Operations", NotificationManager.IMPORTANCE_LOW);
+            // Use DEFAULT importance to ensure visibility in status bar. 
+            // Changed ID to 'file_ops_v2' to force update on existing installs.
+            NotificationChannel channel = new NotificationChannel("file_ops_v2", "File Operations", NotificationManager.IMPORTANCE_DEFAULT);
+            channel.setSound(null, null); 
+            channel.enableVibration(false);
+            channel.setShowBadge(false);
             manager.createNotificationChannel(channel);
         }
 
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, "file_ops")
-                .setSmallIcon(android.R.drawable.stat_sys_download) 
+        // Determine icon based on progress
+        int iconResId = com.android.drive.R.drawable.ic_stat_transfer_0;
+        if (max > 0) {
+            int percent = (int) ((progress * 100.0f) / max);
+            if (percent >= 100) iconResId = com.android.drive.R.drawable.ic_stat_transfer_100;
+            else if (percent >= 80) iconResId = com.android.drive.R.drawable.ic_stat_transfer_80;
+            else if (percent >= 60) iconResId = com.android.drive.R.drawable.ic_stat_transfer_60;
+            else if (percent >= 40) iconResId = com.android.drive.R.drawable.ic_stat_transfer_40;
+            else if (percent >= 20) iconResId = com.android.drive.R.drawable.ic_stat_transfer_20;
+        }
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, "file_ops_v2")
+                .setSmallIcon(iconResId) 
                 .setContentTitle(title)
                 .setContentText(description)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -519,6 +574,7 @@ public class WebDavPlugin extends Plugin {
     @PluginMethod
     public void upload(PluginCall call) {
         startTransfer();
+        String tempIdForFinally = null;
         try {
             String url = call.getString("url");
             String method = call.getString("method", "PUT");
@@ -543,6 +599,7 @@ public class WebDavPlugin extends Plugin {
             if (tempId == null && headers != null) {
                 tempId = headers.getString("X-Capacitor-Id");
             }
+            tempIdForFinally = tempId;
             final String callbackId = tempId;
 
             if (url == null || sourcePath == null) {
@@ -619,7 +676,7 @@ public class WebDavPlugin extends Plugin {
                                  if (callbackId != null) ret.put("id", callbackId);
                                  
                                  notifyListeners("uploadProgress", ret);
-                                 doUpdateNotification(1002, "Uploading", fileFinal.getName(), (int)(uploaded/1024), (int)(fileLength/1024));
+                                 doUpdateNotification(9999, "Uploading", fileFinal.getName(), (int)(uploaded/1024), (int)(fileLength/1024));
                                  lastUpdate = now;
                             }
                         }
@@ -629,7 +686,10 @@ public class WebDavPlugin extends Plugin {
 
             requestBuilder.method(method, requestBody);
 
-            try (Response response = client.newCall(requestBuilder.build()).execute()) {
+            Call callObj = client.newCall(requestBuilder.build());
+            if (callbackId != null) activeCalls.put(callbackId, callObj);
+
+            try (Response response = callObj.execute()) {
                  if (response.isSuccessful()) {
                      call.resolve();
                  } else {
@@ -639,6 +699,7 @@ public class WebDavPlugin extends Plugin {
                 call.reject("Network error: " + e.getMessage());
             }
         } finally {
+            if (tempIdForFinally != null) activeCalls.remove(tempIdForFinally);
             endTransfer();
         }
     }
@@ -646,11 +707,13 @@ public class WebDavPlugin extends Plugin {
     @PluginMethod
     public void download(PluginCall call) {
         startTransfer();
+        String idForFinally = null;
         try {
             String url = call.getString("url");
             String destPath = call.getString("destPath");
             JSObject headers = call.getObject("headers");
             final String callbackId = call.getString("id");
+            idForFinally = callbackId;
 
             if (url == null || destPath == null) {
                 call.reject("URL and destPath are required");
@@ -688,7 +751,10 @@ public class WebDavPlugin extends Plugin {
                 }
             }
 
-            try (Response response = client.newCall(requestBuilder.build()).execute()) {
+            Call callObj = client.newCall(requestBuilder.build());
+            if (callbackId != null) activeCalls.put(callbackId, callObj);
+
+            try (Response response = callObj.execute()) {
                 if (!response.isSuccessful()) {
                     call.reject("Download failed: " + response.code() + " " + response.message());
                     return;
@@ -723,9 +789,9 @@ public class WebDavPlugin extends Plugin {
                             notifyListeners("downloadProgress", ret);
                             
                             if (contentLength > 0) {
-                                 doUpdateNotification(1001, "Downloading", file.getName(), (int)(downloaded/1024), (int)(contentLength/1024));
+                                 doUpdateNotification(9999, "Downloading", file.getName(), (int)(downloaded/1024), (int)(contentLength/1024));
                             } else {
-                                 doUpdateNotification(1001, "Downloading", file.getName(), 0, 0);
+                                 doUpdateNotification(9999, "Downloading", file.getName(), 0, 0);
                             }
                             
                             lastUpdate = now;
@@ -740,6 +806,7 @@ public class WebDavPlugin extends Plugin {
                 call.reject("Network error: " + e.getMessage());
             }
         } finally {
+            if (idForFinally != null) activeCalls.remove(idForFinally);
             endTransfer();
         }
     }

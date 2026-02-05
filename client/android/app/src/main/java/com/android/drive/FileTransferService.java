@@ -14,7 +14,7 @@ import android.content.pm.ServiceInfo;
 public class FileTransferService extends Service {
     public static final String ACTION_START = "START";
     public static final String ACTION_STOP = "STOP";
-    private static final String CHANNEL_ID = "file_transfer_service";
+    private static final String CHANNEL_ID = "file_ops_v2";
     private static final int NOTIFICATION_ID = 9999;
 
     @Override
@@ -40,7 +40,7 @@ public class FileTransferService extends Service {
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("WebDAV Drive")
                 .setContentText("File transfer in progress...")
-                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setSmallIcon(com.android.drive.R.drawable.ic_stat_transfer)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .build();
@@ -84,9 +84,12 @@ public class FileTransferService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel serviceChannel = new NotificationChannel(
                     CHANNEL_ID,
-                    "File Transfer Service",
-                    NotificationManager.IMPORTANCE_LOW
+                    "File Operations",
+                    NotificationManager.IMPORTANCE_DEFAULT
             );
+            serviceChannel.setSound(null, null);
+            serviceChannel.enableVibration(false);
+            serviceChannel.setShowBadge(false);
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(serviceChannel);

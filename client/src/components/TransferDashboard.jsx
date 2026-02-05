@@ -4,6 +4,25 @@ import { XMarkIcon, ChevronUpIcon, ChevronDownIcon, PlayIcon, PauseIcon, TrashIc
 import clsx from 'clsx';
 import { translations } from '../i18n';
 
+// Custom Lightning Icon (Matches Status Bar) with Fill Animation
+const LightningIcon = ({ className, fillPercent = 100 }) => (
+    <svg viewBox="0 0 24 24" className={className}>
+        <defs>
+            <linearGradient id="lightning-fill-grad" x1="0" x2="0" y1="1" y2="0">
+                <stop offset={`${fillPercent}%`} stopColor="currentColor" />
+                <stop offset={`${fillPercent}%`} stopColor="transparent" />
+            </linearGradient>
+        </defs>
+        <path 
+            d="M15.5 5L11.5 11L15 11L8.5 19L12.5 13L9 13Z" 
+            fill="url(#lightning-fill-grad)" 
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+        />
+    </svg>
+);
+
 // --- Circular Progress Indicator (Top-Right) ---
 export const CircularProgress = ({ progress, onClick, activeCount }) => {
     if (!progress && activeCount === 0) return null;
@@ -12,23 +31,26 @@ export const CircularProgress = ({ progress, onClick, activeCount }) => {
     // If progress is null but activeCount > 0, we can show an indeterminate spinner or just the count.
     
     const percentage = progress && progress.total > 0 
-        ? Math.round(((progress.current - 1) / progress.total) * 100) 
+        ? Math.round((progress.current / progress.total) * 100) 
         : 0; // Simplified global progress
     
     // Better calculation: We will get detailed stats from the manager context in the future.
     // For now, let's just use the props passed from App.jsx if simpler.
     // Actually, the new Dashboard handles its own state, so App.jsx might pass `tasks`.
 
+    const isDone = activeCount === 0;
+    const fillAmount = isDone ? 100 : percentage;
+
     return (
         <button 
             onClick={onClick}
-            className="relative w-9 h-9 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors group"
+            className="relative w-7 h-7 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors group"
         >
             <svg className="w-full h-full -rotate-90 p-1" viewBox="0 0 36 36">
                 <path className="text-slate-300" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="3" />
                 <path 
-                    className="text-indigo-600 transition-all duration-300 ease-linear" 
-                    strokeDasharray={`${percentage}, 100`} 
+                    className="text-slate-500 transition-all duration-300 ease-linear"
+                    strokeDasharray={`${isDone ? 100 : percentage}, 100`} 
                     d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" 
                     fill="none" 
                     stroke="currentColor" 
@@ -36,11 +58,10 @@ export const CircularProgress = ({ progress, onClick, activeCount }) => {
                 />
             </svg>
             <div className="absolute inset-0 flex items-center justify-center">
-                {activeCount > 0 ? (
-                    <span className="text-[10px] font-bold text-indigo-600">{activeCount}</span>
-                ) : (
-                    <CheckCircleIcon className="w-4 h-4 text-emerald-500" />
-                )}
+                <LightningIcon 
+                    className="w-3.5 h-3.5 text-slate-500 transition-colors duration-300" 
+                    fillPercent={fillAmount} 
+                />
             </div>
         </button>
     );
@@ -63,7 +84,7 @@ const formatSize = (bytes) => {
 };
 
 // --- Dashboard Component ---
-const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, lang = 'zh' }) => {
+const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel, lang = 'zh' }) => {
     const t = translations[lang];
     // Tasks: Array of { id, name, type, status: 'pending'|'active'|'done'|'error', progress: 0-100, speed, currentBytes, totalBytes }
 
@@ -172,10 +193,19 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, lang = 'z
                                                 </div>
 
                                                 {/* Status / Action */}
-                                                <div className="shrink-0">
+                                                <div className="shrink-0 flex items-center gap-2">
                                                     {task.status === 'pending' && <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-full">{t.pending}</span>}
                                                     {task.status === 'done' && <CheckCircleIcon className="w-6 h-6 text-emerald-500" />}
                                                     {task.status === 'error' && <span className="text-xs text-red-500">{t.failed}</span>}
+                                                    
+                                                    {(task.status === 'active' || task.status === 'pending') && (
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); onCancel && onCancel(task.id); }}
+                                                            className="p-1 hover:bg-slate-100 rounded-full text-slate-400 hover:text-red-500 transition-colors"
+                                                        >
+                                                            <XMarkIcon className="w-5 h-5" />
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </div>
 
