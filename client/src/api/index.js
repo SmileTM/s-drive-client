@@ -777,6 +777,10 @@ const NativeAPI = {
         for (let i = 0; i < items.length; i++) {
             // Check cancellation before starting item
             const taskId = items[i].id; // Passed from App.jsx
+            
+            // Generate unique ID for this transfer (Use taskId if available, otherwise generate)
+            const transferId = taskId || `transfer_${Date.now()}_${i}`;
+
             if (taskId && cancellationMap[taskId]?.cancelled) {
                 console.log(`[CrossDrive] Task ${taskId} cancelled before start.`);
                 if (onProgress) onProgress(i + 1, items.length, items[i].path.split('/').pop(), 0, 0, 0); // Update UI?
@@ -802,9 +806,6 @@ const NativeAPI = {
                     const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
                     const targetPath = cleanDest + '/' + itemName;
                     
-                    // Generate unique ID for this transfer
-                    // Use taskId if available, otherwise generate
-                    const transferId = taskId || `transfer_${Date.now()}_${i}`;
                     let fileSize = 0;
                     try {
                         const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
@@ -862,7 +863,6 @@ const NativeAPI = {
                     const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
                     const targetPath = cleanDest + '/' + itemName;
                     
-                    const transferId = taskId || `transfer_${Date.now()}_${i}`;
                     let downloadListener = null;
                     let lastUpdate = Date.now();
                     let lastBytes = 0; // Bytes within this file
