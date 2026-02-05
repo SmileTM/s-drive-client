@@ -1,0 +1,102 @@
+package com.android.drive;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Intent;
+import android.os.Build;
+import android.os.IBinder;
+import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
+import android.content.pm.ServiceInfo;
+
+public class FileTransferService extends Service {
+    public static final String ACTION_START = "START";
+    public static final String ACTION_STOP = "STOP";
+    private static final String CHANNEL_ID = "file_transfer_service";
+    private static final int NOTIFICATION_ID = 9999;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        createNotificationChannel();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null) {
+            String action = intent.getAction();
+            if (ACTION_START.equals(action)) {
+                startForegroundService();
+            } else if (ACTION_STOP.equals(action)) {
+                stopForegroundService();
+            }
+        }
+        return START_NOT_STICKY;
+    }
+
+    private void startForegroundService() {
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("WebDAV Drive")
+                .setContentText("File transfer in progress...")
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+                .build();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // If targeting Android 14, specific types might be needed in manifest
+            // Here we specify dataSync compatible type if available/needed
+            try {
+                // ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC is API 34 (Android 14)
+                // Using reflection or literal value if compiling against older SDK
+                // 1 = FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                int type = 0;
+                if (Build.VERSION.SDK_INT >= 34) {
+                    type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+                } else {
+                    // For Android 10-13, type can be 0 or manifest defined
+                    // manifest defaults to all declared types
+                    // We can just use standard startForeground
+                }
+                
+                if (type != 0) {
+                    startForeground(NOTIFICATION_ID, notification, type);
+                } else {
+                    startForeground(NOTIFICATION_ID, notification);
+                }
+            } catch (Exception e) {
+                // Fallback for older SDK compilation
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
+
+    private void stopForegroundService() {
+        stopForeground(true);
+        stopSelf();
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel serviceChannel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "File Transfer Service",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(serviceChannel);
+            }
+        }
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}

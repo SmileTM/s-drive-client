@@ -786,8 +786,8 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     // path.posix.join handles slash deduplication
                     const remotePath = path.posix.join('/', reqPath, file.filename);
                     
-                    const fileBuffer = await fs.readFile(file.path);
-                    await client.putFileContents(remotePath, fileBuffer);
+                    const readStream = fs.createReadStream(file.path);
+                    await client.putFileContents(remotePath, readStream);
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
                     console.error(`[Upload] Failed to upload ${file.filename} to WebDAV:`, e);

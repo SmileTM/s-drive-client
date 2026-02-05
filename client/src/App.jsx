@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import api from './api';
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
+import TransferDashboard, { CircularProgress } from './components/TransferDashboard';
 import { 
   FolderIcon, 
   DocumentIcon, 
@@ -79,12 +80,17 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
 
   useEffect(() => {
     let active = true;
+    let createdUrl = null;
     if (isImage) {
         // Delay slightly to prioritize UI render
         const load = async () => {
             try {
                 const url = await api.getThumbnailUrl(file.path, activeDrive || 'local');
-                if (active && url) setThumbnailUrl(url);
+                if (active && url) {
+                    setThumbnailUrl(url);
+                    // If it's a blob URL, track it for cleanup
+                    if (url.startsWith('blob:')) createdUrl = url;
+                }
             } catch (e) {
                 // Ignore error
             }
@@ -93,7 +99,10 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
     } else {
         setThumbnailUrl('');
     }
-    return () => { active = false; };
+    return () => { 
+        active = false;
+        if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
   }, [file.path, activeDrive, isImage]);
 
   // --- Long Press Logic ---
@@ -288,7 +297,10 @@ function App() {
   const [currentPath, setCurrentPath] = useState('/');
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  // Removed simple uploading/progress state
+  const [tasks, setTasks] = useState([]); // { id, name, status, progress, speed, currentBytes, totalBytes }
+  const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+  
   const [isIslandExpanded, setIsIslandExpanded] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState(new Set());
   const [clipboard, setClipboard] = useState(null); 
@@ -341,7 +353,6 @@ function App() {
   const [page, setPage] = useState(1);
   const [sortConfig, setSortConfig] = useState({ key: 'type', direction: 'asc' });
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
-  const [progress, setProgress] = useState(null); 
   const [inputModal, setInputModal] = useState({ isOpen: false, title: '', defaultValue: '', onConfirm: () => {} });
   const [detailsModal, setDetailsModal] = useState(null);
   const [confirmModal, setConfirmModal] = useState({ isOpen: false, title: '', message: '', type: 'info', onConfirm: () => {} });
@@ -642,7 +653,7 @@ function App() {
     localStorage.setItem('last_path', parent);
   };
 
-  const handleUpload = async (acceptedFiles) => {
+  const handleUpload = (acceptedFiles) => {
     if (acceptedFiles.length === 0) return;
     
     // Duplicate Check
@@ -651,19 +662,82 @@ function App() {
       if (!confirm(t.confirmOverwrite.replace('{count}', duplicates.length))) return;
     }
 
-    setUploading(true);
-    setProgress({ current: 0, total: acceptedFiles.length, filename: 'Preparing...' });
+    setIsIslandExpanded(false);
     
-    try {
-      await api.uploadFiles(currentPath, acceptedFiles, activeDrive, (current, total, filename) => {
-          setProgress({ current, total, filename });
-      });
-      await fetchFiles(currentPath);
-      setIsIslandExpanded(false);
-    } catch (err) { alert(t.uploadFailed); } finally { 
-        setUploading(false); 
-        setProgress(null);
-    }
+    // 1. Create Tasks
+    const batchId = Date.now();
+    const newTasks = acceptedFiles.map((f, i) => ({
+        id: `upload_${batchId}_${i}`,
+        name: f.name,
+        size: f.size,
+        status: 'pending',
+        currentBytes: 0,
+        totalBytes: f.size,
+        speed: 0,
+        type: 'upload'
+    }));
+    
+    setTasks(prev => [...newTasks, ...prev]); // Add new tasks to top
+
+    // 2. Start Non-blocking Upload
+    api.uploadFiles(
+        currentPath, 
+        acceptedFiles, 
+        activeDrive, 
+        (index, total, name, speed, currentBytes, totalBytes) => {
+            // Update Task Progress
+            // Since api executes sequentially, index-1 corresponds to newTasks[index-1]
+            // We need to map back to our specific task ID.
+            const taskIndex = index - 1; 
+            if (taskIndex >= 0 && taskIndex < newTasks.length) {
+                const taskId = newTasks[taskIndex].id;
+                
+                setTasks(prev => prev.map(t => {
+                    if (t.id === taskId) {
+                        const isDone = currentBytes === totalBytes && totalBytes > 0;
+                        return { 
+                            ...t, 
+                            status: isDone ? 'done' : 'active',
+                            currentBytes,
+                            totalBytes,
+                            speed,
+                            // If previous items are pending but index moved past them, mark them done? 
+                            // api runs sequentially, so items < index are done.
+                        };
+                    }
+                    // Auto-complete previous tasks in this batch if we missed their 'done' event
+                    // (Double safety)
+                    if (newTasks.some(nt => nt.id === t.id) && newTasks.indexOf(newTasks.find(nt => nt.id === t.id)) < taskIndex) {
+                         if (t.status !== 'done') return { ...t, status: 'done', currentBytes: t.totalBytes };
+                    }
+                    return t;
+                }));
+            }
+        },
+        (finishedFileName) => {
+            // Mark specific task done by name (fallback if progress didn't hit 100%)
+            // Ideally we use ID, but api only returns filename currently.
+            // We can match by name within this batch.
+            const task = newTasks.find(t => t.name === finishedFileName);
+            if (task) {
+                 setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
+            }
+            
+            // Live Refresh
+            if (currentPathRef.current === currentPath) {
+                 fetchFilesRef.current(currentPath);
+            }
+        }
+    ).catch(err => {
+        // Mark remaining pending tasks as error
+        setTasks(prev => prev.map(t => {
+            if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
+                return { ...t, status: 'error' };
+            }
+            return t;
+        }));
+        alert(t.uploadFailed);
+    });
   };
 
   const onDrop = useCallback(acceptedFiles => { handleUpload(acceptedFiles); }, [currentPath, activeDrive, files, t]); // Add files/t dependency
@@ -726,41 +800,80 @@ function App() {
   const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   const handleCopy = () => { setClipboard({ mode: 'copy', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   
-  const handlePaste = async () => { 
+  const handlePaste = () => { 
     if (!clipboard || !clipboard.items) return; 
     
     // Check if cross-drive
     const sourceDrive = clipboard.driveId || activeDrive; 
     const destDrive = activeDrive;
     const isMove = clipboard.mode === 'move';
+    const targetPath = currentPath; // Capture target path at start
+    const items = clipboard.items;
+    
+    setClipboard(null); 
 
-    try {
-        const total = clipboard.items.length;
-        setProgress({ current: 0, total, filename: 'Preparing...' });
-        
-        if (sourceDrive === destDrive) {
-            // Same drive
-            if (isMove) {
-                await api.moveItems(clipboard.items, currentPath, activeDrive);
-            } else {
-                // Same drive copy
-                await api.crossDriveTransfer(clipboard.items, sourceDrive, currentPath, destDrive, false, (current, total, filename) => {
-                    setProgress({ current, total, filename });
-                });
-            }
-        } else {
-            // Cross drive
-            await api.crossDriveTransfer(clipboard.items, sourceDrive, currentPath, destDrive, isMove, (current, total, filename) => {
-                setProgress({ current, total, filename });
-            });
+    // 1. Create Tasks
+    const batchId = Date.now();
+    const newTasks = items.map((path, i) => ({
+        id: `transfer_${batchId}_${i}`,
+        name: path.split('/').pop(),
+        status: 'pending',
+        currentBytes: 0,
+        totalBytes: 0, // Unknown initially for remote files
+        speed: 0,
+        type: isMove ? 'move' : 'copy'
+    }));
+    setTasks(prev => [...newTasks, ...prev]);
+
+    // 2. Start Transfer
+    const onProgress = (index, total, name, speed, currentBytes, totalBytes) => {
+        const taskIndex = index - 1;
+        if (taskIndex >= 0 && taskIndex < newTasks.length) {
+            const taskId = newTasks[taskIndex].id;
+            setTasks(prev => prev.map(t => {
+                if (t.id === taskId) {
+                    const isDone = currentBytes === totalBytes && totalBytes > 0;
+                    return { 
+                        ...t, 
+                        status: isDone ? 'done' : 'active',
+                        currentBytes,
+                        // Update totalBytes if we just learned it
+                        totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes, 
+                        speed 
+                    };
+                }
+                // Cleanup previous
+                if (newTasks.some(nt => nt.id === t.id) && newTasks.indexOf(newTasks.find(nt => nt.id === t.id)) < taskIndex) {
+                     if (t.status !== 'done') return { ...t, status: 'done', currentBytes: t.totalBytes };
+                }
+                return t;
+            }));
         }
-        fetchFiles(currentPath); 
-        setClipboard(null); 
-    } catch (err) {
+    };
+    
+    const onComplete = (finishedItemName) => {
+         const task = newTasks.find(t => t.name === finishedItemName);
+         if (task) {
+              setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
+         }
+         if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+    };
+
+    const transferPromise = (sourceDrive === destDrive) 
+        ? (isMove 
+            ? api.moveItems(items, targetPath, activeDrive) 
+            : api.crossDriveTransfer(items, sourceDrive, targetPath, destDrive, false, onProgress, onComplete))
+        : api.crossDriveTransfer(items, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete);
+    
+    transferPromise.catch(err => {
+        setTasks(prev => prev.map(t => {
+            if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
+                return { ...t, status: 'error' };
+            }
+            return t;
+        }));
         alert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''));
-    } finally {
-        setProgress(null);
-    }
+    });
   };
   
   const handleRename = () => {
@@ -1021,9 +1134,25 @@ function App() {
             </div>
             
             <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+               {/* New Circular Progress */}
+               <CircularProgress 
+                  progress={{ 
+                      current: tasks.filter(t => t.status === 'done').length, 
+                      total: tasks.length 
+                  }} 
+                  activeCount={tasks.filter(t => t.status === 'active' || t.status === 'pending').length}
+                  onClick={() => setIsDashboardOpen(true)}
+               />
+
               {isSelectionMode ? (
-                <button onClick={() => setSelectedPaths(new Set())} className="text-sm text-indigo-600 font-medium px-2 sm:px-4">
-                  {t.cancel}
+                <button 
+                  onClick={() => {
+                    if (selectedPaths.size === sortedFiles.length) setSelectedPaths(new Set());
+                    else setSelectedPaths(new Set(sortedFiles.map(f => f.path)));
+                  }} 
+                  className="text-sm text-indigo-600 font-medium px-2 sm:px-4"
+                >
+                  {selectedPaths.size === sortedFiles.length ? t.cancel : t.selectAll}
                 </button>
               ) : hasClipboard ? (
                 <button onClick={() => setClipboard(null)} className="text-sm text-slate-400 font-medium px-2 sm:px-4">
@@ -1031,12 +1160,6 @@ function App() {
                 </button>
               ) : (
                 <>
-                  {uploading && (
-                     <div className="flex items-center gap-2 text-sm text-slate-500 mr-2 hidden sm:flex">
-                       <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                       <span>{t.uploading}</span>
-                     </div>
-                  )}
                   
                   {/* Sort Menu */}
                   <div className="relative">
@@ -1224,7 +1347,7 @@ function App() {
                 {!isIslandExpanded && (
                   <div className="w-full flex justify-between px-4 items-center h-full">
                     <button onClick={() => fetchFiles(currentPath)} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
-                      <ArrowPathIcon className={clsx("w-6 h-6", (loading || uploading) && "animate-spin text-indigo-500")} />
+                      <ArrowPathIcon className={clsx("w-6 h-6", (loading) && "animate-spin text-indigo-500")} />
                     </button>
                     <div className="w-px h-6 bg-slate-200"></div>
                     <button onClick={() => setIsIslandExpanded(true)} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
@@ -1355,31 +1478,13 @@ function App() {
           }
         }} lang={lang} /></div>}</AnimatePresence>
 
-        {/* Progress Toast */}
-        <AnimatePresence>
-            {progress && (
-                <motion.div
-                    initial={{ opacity: 0, y: 50 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 50 }}
-                    className="fixed bottom-24 right-4 z-50 bg-slate-800 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 min-w-[200px] max-w-[300px]"
-                >
-                    <div className="relative w-8 h-8 shrink-0">
-                        <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
-                            <path className="text-slate-600" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="4" />
-                            <path className="text-indigo-400 transition-all duration-300 ease-linear" strokeDasharray={`${(progress.current / progress.total) * 100}, 100`} d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="4" />
-                        </svg>
-                        <div className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">
-                            {Math.round((progress.current / progress.total) * 100)}%
-                        </div>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium truncate">{progress.filename}</p>
-                        <p className="text-[10px] text-slate-400">{progress.current} / {progress.total} items</p>
-                    </div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+        <TransferDashboard 
+            isOpen={isDashboardOpen} 
+            onClose={() => setIsDashboardOpen(false)} 
+            tasks={tasks}
+            onClearCompleted={() => setTasks(prev => prev.filter(t => t.status !== 'done' && t.status !== 'error'))}
+            lang={lang}
+        />
       </div>
     </div>
   );

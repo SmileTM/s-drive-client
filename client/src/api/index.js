@@ -9,6 +9,34 @@ import { encrypt, decrypt } from '../utils/clientCrypto';
 // --- Native Plugin Interface ---
 const WebDavNative = registerPlugin('WebDavNative');
 
+// --- Global Event Listener System ---
+const uploadCallbacks = {}; // Map: id -> callback(info)
+let globalUploadListener = null;
+
+const initGlobalUploadListener = async () => {
+    if (!Capacitor.isNativePlatform() || globalUploadListener) return;
+    
+    console.log('[NativeWebDAV] Initializing global upload listener');
+    globalUploadListener = await WebDavNative.addListener('uploadProgress', (info) => {
+        console.log('[NativeWebDAV] Global Event:', JSON.stringify(info));
+        console.log('[NativeWebDAV] Active Callbacks:', Object.keys(uploadCallbacks));
+
+        const { id } = info;
+        if (id && uploadCallbacks[id]) {
+            uploadCallbacks[id](info);
+        } else {
+             // Fallback: Dispatch to all active callbacks if ID is missing
+             // This assumes sequential uploads (which we enforce) or that progress events are generic enough
+             Object.values(uploadCallbacks).forEach(cb => cb(info));
+        }
+    });
+};
+
+// Initialize immediately if native
+if (Capacitor.isNativePlatform()) {
+    initGlobalUploadListener();
+}
+
 // --- Critical Polyfill for Mobile ---
 // Ensure Buffer is available globally
 if (typeof window !== 'undefined') {
@@ -81,15 +109,6 @@ class NativeWebDAVClient {
         // encode the path parts
         const encodedRelative = cleanPath.split('/').map(p => encodeURIComponent(decodeURIComponent(p))).join('/');
         return this.url + encodedRelative;
-    }
-
-    async putFileContents(path, content) {
-        // content is expected to be Base64 string if it's binary data
-        await this._request('PUT', path, {
-             data: content,
-             headers: { 'Content-Type': 'application/octet-stream' },
-             bodyIsBase64: true // Tell native plugin to decode
-        });
     }
 
     // Update _request to pass bodyIsBase64
@@ -217,10 +236,41 @@ class NativeWebDAVClient {
     }
     
     async putFileContents(path, content) {
+        const data = Buffer.isBuffer(content) ? content.toString('base64') : content;
         await this._request('PUT', path, {
-             data: content.toString(),
+             data: data,
              headers: { 'Content-Type': 'application/octet-stream' },
              bodyIsBase64: true 
+        });
+    }
+
+    async streamUploadFile(path, sourcePath, id) {
+        const fullUrl = this._resolveUrl(path);
+        const headers = {
+            'Authorization': this.authHeader,
+            'Content-Type': 'application/octet-stream',
+            'X-Capacitor-Id': id // Backup ID
+        };
+        console.log(`[NativeWebDAV] streamUploadFile calling native upload with id: ${id}`);
+        await WebDavNative.upload({
+            url: fullUrl,
+            method: 'PUT',
+            headers: headers,
+            sourcePath: sourcePath,
+            id: id
+        });
+    }
+
+    async streamDownloadFile(remotePath, localPath, id) {
+        const fullUrl = this._resolveUrl(remotePath);
+        const headers = {
+            'Authorization': this.authHeader
+        };
+        await WebDavNative.download({
+            url: fullUrl,
+            destPath: localPath,
+            headers: headers,
+            id: id
         });
     }
 
@@ -407,6 +457,23 @@ const base64ToBlob = (base64, mimeType = 'application/octet-stream') => {
 
 let cachedServerUrl = null;
 
+// --- Helper: Notifications ---
+const updateNotify = async (id, title, desc, progress, max) => {
+    if (!Capacitor.isNativePlatform()) return;
+    try {
+        await WebDavNative.updateNotification({
+            id, title, description: desc, progress, max
+        });
+    } catch(e) {}
+};
+
+const cancelNotify = async (id) => {
+    if (!Capacitor.isNativePlatform()) return;
+    try {
+        await WebDavNative.cancelNotification({ id });
+    } catch(e) {}
+};
+
 // --- Strategy 2: Native API (Capacitor) ---
 const NativeAPI = {
   getFiles: async (reqPath, driveId) => {
@@ -425,7 +492,7 @@ const NativeAPI = {
            path: item.filename, 
            isDirectory: item.type === 'directory',
            size: item.size,
-           mtime: item.lastmod,
+           mtime: item.mtime,
            type: item.type === 'directory' ? 'folder' : (item.mime || 'application/octet-stream')
        }));
     }
@@ -642,12 +709,19 @@ const NativeAPI = {
           }
       }));
   },
-
-  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress) => {
+  
+  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete) => {
       console.log(`[CrossDrive] Transferring ${items.length} items from ${sourceDriveId} to ${destDriveId} (Move: ${isMove})`);
       
+      const NOTIFY_ID = 1001;
       let transferredBytes = 0;
       const startTime = Date.now();
+      
+      if (Capacitor.isNativePlatform()) {
+           await WebDavNative.startBackgroundWork();
+      }
+
+      await updateNotify(NOTIFY_ID, isMove ? "Moving Files" : "Copying Files", "Preparing...", 0, items.length);
 
       // ... (readContent and writeContent helpers remain same) ...
       // Helper to read content
@@ -691,101 +765,427 @@ const NativeAPI = {
           }
       };
 
-      // Execution Loop
-      for (let i = 0; i < items.length; i++) {
-          const itemPath = items[i];
-          const itemName = itemPath.split('/').pop();
-          // Report start of item (speed keeps previous value or 0)
-          const currentSpeed = (transferredBytes > 0 && (Date.now() - startTime) > 0) 
-              ? transferredBytes / ((Date.now() - startTime) / 1000) 
-              : 0;
-          if (onProgress) onProgress(i + 1, items.length, itemName, currentSpeed);
+      try {
+        // Execution Loop
+        for (let i = 0; i < items.length; i++) {
+            const itemPath = items[i];
+            const itemName = itemPath.split('/').pop();
+            
+            await updateNotify(NOTIFY_ID, isMove ? "Moving Files" : "Copying Files", `Processing ${itemName}`, i, items.length);
 
-          try {
-              console.log(`[CrossDrive] 1. Reading ${itemPath}`);
-              // 1. Read
-              const content = await readContent(itemPath, sourceDriveId);
-              
-              // 2. Write
-              console.log(`[CrossDrive] 2. Writing to ${destDriveId}`);
-              await writeContent(itemPath, content, destDriveId);
-              
-              // Update stats (content is Base64, size is approx * 0.75)
-              transferredBytes += Math.round(content.length * 0.75);
-              
-              // 3. Delete Source (Only if Move)
-              if (isMove) {
-                  console.log(`[CrossDrive] 3. Deleting source ${itemPath}`);
-                  if (sourceDriveId === 'local') {
-                      await Filesystem.deleteFile({ path: itemPath, directory: Directory.ExternalStorage });
-                  } else {
-                      const drives = await NativeAPI.getDrives();
-                      const config = drives.find(d => d.id === sourceDriveId);
-                      const client = getWebDAVClient(config);
-                      await client.deleteFile(itemPath);
-                  }
-              }
-              console.log(`[CrossDrive] Transfer complete for ${itemPath}`);
-          } catch (e) {
-              console.error(`[CrossDrive] Failed to transfer ${itemPath}:`, e);
-              throw e;
+            // Report start of item
+            if (onProgress) onProgress(i + 1, items.length, itemName, 0, 0, 0);
+
+            try {
+                if (sourceDriveId === 'local' && destDriveId !== 'local') {
+                    // Optimized Local -> WebDAV Stream
+                    console.log(`[CrossDrive] Optimizing Local -> WebDAV for ${itemPath}`);
+                    const drives = await NativeAPI.getDrives();
+                    const config = drives.find(d => d.id === destDriveId);
+                    const client = getWebDAVClient(config);
+                    
+                    const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
+                    const targetPath = cleanDest + '/' + itemName;
+                    
+                    // Generate unique ID for this transfer
+                    const transferId = `transfer_${Date.now()}_${i}`;
+                    let fileSize = 0;
+                    try {
+                        const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
+                        fileSize = stat.size;
+                    } catch(e) { console.warn('Failed to get file size', e); }
+
+                    let lastUpdate = Date.now();
+                    let lastBytes = 0;
+
+                    // Register temporary callback
+                    uploadCallbacks[transferId] = (info) => {
+                        const { uploaded, total } = info;
+                        const now = Date.now();
+                        const timeDiff = (now - lastUpdate) / 1000;
+                        
+                        let speed = 0;
+                        if (timeDiff > 0) {
+                             const bytesDiff = uploaded - lastBytes;
+                             speed = bytesDiff / timeDiff;
+                        }
+                        
+                        // Fallback to average if delta is weird or start
+                        if (speed === 0 && uploaded > 0) {
+                             const elapsed = (Date.now() - startTime) / 1000;
+                             speed = (transferredBytes + uploaded) / elapsed;
+                        }
+
+                        lastUpdate = now;
+                        lastBytes = uploaded;
+
+                        const effectiveTotal = total > 0 ? total : fileSize;
+                        if (onProgress) onProgress(i + 1, items.length, itemName, speed, uploaded, effectiveTotal);
+                    };
+
+                    try {
+                        await client.streamUploadFile(targetPath, itemPath, transferId);
+                        transferredBytes += fileSize; // Accumulate bytes
+                    } finally {
+                        delete uploadCallbacks[transferId];
+                    }
+                    
+                    // Delete Source (Only if Move)
+                    if (isMove) {
+                        await Filesystem.deleteFile({ path: itemPath, directory: Directory.ExternalStorage });
+                    }
+                    
+                } else if (sourceDriveId !== 'local' && destDriveId === 'local') {
+                    // Optimized WebDAV -> Local Stream (New)
+                    console.log(`[CrossDrive] Optimizing WebDAV -> Local for ${itemPath}`);
+                    const drives = await NativeAPI.getDrives();
+                    const config = drives.find(d => d.id === sourceDriveId);
+                    const client = getWebDAVClient(config);
+                    
+                    const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
+                    const targetPath = cleanDest + '/' + itemName;
+                    
+                    const transferId = `transfer_${Date.now()}_${i}`;
+                    let downloadListener = null;
+                    let lastUpdate = Date.now();
+                    let lastBytes = 0; // Bytes within this file
+                    let fileTotalBytes = 0;
+
+                    if (Capacitor.isNativePlatform()) {
+                         downloadListener = await WebDavNative.addListener('downloadProgress', (info) => {
+                             if (info.id === transferId) {
+                                 const { downloaded, total } = info;
+                                 const now = Date.now();
+                                 const timeDiff = (now - lastUpdate) / 1000;
+                                 
+                                 let speed = 0;
+                                 if (timeDiff > 0) {
+                                     const bytesDiff = downloaded - lastBytes;
+                                     speed = bytesDiff / timeDiff;
+                                 }
+                                 
+                                  // Fallback
+                                 if (speed === 0 && downloaded > 0) {
+                                     const elapsed = (Date.now() - startTime) / 1000;
+                                     speed = (transferredBytes + downloaded) / elapsed;
+                                 }
+
+                                 lastUpdate = now;
+                                 lastBytes = downloaded;
+                                 fileTotalBytes = total;
+                                 if (onProgress) onProgress(i + 1, items.length, itemName, speed, downloaded, total);
+                             }
+                         });
+                    }
+
+                    try {
+                        await client.streamDownloadFile(itemPath, targetPath, transferId);
+                        transferredBytes += fileTotalBytes; 
+                    } finally {
+                        if (downloadListener) downloadListener.remove();
+                    }
+                    
+                    // Delete Source (Only if Move)
+                    if (isMove) {
+                        await client.deleteFile(itemPath);
+                    }
+                } else {
+                    console.log(`[CrossDrive] 1. Reading ${itemPath}`);
+                    // 1. Read
+                    const content = await readContent(itemPath, sourceDriveId);
+                    
+                    // 2. Write
+                    console.log(`[CrossDrive] 2. Writing to ${destDriveId}`);
+                    await writeContent(itemPath, content, destDriveId);
+                    
+                    // Update stats (content is Base64, size is approx * 0.75)
+                    const bytes = Math.round(content.length * 0.75);
+                    transferredBytes += bytes;
+                    
+                    // Simple average speed for these block transfers
+                    const elapsed = (Date.now() - startTime) / 1000;
+                    const speed = elapsed > 0 ? transferredBytes / elapsed : 0;
+                    
+                    if (onProgress) onProgress(i + 1, items.length, itemName, speed, bytes, bytes);
+                    
+                    // 3. Delete Source (Only if Move)
+                    if (isMove) {
+                        console.log(`[CrossDrive] 3. Deleting source ${itemPath}`);
+                        if (sourceDriveId === 'local') {
+                            await Filesystem.deleteFile({ path: itemPath, directory: Directory.ExternalStorage });
+                        } else {
+                            const drives = await NativeAPI.getDrives();
+                            const config = drives.find(d => d.id === sourceDriveId);
+                            const client = getWebDAVClient(config);
+                            await client.deleteFile(itemPath);
+                        }
+                    }
+                }
+                console.log(`[CrossDrive] Transfer complete for ${itemPath}`);
+                if (onItemComplete) onItemComplete(itemName); // Notify item complete
+            } catch (e) {
+                console.error(`[CrossDrive] Failed to transfer ${itemPath}:`, e);
+                throw e;
+            }
+        }
+      } finally {
+          // Wait a bit to ensure all native events are flushed
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+          if (Capacitor.isNativePlatform()) {
+             await WebDavNative.stopBackgroundWork();
           }
+          await cancelNotify(NOTIFY_ID);
       }
   },
 
-  uploadFiles: async (path, files, driveId, onProgress) => {
-    let transferredBytes = 0;
+  uploadFiles: async (path, files, driveId, onProgress, onItemComplete) => {
+    const NOTIFY_ID = 1002;
+    let transferredBytes = 0; // Bytes fully completed from previous files
     const startTime = Date.now();
-
-    const reportProgress = (index, filename, bytes) => {
-        if (!onProgress) return;
-        transferredBytes += bytes;
-        const elapsed = (Date.now() - startTime) / 1000; // seconds
-        const speed = elapsed > 0 ? transferredBytes / elapsed : 0; // bytes/s
-        onProgress(index, files.length, filename, speed);
-    };
-
-    // Handling File Objects in Native is tricky. 
-    // Usually involves reading file into base64 and writing.
-    if (driveId !== 'local') {
-        const drives = await NativeAPI.getDrives();
-        const config = drives.find(d => d.id === driveId);
-        const client = getWebDAVClient(config);
-
-        await Promise.all(files.map(async (file, index) => {
-            if (onProgress) onProgress(index + 1, files.length, file.name, 0); // Start
-            const arrayBuffer = await file.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
-            const remotePath = `${path}/${file.name}`.replace('//', '/');
-            await client.putFileContents(remotePath, buffer);
-            reportProgress(index + 1, file.name, file.size);
-        }));
-        return;
+    
+    // Ensure listener is active
+    if (Capacitor.isNativePlatform()) {
+        await initGlobalUploadListener();
     }
 
-    // Local Upload
-    await Promise.all(files.map(async (file, index) => {
-       if (onProgress) onProgress(index + 1, files.length, file.name, 0);
-       const destPath = (path === '/' ? '' : path) + '/' + file.name;
-       
-       // Convert File to Base64
-       const toBase64 = (file) => new Promise((resolve, reject) => {
-           const reader = new FileReader();
-           reader.readAsDataURL(file);
-           reader.onload = () => resolve(reader.result.split(',')[1]); // Remove data:mime;base64,
-           reader.onerror = error => reject(error);
-       });
+    const reportFinished = (bytes) => {
+        transferredBytes += bytes;
+    };
 
-       const data = await toBase64(file);
-       
-       await Filesystem.writeFile({
-           path: destPath,
-           data: data,
-           directory: Directory.ExternalStorage,
-           recursive: true 
-       });
-       reportProgress(index + 1, file.name, file.size);
-    }));
+    // Helper to save JS File to Temp (Chunked)
+    const saveToTemp = async (file) => {
+        const tempName = `temp_${Date.now()}_${Math.random().toString(36).substring(7)}_${file.name}`;
+        
+        // Fast Path: Use Local Server Stream (Avoids Base64 & Bridge)
+        try {
+            const res = await WebDavNative.getServerUrl();
+            if (res && res.url) {
+                // Use /cache/ prefix to write to cache directory
+                const uploadUrl = `${res.url}/cache/${encodeURIComponent(tempName)}`;
+                // Use fetch to upload directly (streaming)
+                const response = await fetch(uploadUrl, {
+                    method: 'PUT',
+                    body: file
+                });
+                
+                if (response.ok) {
+                    return {
+                        uri: '', 
+                        path: tempName, // Plugin will find it in CacheDir by name
+                        cleanup: async () => {
+                            try {
+                                await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache });
+                            } catch(e) {}
+                        }
+                    };
+                }
+                console.warn('[Native] Fast temp upload failed status:', response.status);
+            }
+        } catch (e) {
+            console.warn('[Native] Fast temp upload failed, falling back to slow method:', e);
+        }
+
+        // Fallback: Slow Base64 Chunked Write
+        const CHUNK_SIZE = 1024 * 1024 * 1; // Reduce to 1MB for stability
+        let offset = 0;
+        
+        // Ensure clean start
+        try {
+            await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache });
+        } catch (e) {}
+        
+        while (offset < file.size) {
+            const chunk = file.slice(offset, offset + CHUNK_SIZE);
+            const reader = new FileReader();
+            const base64 = await new Promise((resolve, reject) => {
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = () => reject(reader.error || new Error('Unknown FileReader Error'));
+                reader.readAsDataURL(chunk);
+            });
+            
+            if (offset === 0) {
+                 await Filesystem.writeFile({
+                    path: tempName,
+                    data: base64,
+                    directory: Directory.Cache
+                });
+            } else {
+                await Filesystem.appendFile({
+                    path: tempName,
+                    data: base64,
+                    directory: Directory.Cache
+                });
+            }
+            
+            offset += CHUNK_SIZE;
+            
+            // Critical: Yield to Event Loop to prevent UI Freeze
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        
+        const { uri } = await Filesystem.getUri({
+             path: tempName,
+             directory: Directory.Cache
+        });
+        
+        return { 
+            uri, 
+            path: decodeURIComponent(uri.replace('file://', '')),
+            cleanup: async () => {
+                try {
+                    await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache });
+                } catch(e) {}
+            }
+        }; 
+    };
+    
+    try {
+        if (Capacitor.isNativePlatform()) {
+             await WebDavNative.startBackgroundWork();
+        }
+
+        if (driveId !== 'local') {
+            const drives = await NativeAPI.getDrives();
+            const config = drives.find(d => d.id === driveId);
+            const client = getWebDAVClient(config);
+
+            // Upload sequentially
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                await updateNotify(NOTIFY_ID, "Uploading Files", `Uploading ${file.name}`, i, files.length);
+
+                if (onProgress) onProgress(i + 1, files.length, file.name, 0, 0, file.size); // Start
+                
+                let temp = null;
+                const uploadId = `upload_${Date.now()}_${i}`;
+                
+                let lastUpdate = Date.now();
+                let lastBytes = 0;
+
+                // Register Global Callback for this upload
+                console.log('[NativeWebDAV] Registering callback for:', uploadId);
+                uploadCallbacks[uploadId] = (info) => {
+                    // console.log('[NativeWebDAV] Callback executing for:', uploadId);
+                    const { uploaded, total } = info;
+                    const now = Date.now();
+                    const timeDiff = (now - lastUpdate) / 1000;
+                    
+                    let speed = 0;
+                    if (timeDiff > 0) {
+                        const bytesDiff = uploaded - lastBytes;
+                        speed = bytesDiff / timeDiff;
+                    }
+                    
+                    // Fallback
+                    if (speed === 0 && uploaded > 0) {
+                        const elapsed = (Date.now() - startTime) / 1000;
+                        speed = (transferredBytes + uploaded) / elapsed;
+                    }
+
+                    lastUpdate = now;
+                    lastBytes = uploaded;
+
+                    if (onProgress) onProgress(i + 1, files.length, file.name, speed, uploaded, total);
+                };
+
+                try {
+                    // Save to temp first
+                    temp = await saveToTemp(file);
+                    
+                    // Stream Upload
+                    const remotePath = `${path}/${file.name}`.replace('//', '/');
+                    await client.streamUploadFile(remotePath, temp.path, uploadId);
+                    
+                    reportFinished(file.size);
+                    if (onItemComplete) onItemComplete(file.name); // Notify item complete
+                } catch (e) {
+                    console.error("Upload failed", e);
+                    throw e; 
+                } finally {
+                    // Wait longer to ensure all native events are flushed
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    delete uploadCallbacks[uploadId];
+                    if (temp) await temp.cleanup();
+                }
+            }
+        } else {
+            // Local Upload (Chunked)
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                await updateNotify(NOTIFY_ID, "Uploading Files", `Saving ${file.name}`, i, files.length);
+                
+                if (onProgress) onProgress(i + 1, files.length, file.name, 0, 0, file.size);
+                const destPath = (path === '/' ? '' : path) + '/' + file.name;
+                
+                const CHUNK_SIZE = 1024 * 1024 * 1; // 1MB for stability
+                let offset = 0;
+                let lastUpdate = Date.now();
+                let lastBytes = 0;
+                
+                try {
+                    while (offset < file.size) {
+                        const chunk = file.slice(offset, offset + CHUNK_SIZE);
+                        const reader = new FileReader();
+                        const base64 = await new Promise((resolve, reject) => {
+                            reader.onload = () => resolve(reader.result.split(',')[1]);
+                            reader.onerror = () => reject(reader.error || new Error('Unknown FileReader Error'));
+                            reader.readAsDataURL(chunk);
+                        });
+                        
+                        if (offset === 0) {
+                            await Filesystem.writeFile({
+                                path: destPath,
+                                data: base64,
+                                directory: Directory.ExternalStorage,
+                                recursive: true
+                            });
+                        } else {
+                            await Filesystem.appendFile({
+                                path: destPath,
+                                data: base64,
+                                directory: Directory.ExternalStorage
+                            });
+                        }
+                        offset += CHUNK_SIZE;
+                        await new Promise(resolve => setTimeout(resolve, 10)); // Yield more aggressively (10ms)
+                        
+                        // Report Progress Locally
+                        const now = Date.now();
+                        const timeDiff = (now - lastUpdate) / 1000;
+                        const currentUploaded = Math.min(offset, file.size);
+                        
+                        let speed = 0;
+                        if (timeDiff > 0) {
+                            const bytesDiff = currentUploaded - lastBytes;
+                            speed = bytesDiff / timeDiff;
+                        }
+                         // Fallback
+                        if (speed === 0 && currentUploaded > 0) {
+                            const elapsed = (Date.now() - startTime) / 1000;
+                            speed = (transferredBytes + currentUploaded) / elapsed;
+                        }
+
+                        lastUpdate = now;
+                        lastBytes = currentUploaded;
+
+                        if (onProgress) onProgress(i + 1, files.length, file.name, speed, currentUploaded, file.size);
+                    }
+                    reportFinished(file.size);
+                    if (onItemComplete) onItemComplete(file.name); // Notify item complete
+                } catch (e) {
+                    console.error("Local upload failed", e);
+                    throw e;
+                }
+            }
+        }
+    } finally {
+        // No need to remove global listener
+        if (Capacitor.isNativePlatform()) {
+             await WebDavNative.stopBackgroundWork();
+        }
+        await cancelNotify(NOTIFY_ID);
+    }
   },
 
   getDrives: async () => {
@@ -916,6 +1316,10 @@ const NativeAPI = {
   },
 
   getThumbnailUrl: async (path, driveId) => {
+      // Optimization: Disable remote thumbnails to prevent OOM
+      // Downloading full files for list thumbnails is too heavy for memory
+      if (driveId !== 'local') return null;
+
       // For now, fallback to full file URL (Native rendering)
       return NativeAPI.getFileUrl(path, driveId);
   },
@@ -976,6 +1380,7 @@ const NativeAPI = {
         await Filesystem.requestPermissions();
         if (Capacitor.getPlatform() === 'android') {
             await WebDavNative.requestManageStoragePermission();
+            await WebDavNative.requestNotificationPermission();
         }
     } catch (e) {
         console.warn('[Native] Failed to request permissions:', e);
