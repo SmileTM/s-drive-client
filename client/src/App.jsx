@@ -883,7 +883,12 @@ function App() {
             : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete))
         : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete);
     
-    transferPromise.catch(err => {
+    transferPromise
+        .then(() => {
+            // Ensure final refresh after all items are done (crucial for same-drive moves)
+            if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+        })
+        .catch(err => {
         setTasks(prev => prev.map(t => {
             if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
                 return { ...t, status: 'error' };
