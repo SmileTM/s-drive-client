@@ -31,7 +31,7 @@
     "directories": {
       "output": "dist-electron"
     },
-    "asar": true,
+    "asar": false,
     "asarUnpack": [
       "**/node_modules/sharp/**/*",
       "**/node_modules/@img/**/*"

@@ -7,7 +7,12 @@ const fs = require('fs-extra');
 const os = require('os');
 const mime = require('mime-types');
 const multer = require('multer');
-const sharp = require('sharp');
+let sharp;
+try {
+    sharp = require('sharp');
+} catch (e) {
+    console.warn('[WARN] Sharp module not found or failed to load. Image processing disabled.', e.message);
+}
 const { encrypt, decrypt } = require('./utils/crypto');
 
 const app = express();
@@ -38,7 +43,7 @@ app.get('/api/preview', async (req, res) => {
              inputStream = client.createReadStream(reqPath);
         }
 
-        if (isHeic) {
+        if (isHeic && sharp) {
             res.setHeader('Content-Type', 'image/jpeg');
             const transform = sharp().toFormat('jpeg', { quality: 80 });
             
