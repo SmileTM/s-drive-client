@@ -268,6 +268,7 @@ public class WebDavPlugin extends Plugin {
                     File parent = file.getParentFile();
                     if (!parent.exists()) parent.mkdirs();
                     
+                    boolean success = false;
                     try (FileOutputStream fos = new FileOutputStream(file)) {
                          byte[] buffer = new byte[65536];
                          long bytesLeft = contentLength;
@@ -279,8 +280,20 @@ public class WebDavPlugin extends Plugin {
                              fos.write(buffer, 0, read);
                              if (contentLength != -1) bytesLeft -= read;
                          }
+                         success = true;
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    } finally {
+                        if (!success && file.exists()) {
+                            android.util.Log.d("WebDavNative", "Deleting partial PUT file: " + file.getAbsolutePath());
+                            file.delete();
+                        }
                     }
-                    out.write("HTTP/1.1 201 Created\r\nAccess-Control-Allow-Origin: *\r\n\r\n".getBytes());
+                    if (success) {
+                        out.write("HTTP/1.1 201 Created\r\nAccess-Control-Allow-Origin: *\r\n\r\n".getBytes());
+                    } else {
+                        out.write("HTTP/1.1 500 Internal Server Error\r\n\r\n".getBytes());
+                    }
                 } else if ("OPTIONS".equals(method)) {
                     out.write("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n".getBytes());
                 } else {
@@ -708,6 +721,7 @@ public class WebDavPlugin extends Plugin {
     public void download(PluginCall call) {
         startTransfer();
         String idForFinally = null;
+        File file = null;
         try {
             String url = call.getString("url");
             String destPath = call.getString("destPath");
@@ -723,7 +737,6 @@ public class WebDavPlugin extends Plugin {
             android.util.Log.d("WebDavNative", "Download destPath: " + destPath);
 
             File root = Environment.getExternalStorageDirectory();
-            File file;
             
             if (destPath.startsWith(root.getAbsolutePath())) {
                 file = new File(destPath);
@@ -802,8 +815,13 @@ public class WebDavPlugin extends Plugin {
                 
                 call.resolve();
 
-            } catch (IOException e) {
-                call.reject("Network error: " + e.getMessage());
+            } catch (Exception e) {
+                // IMPORTANT: Delete partial file on failure/cancellation
+                if (file != null && file.exists()) {
+                    android.util.Log.d("WebDavNative", "Deleting partial download file: " + file.getAbsolutePath());
+                    file.delete();
+                }
+                call.reject("Download error: " + e.getMessage());
             }
         } finally {
             if (idForFinally != null) activeCalls.remove(idForFinally);
@@ -819,6 +837,7 @@ public class WebDavPlugin extends Plugin {
         String body = call.getString("body");
         boolean bodyIsBase64 = call.getBoolean("bodyIsBase64", false);
         String responseType = call.getString("responseType", "text");
+        String reqId = call.getString("id");
 
         if (url == null) {
             call.reject("URL is required");
@@ -833,7 +852,11 @@ public class WebDavPlugin extends Plugin {
                 String value = headers.getString(key);
                 if (value != null) requestBuilder.addHeader(key, value);
             }
+            if (reqId == null) {
+                reqId = headers.getString("X-Capacitor-Id");
+            }
         }
+        final String callbackId = reqId;
 
         RequestBody requestBody = null;
         if (body != null) {
@@ -862,7 +885,10 @@ public class WebDavPlugin extends Plugin {
              requestBuilder.method(method, null);
         }
 
-        try (Response response = client.newCall(requestBuilder.build()).execute()) {
+        Call callObj = client.newCall(requestBuilder.build());
+        if (callbackId != null) activeCalls.put(callbackId, callObj);
+
+        try (Response response = callObj.execute()) {
             JSObject ret = new JSObject();
             ret.put("status", response.code());
             if (response.body() != null) {
@@ -881,6 +907,8 @@ public class WebDavPlugin extends Plugin {
             call.reject(e.getMessage());
         } catch (Exception e) {
              call.reject(e.getMessage());
+        } finally {
+            if (callbackId != null) activeCalls.remove(callbackId);
         }
     }
 }

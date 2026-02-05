@@ -131,7 +131,8 @@ class NativeWebDAVClient {
             headers: headers,
             body: options.data || '',
             bodyIsBase64: !!options.bodyIsBase64,
-            responseType: options.responseType || 'text'
+            responseType: options.responseType || 'text',
+            id: options.id
         });
 
         if (res.status >= 400) {
@@ -239,12 +240,13 @@ class NativeWebDAVClient {
         });
     }
     
-    async putFileContents(path, content) {
+    async putFileContents(path, content, options = {}) {
         const data = Buffer.isBuffer(content) ? content.toString('base64') : content;
         await this._request('PUT', path, {
              data: data,
              headers: { 'Content-Type': 'application/octet-stream' },
-             bodyIsBase64: true 
+             bodyIsBase64: true,
+             id: options.id
         });
     }
 
@@ -281,7 +283,8 @@ class NativeWebDAVClient {
     async getFileContents(path, options = {}) {
         const res = await this._request('GET', path, {
             ...options,
-            responseType: options.format === 'binary' ? 'base64' : 'text'
+            responseType: options.format === 'binary' ? 'base64' : 'text',
+            id: options.id
         });
         return res.data; // Base64 string if format is binary
     }
@@ -729,7 +732,7 @@ const NativeAPI = {
 
       // ... (readContent and writeContent helpers remain same) ...
       // Helper to read content
-      const readContent = async (path, driveId) => {
+      const readContent = async (path, driveId, transferId) => {
           if (driveId === 'local') {
               const res = await Filesystem.readFile({
                   path: path,
@@ -742,13 +745,13 @@ const NativeAPI = {
               const client = getWebDAVClient(config);
               
               // Get Base64 content
-              const base64Data = await client.getFileContents(path, { format: 'binary' });
+              const base64Data = await client.getFileContents(path, { format: 'binary', id: transferId });
               return base64Data;
           }
       };
 
       // Helper to write content
-      const writeContent = async (path, content, driveId) => {
+      const writeContent = async (path, content, driveId, transferId) => {
           const fileName = path.split('/').pop();
           const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
           const targetPath = cleanDest + '/' + fileName;
@@ -765,7 +768,7 @@ const NativeAPI = {
               const config = drives.find(d => d.id === driveId);
               const client = getWebDAVClient(config);
               // Ensure we pass bodyIsBase64: true
-              await client.putFileContents(targetPath, content);
+              await client.putFileContents(targetPath, content, { id: transferId });
           }
       };
 
@@ -907,11 +910,11 @@ const NativeAPI = {
                 } else {
                     console.log(`[CrossDrive] 1. Reading ${itemPath}`);
                     // 1. Read
-                    const content = await readContent(itemPath, sourceDriveId);
+                    const content = await readContent(itemPath, sourceDriveId, transferId);
                     
                     // 2. Write
                     console.log(`[CrossDrive] 2. Writing to ${destDriveId}`);
-                    await writeContent(itemPath, content, destDriveId);
+                    await writeContent(itemPath, content, destDriveId, transferId);
                     
                     // Update stats (content is Base64, size is approx * 0.75)
                     const bytes = Math.round(content.length * 0.75);

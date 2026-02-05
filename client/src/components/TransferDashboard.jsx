@@ -5,23 +5,26 @@ import clsx from 'clsx';
 import { translations } from '../i18n';
 
 // Custom Lightning Icon (Matches Status Bar) with Fill Animation
-const LightningIcon = ({ className, fillPercent = 100 }) => (
-    <svg viewBox="0 0 24 24" className={className}>
-        <defs>
-            <linearGradient id="lightning-fill-grad" x1="0" x2="0" y1="1" y2="0">
-                <stop offset={`${fillPercent}%`} stopColor="currentColor" />
-                <stop offset={`${fillPercent}%`} stopColor="transparent" />
-            </linearGradient>
-        </defs>
-        <path 
-            d="M15.5 5L11.5 11L15 11L8.5 19L12.5 13L9 13Z" 
-            fill="url(#lightning-fill-grad)" 
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinejoin="round"
-        />
-    </svg>
-);
+const LightningIcon = ({ className, fillPercent = 100 }) => {
+    const gradId = `lightning-fill-${fillPercent}`;
+    return (
+        <svg viewBox="0 0 24 24" className={className}>
+            <defs>
+                <linearGradient id={gradId} x1="0" x2="0" y1="1" y2="0">
+                    <stop offset={`${fillPercent}%`} stopColor="currentColor" />
+                    <stop offset={`${fillPercent}%`} stopColor="transparent" />
+                </linearGradient>
+            </defs>
+            <path 
+                d="M15.5 5L11.5 11L15 11L8.5 19L12.5 13L9 13Z" 
+                fill={`url(#${gradId})`}
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+            />
+        </svg>
+    );
+};
 
 // --- Circular Progress Indicator (Top-Right) ---
 export const CircularProgress = ({ progress, onClick, activeCount }) => {
@@ -100,17 +103,23 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
         <AnimatePresence>
             {isOpen && (
                 <motion.div
-                    initial={{ opacity: 0, scale: 0.95, y: -20 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95, y: -20 }}
-                    transition={{ type: 'spring', duration: 0.4 }}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.2 }}
                     className="fixed inset-0 z-[60] flex items-start justify-center pt-20 px-4 pointer-events-none"
                 >
                     {/* Backdrop (Click to close) */}
                     <div className="absolute inset-0 bg-black/10 backdrop-blur-sm pointer-events-auto" onClick={onClose} />
 
                     {/* Main Card */}
-                    <div className="relative w-full max-w-lg max-h-[70vh] flex flex-col pointer-events-auto shadow-2xl rounded-3xl overflow-hidden border border-white/40 ring-1 ring-black/5 bg-white/80 backdrop-blur-xl dark:bg-slate-900/80 dark:border-slate-700/50">
+                    <motion.div 
+                        initial={{ opacity: 0, scale: 0.95, y: -20 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95, y: -20 }}
+                        transition={{ type: 'spring', duration: 0.4 }}
+                        className="relative w-full max-w-lg max-h-[70vh] flex flex-col pointer-events-auto shadow-2xl rounded-3xl overflow-hidden border border-white/40 ring-1 ring-black/5 bg-white/80 backdrop-blur-xl dark:bg-slate-900/80 dark:border-slate-700/50"
+                    >
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200/50 dark:border-slate-700/50">
                             <div className="flex items-center gap-3">
@@ -235,7 +244,7 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                 <span>{t.remainingFiles.replace('{count}', activeCount)}</span>
                             </div>
                         )}
-                    </div>
+                    </motion.div>
                 </motion.div>
             )}
         </AnimatePresence>
