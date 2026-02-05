@@ -1032,7 +1032,8 @@ const NativeAPI = {
 
                     // A. Download Source -> Local Temp
                     // Use existing logic for WebDAV->Local but manual
-                    const downloadId = transferId + "_down";
+                    // Reuse transferId so cancellation works (api.cancelTask calls cancel with transferId)
+                    const downloadId = transferId; 
                     
                     // Register download listener for progress
                     let lastUpdate = Date.now();
@@ -1076,7 +1077,7 @@ const NativeAPI = {
 
                     // B. Upload Local Temp -> Dest
                     // Use existing logic for Local->WebDAV
-                    const uploadId = transferId + "_up";
+                    const uploadId = transferId;
                     lastUpdate = Date.now();
                     lastBytes = 0;
                     
@@ -1129,7 +1130,22 @@ const NativeAPI = {
                 // If cancelled (Socket closed), ignore error
                 if (taskId && cancellationMap[taskId]?.cancelled) {
                     console.log(`[CrossDrive] Task ${taskId} was cancelled during execution.`);
-                    // UI already updated by handleCancelTask
+                    
+                    // Cleanup Remote Partial File (Upload Scenarios)
+                    if (destDriveId !== 'local') {
+                         console.log(`[CrossDrive] Cleaning up remote file: ${targetPath}`);
+                         try {
+                             const drives = await NativeAPI.getDrives();
+                             const config = drives.find(d => d.id === destDriveId);
+                             const client = getWebDAVClient(config);
+                             await client.deleteFile(targetPath);
+                         } catch(cleanupErr) {
+                             console.warn("[CrossDrive] Remote cleanup failed (maybe file didn't exist yet)", cleanupErr);
+                         }
+                    }
+                    
+                    // Local partial files are handled by Native `download` catch block or `uploadFiles` temp cleanup.
+                    
                 } else {
                     console.error(`[CrossDrive] Failed to transfer ${itemPath}:`, e);
                     throw e;
@@ -1320,6 +1336,15 @@ const NativeAPI = {
                 } catch (e) {
                     if (taskId && cancellationMap[taskId]?.cancelled) {
                         console.log(`[Upload] Task ${taskId} cancelled during execution.`);
+                        
+                        // Cleanup Remote Partial File
+                        if (driveId !== 'local') {
+                             console.log(`[Upload] Cleaning up remote file: ${remotePath}`);
+                             try {
+                                 await client.deleteFile(remotePath);
+                             } catch(cleanupErr) {}
+                        }
+                        
                     } else {
                         console.error("Upload failed", e);
                         throw e; 

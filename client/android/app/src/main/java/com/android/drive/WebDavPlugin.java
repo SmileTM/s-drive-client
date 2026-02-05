@@ -44,6 +44,7 @@ import android.provider.Settings;
 import android.os.Build;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import androidx.core.app.NotificationCompat;
 
@@ -148,10 +149,18 @@ public class WebDavPlugin extends Plugin {
     public void cancel(PluginCall call) {
         String id = call.getString("id");
         if (id != null) {
+            // Immediate UI feedback
+            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+            String title = isZh ? "正在取消..." : "Cancelling...";
+            doUpdateNotification(9999, title, "", 0, 0);
+
             Call c = activeCalls.get(id);
             if (c != null) {
+                android.util.Log.d("WebDavNative", "Cancelling active call: " + id);
                 c.cancel();
                 activeCalls.remove(id);
+            } else {
+                android.util.Log.d("WebDavNative", "Cancel called but ID not found: " + id);
             }
         }
         call.resolve();
@@ -565,6 +574,19 @@ public class WebDavPlugin extends Plugin {
             else if (percent >= 20) iconResId = com.android.drive.R.drawable.ic_stat_transfer_20;
         }
 
+        // Create PendingIntent to open app on click
+        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+        PendingIntent pendingIntent = null;
+        if (launchIntent != null) {
+            launchIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            launchIntent.setData(Uri.parse("webdav://transfers")); // Deep link
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            pendingIntent = PendingIntent.getActivity(context, 0, launchIntent, flags);
+        }
+
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, "file_ops_v2")
                 .setSmallIcon(iconResId) 
                 .setContentTitle(title)
@@ -572,6 +594,10 @@ public class WebDavPlugin extends Plugin {
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true);
+        
+        if (pendingIntent != null) {
+            builder.setContentIntent(pendingIntent);
+        }
 
         if (max > 0) {
             builder.setProgress(max, progress, false);
@@ -686,6 +712,11 @@ public class WebDavPlugin extends Plugin {
                         long lastUpdate = 0;
                         long lastBytes = 0;
                         while ((read = in.read(buffer)) != -1) {
+                            // Check for cancellation
+                            if (callbackId != null && !activeCalls.containsKey(callbackId)) {
+                                throw new IOException("Cancelled");
+                            }
+
                             sink.write(buffer, 0, read);
                             uploaded += read;
                             
@@ -811,6 +842,11 @@ public class WebDavPlugin extends Plugin {
                     long lastBytes = 0;
 
                     while ((read = in.read(buffer)) != -1) {
+                        // Check for cancellation
+                        if (callbackId != null && !activeCalls.containsKey(callbackId)) {
+                            throw new IOException("Cancelled");
+                        }
+
                         out.write(buffer, 0, read);
                         downloaded += read;
                         

@@ -518,11 +518,51 @@ function App() {
     window.addEventListener('touchmove', handleTouchMove);
     window.addEventListener('touchend', handleTouchEnd);
 
+    // Check for initial launch URL (Cold Start)
+    CapApp.getLaunchUrl().then(data => {
+        if (data && data.url && data.url.includes('transfers')) {
+            console.log('[DeepLink] Initial Launch URL:', data.url);
+            setIsDashboardOpen(true);
+        }
+    });
+
+    // Native Bridge Fallback (Robustness) - Direct Window Event
+    const handleDeepLink = () => {
+        console.log('[DeepLink] Window Event Fired');
+        setIsDashboardOpen(true);
+    };
+    window.addEventListener('openTransferDeepLink', handleDeepLink);
+
+    // Deep Link Handler (Background -> Foreground)
+    const deepLinkListener = CapApp.addListener('appUrlOpen', (data) => {
+        console.log('[DeepLink] appUrlOpen fired:', JSON.stringify(data));
+        if (data.url && data.url.includes('transfers')) {
+            console.log('[DeepLink] Opening dashboard...');
+            setIsDashboardOpen(true);
+        }
+    });
+
+    // Fallback: Check state change (Warm Start)
+    const appStateListener = CapApp.addListener('appStateChange', (state) => {
+        if (state.isActive) {
+             CapApp.getLaunchUrl().then(data => {
+                console.log('[DeepLink] Resume Launch URL:', JSON.stringify(data));
+                if (data && data.url && data.url.includes('transfers')) {
+                    console.log('[DeepLink] State Change URL Match');
+                    setIsDashboardOpen(true);
+                }
+            });
+        }
+    });
+
     return () => {
         backListener.then(h => h.remove());
+        deepLinkListener.then(h => h.remove());
+        appStateListener.then(h => h.remove());
         window.removeEventListener('touchstart', handleTouchStart);
         window.removeEventListener('touchmove', handleTouchMove);
         window.removeEventListener('touchend', handleTouchEnd);
+        window.removeEventListener('openTransferDeepLink', handleDeepLink);
     };
   }, []); 
 
