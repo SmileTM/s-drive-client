@@ -740,6 +740,11 @@ public class WebDavPlugin extends Plugin {
                             
                             long now = System.currentTimeMillis();
                             if (now - lastUpdate > 500) {
+                                 // Re-check cancellation before updating UI to prevent overwriting "Cancelling..." state
+                                 if (callbackId != null && !activeCalls.containsKey(callbackId)) {
+                                     throw new IOException("Cancelled");
+                                 }
+
                                  JSObject ret = new JSObject();
                                  ret.put("uploaded", uploaded);
                                  ret.put("total", fileLength);
@@ -869,6 +874,11 @@ public class WebDavPlugin extends Plugin {
                         
                         long now = System.currentTimeMillis();
                         if (now - lastUpdate > 500) {
+                            // Re-check cancellation before updating UI
+                            if (callbackId != null && !activeCalls.containsKey(callbackId)) {
+                                throw new IOException("Cancelled");
+                            }
+
                             JSObject ret = new JSObject();
                             ret.put("downloaded", downloaded);
                             ret.put("total", contentLength);

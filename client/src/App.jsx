@@ -743,7 +743,8 @@ function App() {
         currentBytes: 0,
         totalBytes: f.size,
         speed: 0,
-        type: 'upload'
+        type: 'upload',
+        fileObj: f // Store file for retry
     }));
     
     setTasks(prev => [...newTasks, ...prev]); // Add new tasks to top
@@ -1081,7 +1082,8 @@ function App() {
           currentBytes: 0,
           totalBytes: file.size,
           speed: 0,
-          type: 'download'
+          type: 'download',
+          fullPath: file.path // Store path for retry
       };
       
       setTasks(prev => [newTask, ...prev]);
@@ -1122,6 +1124,20 @@ function App() {
           setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
           showAlert(t.downloadFailed + ': ' + err.message, t.failed, 'error');
       });
+  };
+
+  const handleRetryTask = (task) => {
+      // Remove old task
+      setTasks(prev => prev.filter(t => t.id !== task.id));
+      
+      // Re-trigger action
+      if (task.type === 'upload' && task.fileObj) {
+          handleUpload([task.fileObj]);
+      } else if (task.type === 'download' && task.fullPath) {
+          handleDownload({ name: task.name, path: task.fullPath, size: task.size });
+      } else {
+          showAlert("Retry not supported for this task type", "Info", 'warning');
+      }
   };
 
   const isSelectionMode = selectedPaths.size > 0;
@@ -1669,6 +1685,7 @@ function App() {
             tasks={tasks}
             onClearCompleted={() => setTasks(prev => prev.filter(t => t.status !== 'done' && t.status !== 'error'))}
             onCancel={handleCancelTask}
+            onRetry={handleRetryTask}
             lang={lang}
         />
       </div>

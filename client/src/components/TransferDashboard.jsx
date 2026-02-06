@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { XMarkIcon, ChevronUpIcon, ChevronDownIcon, PlayIcon, PauseIcon, TrashIcon, CheckCircleIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ChevronUpIcon, ChevronDownIcon, PlayIcon, PauseIcon, TrashIcon, CheckCircleIcon, ExclamationCircleIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { translations } from '../i18n';
 
@@ -87,7 +87,7 @@ const formatSize = (bytes) => {
 };
 
 // --- Dashboard Component ---
-const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel, lang = 'zh' }) => {
+const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel, onRetry, lang = 'zh' }) => {
     const t = translations[lang];
     // Tasks: Array of { id, name, type, status: 'pending'|'active'|'done'|'error', progress: 0-100, speed, currentBytes, totalBytes }
 
@@ -211,7 +211,16 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                 <div className="shrink-0 flex items-center gap-2">
                                                     {task.status === 'pending' && <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-full">{t.pending}</span>}
                                                     {task.status === 'done' && <CheckCircleIcon className="w-6 h-6 text-emerald-500" />}
-                                                    {task.status === 'error' && <span className="text-xs text-red-500">{t.failed}</span>}
+                                                    
+                                                    {task.status === 'error' && (
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); onRetry && onRetry(task); }}
+                                                            className="flex items-center gap-1 px-2 py-1 bg-red-50 text-red-500 rounded-lg hover:bg-red-100 transition-colors"
+                                                        >
+                                                            <ArrowPathIcon className="w-3.5 h-3.5" />
+                                                            <span className="text-xs font-medium">{t.retry}</span>
+                                                        </button>
+                                                    )}
                                                     
                                                     {(task.status === 'active' || task.status === 'pending') && (
                                                         <button 

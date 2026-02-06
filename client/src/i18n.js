@@ -83,6 +83,7 @@ export const translations = {
     noTransfers: "No recent transfers",
     pending: "Pending",
     failed: "Failed",
+    retry: "Retry",
     totalSpeed: "Total Speed: {speed}",
     remainingFiles: "Remaining: {count} files"
   },
@@ -170,6 +171,7 @@ export const translations = {
     noTransfers: "暂无传输记录",
     pending: "等待中",
     failed: "失败",
+    retry: "重试",
     totalSpeed: "总速度: {speed}",
     remainingFiles: "剩余: {count} 个文件"
   }
