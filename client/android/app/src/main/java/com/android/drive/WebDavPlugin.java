@@ -25,6 +25,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Properties;
+import java.net.MalformedURLException;
 
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -52,6 +54,13 @@ import android.widget.RemoteViews;
 import java.util.concurrent.ConcurrentHashMap;
 import okhttp3.Call;
 
+// SMB Imports
+import jcifs.CIFSContext;
+import jcifs.context.SingletonContext;
+import jcifs.smb.NtlmPasswordAuthenticator;
+import jcifs.smb.SmbFile;
+import jcifs.smb.SmbException;
+
 @CapacitorPlugin(
     name = "WebDavNative",
     permissions = {
@@ -65,6 +74,8 @@ public class WebDavPlugin extends Plugin {
 
     private final AtomicInteger activeTransfers = new AtomicInteger(0);
     private final ConcurrentHashMap<String, Call> activeCalls = new ConcurrentHashMap<>();
+    // Track SMB cancellations manually since they are blocking IO operations
+    private final ConcurrentHashMap<String, Boolean> cancelledSmbTasks = new ConcurrentHashMap<>();
 
     private void startTransfer() {
         int count = activeTransfers.getAndIncrement();
@@ -110,9 +121,15 @@ public class WebDavPlugin extends Plugin {
     public void load() {
         super.load();
         try {
+            // Set some default properties for jcifs-ng if needed
+            // Properties prop = new Properties();
+            // prop.setProperty("jcifs.smb.client.minVersion", "SMB202");
+            // prop.setProperty("jcifs.smb.client.maxVersion", "SMB311");
+            // SingletonContext.init(prop);
+            
             localServer = new LocalFileServer();
             localServer.start();
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
@@ -155,14 +172,16 @@ public class WebDavPlugin extends Plugin {
             String title = isZh ? "正在取消..." : "Cancelling...";
             doUpdateNotification(9999, title, "", 0, 0, "");
 
+            // Cancel WebDAV
             Call c = activeCalls.get(id);
             if (c != null) {
                 android.util.Log.d("WebDavNative", "Cancelling active call: " + id);
                 c.cancel();
                 activeCalls.remove(id);
-            } else {
-                android.util.Log.d("WebDavNative", "Cancel called but ID not found: " + id);
             }
+            
+            // Cancel SMB
+            cancelledSmbTasks.put(id, true);
         }
         call.resolve();
     }
@@ -196,6 +215,435 @@ public class WebDavPlugin extends Plugin {
         }
         return String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSec / (1024.0 * 1024.0));
     }
+
+    // --- SMB Helpers ---
+    private CIFSContext getCifsContext(String username, String password, String domain) {
+        // Use SingletonContext as base
+        CIFSContext base = SingletonContext.getInstance();
+        if (username != null && !username.isEmpty()) {
+            NtlmPasswordAuthenticator auth = new NtlmPasswordAuthenticator(domain, username, password);
+            return base.withCredentials(auth);
+        }
+        return base.withGuestCrendentials();
+    }
+
+    private String buildSmbUrl(String host, String share, String path) {
+        StringBuilder sb = new StringBuilder("smb://");
+        sb.append(host);
+        if (!host.endsWith("/")) sb.append("/");
+        if (share != null && !share.isEmpty()) {
+            sb.append(share);
+            if (!share.endsWith("/")) sb.append("/");
+        }
+        if (path != null && !path.isEmpty()) {
+            String p = path.startsWith("/") ? path.substring(1) : path;
+            sb.append(p);
+        }
+        // NOTE: SmbFile requires directory URLs to end with / for some operations, but regular files usually don't.
+        // It's safer to let the logic handle trailing slashes or add them if we know it's a dir.
+        return sb.toString();
+    }
+
+    @PluginMethod
+    public void smbConnect(PluginCall call) {
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null) {
+            call.reject("Address and Share are required");
+            return;
+        }
+
+        try {
+            CIFSContext ctx = getCifsContext(username, password, domain);
+            String url = buildSmbUrl(address, share, "");
+            SmbFile f = new SmbFile(url, ctx);
+            
+            // Try to connect/list
+            if (f.exists()) {
+                call.resolve();
+            } else {
+                call.reject("Share not found or access denied");
+            }
+        } catch (Exception e) {
+            call.reject("SMB Connection Failed: " + e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void smbListDirectory(PluginCall call) {
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String path = call.getString("path");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null) {
+            call.reject("Address and Share are required");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String url = buildSmbUrl(address, share, path);
+                if (!url.endsWith("/")) url += "/"; // List requires dir
+                
+                SmbFile dir = new SmbFile(url, ctx);
+                SmbFile[] files = dir.listFiles();
+                
+                com.getcapacitor.JSArray results = new com.getcapacitor.JSArray();
+                if (files != null) {
+                    for (SmbFile f : files) {
+                        JSObject item = new JSObject();
+                        String name = f.getName();
+                        // Remove trailing slash from name for consistency
+                        if (name.endsWith("/")) name = name.substring(0, name.length() - 1);
+                        
+                        item.put("name", name);
+                        item.put("isDirectory", f.isDirectory());
+                        item.put("size", f.length());
+                        item.put("mtime", f.lastModified());
+                        
+                        // Construct path relative to share root? 
+                        // Frontend expects full path from root e.g. /Folder/File
+                        // Our `path` input is relative to share.
+                        // But f.getName() returns just the name usually? 
+                        // Actually SmbFile.getName() returns the last component + slash if dir.
+                        
+                        // We construct the 'path' field for the frontend
+                        String parentPath = path.startsWith("/") ? path : "/" + path;
+                        if (!parentPath.endsWith("/")) parentPath += "/";
+                        item.put("path", parentPath + name);
+                        
+                        results.put(item);
+                    }
+                }
+                
+                JSObject ret = new JSObject();
+                ret.put("items", results);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("SMB List Failed: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void smbDelete(PluginCall call) {
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String path = call.getString("path");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null || path == null) {
+            call.reject("Missing parameters");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String url = buildSmbUrl(address, share, path);
+                SmbFile f = new SmbFile(url, ctx);
+                
+                if (f.exists()) {
+                    f.delete(); // Recursively delete? jcifs delete() is usually non-recursive for dirs.
+                    // But standard SmbFile.delete() deletes file or directory. 
+                    // Does it handle non-empty dirs? Usually no.
+                    // Let's implement simple delete for now. 
+                    call.resolve();
+                } else {
+                    call.reject("File not found");
+                }
+            } catch (Exception e) {
+                call.reject("SMB Delete Failed: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void smbMkdir(PluginCall call) {
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String path = call.getString("path");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null || path == null) {
+            call.reject("Missing parameters");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String url = buildSmbUrl(address, share, path);
+                // Ensure trailing slash for directory URL in jcifs
+                if (!url.endsWith("/")) url += "/";
+                
+                SmbFile f = new SmbFile(url, ctx);
+                if (!f.exists()) {
+                    f.mkdirs();
+                }
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("SMB Mkdir Failed: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void smbRename(PluginCall call) {
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String oldPath = call.getString("oldPath");
+        String newPath = call.getString("newPath");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null || oldPath == null || newPath == null) {
+            call.reject("Missing parameters");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String oldUrl = buildSmbUrl(address, share, oldPath);
+                // Rename needs full new URL? Usually yes.
+                String newUrl = buildSmbUrl(address, share, newPath);
+                
+                SmbFile f = new SmbFile(oldUrl, ctx);
+                SmbFile dest = new SmbFile(newUrl, ctx);
+                
+                f.renameTo(dest);
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("SMB Rename Failed: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void smbDownload(PluginCall call) {
+        startTransfer();
+        final String callbackId = call.getString("id");
+        if (callbackId != null) cancelledSmbTasks.put(callbackId, false);
+
+        new Thread(() -> {
+            try {
+                String address = call.getString("address");
+                String share = call.getString("share");
+                String remotePath = call.getString("path");
+                String destPath = call.getString("destPath");
+                String username = call.getString("username");
+                String password = call.getString("password");
+                String domain = call.getString("domain");
+
+                if (address == null || share == null || remotePath == null || destPath == null) {
+                    call.reject("Missing parameters");
+                    return;
+                }
+
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String url = buildSmbUrl(address, share, remotePath);
+                SmbFile smbFile = new SmbFile(url, ctx);
+
+                if (!smbFile.exists()) {
+                    call.reject("File not found");
+                    return;
+                }
+
+                File localFile;
+                if (destPath.startsWith("/")) {
+                    localFile = new File(destPath);
+                } else {
+                    localFile = new File(Environment.getExternalStorageDirectory(), destPath);
+                }
+                
+                // Create parent dirs
+                localFile.getParentFile().mkdirs();
+
+                long fileSize = smbFile.length();
+                long downloaded = 0;
+                long lastUpdate = 0;
+                long lastBytes = 0;
+
+                try (InputStream in = smbFile.getInputStream();
+                     FileOutputStream out = new FileOutputStream(localFile)) {
+                    
+                    byte[] buffer = new byte[65536];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                            throw new IOException("Cancelled");
+                        }
+                        out.write(buffer, 0, read);
+                        downloaded += read;
+
+                        long now = System.currentTimeMillis();
+                        if (now - lastUpdate > 500) {
+                            if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
+
+                            JSObject ret = new JSObject();
+                            ret.put("downloaded", downloaded);
+                            ret.put("total", fileSize);
+                            if (callbackId != null) ret.put("id", callbackId);
+                            notifyListeners("downloadProgress", ret);
+
+                            long diffBytes = downloaded - lastBytes;
+                            long diffTime = now - lastUpdate;
+                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                            String speedStr = formatSpeed(speed);
+                            
+                            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                            String title = isZh ? "正在下载" : "Downloading";
+                            
+                            doUpdateNotification(9999, title, smbFile.getName(), (int)(downloaded/1024), (int)(fileSize/1024), speedStr);
+                            
+                            lastUpdate = now;
+                            lastBytes = downloaded;
+                        }
+                    }
+                    out.flush();
+                }
+                call.resolve();
+
+            } catch (Exception e) {
+                if (e.getMessage().equals("Cancelled")) {
+                    android.util.Log.d("WebDavNative", "SMB Download Cancelled");
+                } else {
+                    android.util.Log.e("WebDavNative", "SMB Download Error", e);
+                    call.reject("SMB Download Error: " + e.getMessage());
+                }
+            } finally {
+                if (callbackId != null) cancelledSmbTasks.remove(callbackId);
+                endTransfer();
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void smbUpload(PluginCall call) {
+        startTransfer();
+        final String callbackId = call.getString("id");
+        if (callbackId != null) cancelledSmbTasks.put(callbackId, false);
+
+        new Thread(() -> {
+            try {
+                String address = call.getString("address");
+                String share = call.getString("share");
+                String remotePath = call.getString("path");
+                String sourcePath = call.getString("sourcePath");
+                String username = call.getString("username");
+                String password = call.getString("password");
+                String domain = call.getString("domain");
+
+                if (address == null || share == null || remotePath == null || sourcePath == null) {
+                    call.reject("Missing parameters");
+                    return;
+                }
+
+                File localFile = new File(sourcePath);
+                if (!localFile.exists()) {
+                    // Try relative
+                    localFile = new File(Environment.getExternalStorageDirectory(), sourcePath);
+                    if (!localFile.exists()) {
+                         localFile = new File(getContext().getExternalCacheDir(), sourcePath);
+                    }
+                }
+                
+                if (!localFile.exists()) {
+                    call.reject("Source file not found: " + sourcePath);
+                    return;
+                }
+
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String url = buildSmbUrl(address, share, remotePath);
+                SmbFile smbFile = new SmbFile(url, ctx);
+
+                // Ensure parent exists? SmbFile usually needs parent to exist.
+                // jcifs-ng doesn't auto mkdirs on stream open usually.
+                // We assume basic path exists or we fail. 
+                // Creating parent requires parsing path which is tricky with URL.
+                // Try naive mkdirs if we can?
+                try {
+                    String parentUrl = url.substring(0, url.lastIndexOf('/'));
+                    if (parentUrl.length() > ("smb://" + address + "/" + share).length()) {
+                         SmbFile parent = new SmbFile(parentUrl + "/", ctx);
+                         if (!parent.exists()) parent.mkdirs();
+                    }
+                } catch(Exception e) { /* ignore */ }
+
+                long fileSize = localFile.length();
+                long uploaded = 0;
+                long lastUpdate = 0;
+                long lastBytes = 0;
+
+                try (InputStream in = new java.io.FileInputStream(localFile);
+                     OutputStream out = smbFile.getOutputStream()) {
+                    
+                    byte[] buffer = new byte[65536];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                            throw new IOException("Cancelled");
+                        }
+                        out.write(buffer, 0, read);
+                        uploaded += read;
+
+                        long now = System.currentTimeMillis();
+                        if (now - lastUpdate > 500) {
+                            if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
+
+                            JSObject ret = new JSObject();
+                            ret.put("uploaded", uploaded);
+                            ret.put("total", fileSize);
+                            if (callbackId != null) ret.put("id", callbackId);
+                            notifyListeners("uploadProgress", ret);
+
+                            long diffBytes = uploaded - lastBytes;
+                            long diffTime = now - lastUpdate;
+                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                            String speedStr = formatSpeed(speed);
+                            
+                            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                            String title = isZh ? "正在上传" : "Uploading";
+                            
+                            doUpdateNotification(9999, title, localFile.getName(), (int)(uploaded/1024), (int)(fileSize/1024), speedStr);
+                            
+                            lastUpdate = now;
+                            lastBytes = uploaded;
+                        }
+                    }
+                    out.flush();
+                }
+                call.resolve();
+
+            } catch (Exception e) {
+                if (e.getMessage().equals("Cancelled")) {
+                    android.util.Log.d("WebDavNative", "SMB Upload Cancelled");
+                } else {
+                    android.util.Log.e("WebDavNative", "SMB Upload Error", e);
+                    call.reject("SMB Upload Error: " + e.getMessage());
+                }
+            } finally {
+                if (callbackId != null) cancelledSmbTasks.remove(callbackId);
+                endTransfer();
+            }
+        }).start();
+    }
+
+    // ... (Keep existing LocalFileServer class and other methods)
 
     private class LocalFileServer extends Thread {
         private ServerSocket serverSocket;

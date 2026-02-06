@@ -348,6 +348,137 @@ class NativeWebDAVClient {
     }
 }
 
+class NativeSMBClient {
+    constructor(config) {
+        this.config = config;
+        // Strip leading slash for SMB paths if needed, but our Java `buildSmbUrl` handles it.
+        // We pass raw paths to Java plugin which constructs URL.
+    }
+
+    async getDirectoryContents(path) {
+        const res = await WebDavNative.smbListDirectory({
+            address: this.config.address,
+            share: this.config.share,
+            path: path,
+            username: this.config.username,
+            password: this.config.password,
+            domain: this.config.domain
+        });
+        
+        return res.items.map(item => ({
+            basename: item.name,
+            filename: item.path, // Full relative path from share root
+            type: item.isDirectory ? 'directory' : 'file',
+            size: item.size,
+            lastmod: item.mtime,
+            mime: item.isDirectory ? null : 'application/octet-stream'
+        }));
+    }
+
+    async createDirectory(path) {
+        await WebDavNative.smbMkdir({
+            address: this.config.address,
+            share: this.config.share,
+            path: path,
+            username: this.config.username,
+            password: this.config.password,
+            domain: this.config.domain
+        });
+    }
+
+    async deleteFile(path) {
+        await WebDavNative.smbDelete({
+            address: this.config.address,
+            share: this.config.share,
+            path: path,
+            username: this.config.username,
+            password: this.config.password,
+            domain: this.config.domain
+        });
+    }
+
+    async moveFile(oldPath, newPath) {
+        await WebDavNative.smbRename({
+            address: this.config.address,
+            share: this.config.share,
+            oldPath: oldPath,
+            newPath: newPath,
+            username: this.config.username,
+            password: this.config.password,
+            domain: this.config.domain
+        });
+    }
+
+    async streamUploadFile(path, sourcePath, id) {
+        await WebDavNative.smbUpload({
+            address: this.config.address,
+            share: this.config.share,
+            path: path,
+            sourcePath: sourcePath,
+            username: this.config.username,
+            password: this.config.password,
+            domain: this.config.domain,
+            id: id
+        });
+    }
+
+    async streamDownloadFile(remotePath, localPath, id) {
+        await WebDavNative.smbDownload({
+            address: this.config.address,
+            share: this.config.share,
+            path: remotePath,
+            destPath: localPath,
+            username: this.config.username,
+            password: this.config.password,
+            domain: this.config.domain,
+            id: id
+        });
+    }
+
+    async getFileContents(path, options = {}) {
+        // Mock implementation: Download to Cache -> Read -> Delete
+        const tempName = `smb_read_${Date.now()}_${Math.random().toString(36).substr(7)}`;
+        const { uri } = await Filesystem.getUri({
+            path: tempName,
+            directory: Directory.Cache
+        });
+        const localPath = decodeURIComponent(uri.replace('file://', ''));
+
+        try {
+            await this.streamDownloadFile(path, localPath, options.id);
+            
+            const readRes = await Filesystem.readFile({
+                path: tempName,
+                directory: Directory.Cache,
+                encoding: options.format === 'text' ? Encoding.UTF8 : undefined
+            });
+            
+            return readRes.data;
+        } finally {
+            try {
+                await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache });
+            } catch(e) {}
+        }
+    }
+    
+    async stat(path) {
+        // SMB List returns stats, maybe optimize? 
+        // Or create smbStat? 
+        // For now, list parent and find self.
+        const parentPath = path.substring(0, path.lastIndexOf('/'));
+        const name = path.split('/').pop();
+        const items = await this.getDirectoryContents(parentPath || '/');
+        const item = items.find(i => i.basename === name);
+        if (!item) throw new Error("File not found");
+        return { type: item.type, size: item.size };
+    }
+    
+    async getQuota() {
+        // SMB Quota not supported easily via jcifs without extra work
+        return null; 
+    }
+}
+
 // --- Helper: Get WebDAV Client ---
 const getWebDAVClient = (driveConfig) => {
     console.log(`[WebDAV] Creating client for: ${driveConfig.url}`);
@@ -358,9 +489,7 @@ const getWebDAVClient = (driveConfig) => {
     // If on Mobile (Native), use our Custom Native Client
     if (Capacitor.isNativePlatform()) {
         if (driveConfig.type === 'smb') {
-            const lang = localStorage.getItem('app_lang') || 'zh';
-            const t = translations[lang] || translations['en'];
-            throw new Error(t.smbNotSupported);
+            return new NativeSMBClient({ ...driveConfig, password });
         }
         return new NativeWebDAVClient({ ...driveConfig, password });
     }
