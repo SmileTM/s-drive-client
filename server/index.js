@@ -461,6 +461,15 @@ app.get('/api/raw', async (req, res) => {
                 // and get full access to upstream response headers/status
                 const response = await client.customRequest(reqPath, options);
                 
+                // Helper to get header (Handles Fetch Headers object vs Axios plain object)
+                const getHeader = (key) => {
+                    if (response.headers && typeof response.headers.get === 'function') {
+                        return response.headers.get(key);
+                    }
+                    // Axios headers are usually lowercased, but let's be safe
+                    return response.headers ? (response.headers[key] || response.headers[key.toLowerCase()]) : null;
+                };
+
                 // Forward Status (200, 206, etc.)
                 res.status(response.status);
                 
@@ -471,28 +480,58 @@ app.get('/api/raw', async (req, res) => {
                     'content-range',
                     'accept-ranges',
                     'last-modified',
-                    'etag'
+                    'etag',
+                    'cache-control'
                 ];
                 
                 forwardHeaders.forEach(key => {
-                    // Headers in axios response are lower-cased
-                    const val = response.headers[key];
-                    if (val) res.setHeader(key, val);
+                    const val = getHeader(key);
+                    if (val) {
+                        // If we are about to pipe a stream that might be decompressed or modified, 
+                        // sometimes it's safer to let the server calculate content-length or use chunked encoding.
+                        // But for PDF/Video, Safari REQUIRES content-length and content-range to match exactly.
+                        res.setHeader(key, val);
+                    }
                 });
 
+                // Ensure Accept-Ranges is advertised if it's a 206 or upstream says so
+                if (response.status === 206 && !res.getHeader('accept-ranges')) {
+                    res.setHeader('Accept-Ranges', 'bytes');
+                }
+
+                // Get Stream: Prioritize body (Fetch) to avoid DeprecationWarning on data (node-fetch)
+                let stream = response.body || response.data;
+                if (!stream) throw new Error('No response stream available');
+
                 // Fallback Content-Type if upstream didn't send one
-                if (!response.headers['content-type']) {
+                if (!getHeader('content-type')) {
                     const fileName = path.basename(reqPath);
                     const mimeType = mime.lookup(fileName) || 'application/octet-stream';
                     res.setHeader('Content-Type', mimeType);
                 }
 
-                response.data.pipe(res);
-                
-                response.data.on('error', (streamErr) => {
-                    console.error('Upstream Stream Error:', streamErr);
-                    // Don't send error if headers already sent (stream interruption)
-                });
+                if (typeof stream.pipe !== 'function') {
+                    // Handle Web Stream (Node 18+ native fetch) if necessary
+                    try {
+                        const { Readable } = require('stream');
+                        if (Readable.fromWeb) {
+                            stream = Readable.fromWeb(stream);
+                        }
+                    } catch (e) {
+                        console.warn('[Raw] Failed to convert WebStream:', e);
+                    }
+                }
+
+                if (typeof stream.pipe === 'function') {
+                    stream.pipe(res);
+                    stream.on('error', (streamErr) => {
+                        console.error('Upstream Stream Error:', streamErr);
+                    });
+                } else {
+                    // Fallback for non-stream data?
+                    console.error('[Raw] Response is not a stream');
+                    res.status(500).send('Upstream response is not a stream');
+                }
 
             } catch (err) {
                 // Handle Upstream Errors (404, 416, 401, etc.)

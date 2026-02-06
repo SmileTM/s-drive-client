@@ -1025,6 +1025,76 @@ function App() {
       }));
   };
 
+  const handleDownload = (file) => {
+      // Logic for downloading file (WebDAV -> Local Download Folder)
+      // This uses crossDriveTransfer (copy) from Active Drive -> Local (Default Download Dir or specific?)
+      // For Mobile: usually 'Downloads' or 'Documents'.
+      // For now, let's assume downloading to the root of 'local' drive for simplicity in this manager, 
+      // or we can implement a specific 'Download' action that saves to device public Downloads.
+      // But based on the app structure, 'local' drive IS the device storage access.
+      
+      const sourceDrive = activeDrive;
+      const destDrive = 'local';
+      const targetPath = '/Download'; // Standard Download folder on Android/Local
+      
+      // Ensure target folder exists (implicitly handled by transfer or manual check)
+      // Actually crossDriveTransfer doesn't auto-create parent dest folder if not recursive? 
+      // It handles it for directories. For file, we assume targetPath is the FOLDER.
+
+      // 1. Create Task
+      const batchId = Date.now();
+      const taskId = `download_${batchId}`;
+      const newTask = {
+          id: taskId,
+          name: file.name,
+          size: file.size,
+          status: 'pending',
+          currentBytes: 0,
+          totalBytes: file.size,
+          speed: 0,
+          type: 'download'
+      };
+      
+      setTasks(prev => [newTask, ...prev]);
+
+      const itemsWithId = [{ path: file.path, id: taskId }];
+
+      // 2. Start Transfer
+      const onProgress = (index, total, name, speed, currentBytes, totalBytes) => {
+           setTasks(prev => prev.map(t => {
+               if (t.id === taskId) {
+                   if (t.status === 'error') return t;
+                   const isDone = currentBytes === totalBytes && totalBytes > 0;
+                   return { 
+                       ...t, 
+                       status: isDone ? 'done' : 'active',
+                       currentBytes,
+                       totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+                       speed
+                   };
+               }
+               return t;
+           }));
+      };
+
+      const onComplete = (finishedItemName) => {
+           setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
+           // If we are viewing the download folder, refresh
+           if (activeDrive === 'local' && currentPathRef.current === targetPath) {
+               fetchFilesRef.current(targetPath);
+           }
+      };
+
+      // Ensure Download folder exists (Optional, but good practice)
+      // We can fire-and-forget this check or do it inside api
+      
+      api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete)
+      .catch(err => {
+          setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
+          alert(t.downloadFailed + ': ' + err.message);
+      });
+  };
+
   const isSelectionMode = selectedPaths.size > 0;
   const hasClipboard = clipboard && clipboard.items.length > 0;
 
@@ -1213,8 +1283,8 @@ function App() {
                {/* New Circular Progress */}
                <CircularProgress 
                   progress={{ 
-                      current: tasks.reduce((acc, t) => acc + (t.currentBytes || 0), 0), 
-                      total: tasks.reduce((acc, t) => acc + (t.totalBytes || 0), 0)
+                      current: tasks.filter(t => t.status !== 'done' && t.status !== 'error').reduce((acc, t) => acc + (t.currentBytes || 0), 0), 
+                      total: tasks.filter(t => t.status !== 'done' && t.status !== 'error').reduce((acc, t) => acc + (t.totalBytes || 0), 0)
                   }} 
                   activeCount={tasks.filter(t => t.status === 'active' || t.status === 'pending').length}
                   onClick={() => setIsDashboardOpen(true)}
@@ -1519,6 +1589,7 @@ function App() {
                 }}
                 hasNext={sortedFiles.findIndex(f => f.path === previewFile.path) < sortedFiles.length - 1}
                 hasPrev={sortedFiles.findIndex(f => f.path === previewFile.path) > 0}
+                onDownload={handleDownload} // Pass the download handler
               />
           )}
         </AnimatePresence>

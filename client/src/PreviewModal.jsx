@@ -213,7 +213,7 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
     );
 };
 
-const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh' }) => {
+const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh', onDownload }) => {
   const t = translations[lang];
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -348,6 +348,11 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
   const handleDownload = async (e) => {
     e.preventDefault();
     e.stopPropagation();
+
+    if (onDownload) {
+        onDownload(file);
+        return;
+    }
 
     if (!isNative) {
         if (!url) return;

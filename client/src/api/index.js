@@ -842,6 +842,7 @@ const NativeAPI = {
                     await NativeAPI.deleteItems([itemPath], sourceDriveId);
                 }
                 
+                if (onItemComplete) onItemComplete(items[i]);
                 continue; // Done with this directory item
             }
 
