@@ -37,11 +37,19 @@ app.get('/api/preview', async (req, res) => {
         let inputStream;
         if (config.type === 'local') {
              const absPath = resolveSafePath(reqPath);
+             // Verify existence before stream (optional but good) to avoid stream error immediately
+             if (!fs.existsSync(absPath)) return res.status(404).send('File not found');
              inputStream = fs.createReadStream(absPath);
         } else {
              const client = getWebDAVClient(config);
              inputStream = client.createReadStream(reqPath);
         }
+
+        // Global Stream Error Handler (Vital to prevent crashes)
+        inputStream.on('error', (err) => {
+            console.error('[Preview Stream Error]', err);
+            if (!res.headersSent) res.status(500).end();
+        });
 
         if (isHeic && sharp) {
             res.setHeader('Content-Type', 'image/jpeg');
@@ -618,6 +626,11 @@ app.post('/api/transfer', async (req, res) => {
                 readStream = client.createReadStream(itemPath);
             }
 
+            // Prevent crash on read error (e.g. file deleted during transfer)
+            readStream.on('error', (err) => {
+                console.error(`[Transfer Stream Error] ${itemPath}:`, err);
+            });
+
             // 2. Write Stream
             if (dstConfig.type === 'local') {
                 const absDestDir = resolveSafePath(destPath);
@@ -787,6 +800,8 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     const remotePath = path.posix.join('/', reqPath, file.filename);
                     
                     const readStream = fs.createReadStream(file.path);
+                    readStream.on('error', (err) => console.error(`[Upload Stream Error] ${file.filename}:`, err));
+
                     await client.putFileContents(remotePath, readStream);
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
