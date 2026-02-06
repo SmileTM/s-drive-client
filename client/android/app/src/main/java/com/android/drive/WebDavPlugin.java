@@ -47,6 +47,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import androidx.core.app.NotificationCompat;
+import android.widget.RemoteViews;
 
 import java.util.concurrent.ConcurrentHashMap;
 import okhttp3.Call;
@@ -152,7 +153,7 @@ public class WebDavPlugin extends Plugin {
             // Immediate UI feedback
             boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
             String title = isZh ? "正在取消..." : "Cancelling...";
-            doUpdateNotification(9999, title, "", 0, 0);
+            doUpdateNotification(9999, title, "", 0, 0, "");
 
             Call c = activeCalls.get(id);
             if (c != null) {
@@ -540,30 +541,28 @@ public class WebDavPlugin extends Plugin {
         String description = call.getString("description", "Processing...");
         int progress = call.getInt("progress", 0);
         int max = call.getInt("max", 100);
+        String speed = call.getString("speed", "");
         
-        doUpdateNotification(id, title, description, progress, max);
+        doUpdateNotification(id, title, description, progress, max, speed);
         call.resolve();
     }
     
-    private void doUpdateNotification(int id, String title, String description, int progress, int max) {
+    private void doUpdateNotification(int id, String title, String description, int progress, int max, String speed) {
         Context context = getContext();
         
         // Log for debugging
-        android.util.Log.d("WebDavNotification", "Updating notification ID: " + id + " Title: " + title + " Progress: " + progress + "/" + max);
+        android.util.Log.d("WebDavNotification", "Updating notification ID: " + id + " Title: " + title + " Speed: " + speed);
 
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Use DEFAULT importance to ensure visibility in status bar. 
-            // Changed ID to 'file_ops_v2' to force update on existing installs.
-            NotificationChannel channel = new NotificationChannel("file_ops_v2", "File Operations", NotificationManager.IMPORTANCE_DEFAULT);
+            NotificationChannel channel = new NotificationChannel("file_ops_v2", "File Operations", NotificationManager.IMPORTANCE_LOW);
             channel.setSound(null, null); 
             channel.enableVibration(false);
             channel.setShowBadge(false);
             manager.createNotificationChannel(channel);
         }
 
-        // Determine icon based on progress
         int iconResId = com.android.drive.R.drawable.ic_stat_transfer_0;
         if (max > 0) {
             int percent = (int) ((progress * 100.0f) / max);
@@ -574,35 +573,54 @@ public class WebDavPlugin extends Plugin {
             else if (percent >= 20) iconResId = com.android.drive.R.drawable.ic_stat_transfer_20;
         }
 
-        // Create PendingIntent to open app on click
-        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-        PendingIntent pendingIntent = null;
-        if (launchIntent != null) {
-            launchIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            launchIntent.setData(Uri.parse("webdav://transfers")); // Deep link
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                flags |= PendingIntent.FLAG_IMMUTABLE;
-            }
-            pendingIntent = PendingIntent.getActivity(context, 0, launchIntent, flags);
-        }
+        Intent launchIntent = new Intent(context, MainActivity.class);
+        launchIntent.setAction(Intent.ACTION_VIEW);
+        launchIntent.setData(Uri.parse("webdav://transfers"));
+        launchIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
+        PendingIntent pendingIntent = null;
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        pendingIntent = PendingIntent.getActivity(context, 0, launchIntent, flags);
+
+        // Custom Layout Logic
+        RemoteViews customView = new RemoteViews(context.getPackageName(), com.android.drive.R.layout.notification_transfer);
+        
+        // 1. Filename (Title)
+        String displayTitle = (description != null && !description.isEmpty()) ? description : title;
+        customView.setTextViewText(com.android.drive.R.id.notification_title, displayTitle);
+        
+        // 2. Status & Speed (Bottom Right)
+        String displayStatus = title;
+        if (speed != null && !speed.isEmpty()) {
+            displayStatus = title + " • " + speed;
+        }
+        customView.setTextViewText(com.android.drive.R.id.notification_status, displayStatus);
+        
+        // 3. Progress
+        if (max > 0) {
+            customView.setProgressBar(com.android.drive.R.id.notification_progress, max, progress, false);
+        } else {
+            customView.setProgressBar(com.android.drive.R.id.notification_progress, 0, 0, true);
+        }
+        
+        // 4. Icon
+        customView.setImageViewResource(com.android.drive.R.id.notification_icon, iconResId);
+
+        // Build Notification
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, "file_ops_v2")
                 .setSmallIcon(iconResId) 
-                .setContentTitle(title)
-                .setContentText(description)
+                .setCustomContentView(customView)
+                //.setCustomBigContentView(customView) // Optional: Use if layout needs expansion
+                .setStyle(new NotificationCompat.DecoratedCustomViewStyle())
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true);
         
         if (pendingIntent != null) {
             builder.setContentIntent(pendingIntent);
-        }
-
-        if (max > 0) {
-            builder.setProgress(max, progress, false);
-        } else {
-            builder.setProgress(0, 0, true);
         }
 
         manager.notify(id, builder.build());
@@ -737,9 +755,8 @@ public class WebDavPlugin extends Plugin {
                                  
                                  boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
                                  String title = isZh ? "正在上传" : "Uploading";
-                                 String desc = fileFinal.getName() + " (" + speedStr + ")";
                                  
-                                 doUpdateNotification(9999, title, desc, (int)(uploaded/1024), (int)(fileLength/1024));
+                                 doUpdateNotification(9999, title, fileFinal.getName(), (int)(uploaded/1024), (int)(fileLength/1024), speedStr);
                                  
                                  lastUpdate = now;
                                  lastBytes = uploaded;
@@ -869,9 +886,9 @@ public class WebDavPlugin extends Plugin {
                             String title = isZh ? "正在下载" : "Downloading";
                             
                             if (contentLength > 0) {
-                                 doUpdateNotification(9999, title, file.getName() + " (" + speedStr + ")", (int)(downloaded/1024), (int)(contentLength/1024));
+                                 doUpdateNotification(9999, title, file.getName(), (int)(downloaded/1024), (int)(contentLength/1024), speedStr);
                             } else {
-                                 doUpdateNotification(9999, title, file.getName() + " (" + speedStr + ")", 0, 0);
+                                 doUpdateNotification(9999, title, file.getName(), 0, 0, speedStr);
                             }
                             
                             lastUpdate = now;

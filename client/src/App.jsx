@@ -40,6 +40,7 @@ import AddDriveModal from './AddDriveModal';
 import InputModal from './InputModal';
 import DetailsModal from './DetailsModal';
 import ConfirmModal from './ConfirmModal';
+import AlertModal from './AlertModal';
 import { translations } from './i18n';
 
 // --- Icons Helper ---
@@ -332,12 +333,12 @@ function App() {
               const results = await api.searchItems(searchQuery, activeDrive, '/'); 
               setSearchResults(results);
           } else {
-              alert("Global search not supported on mobile yet");
+              showAlert("Global search not supported on mobile yet", "Feature Unavailable", 'warning');
               setIsGlobalSearch(false);
           }
       } catch (err) {
           console.error(err);
-          alert('Search failed');
+          showAlert('Search failed', t.failed, 'error');
           setIsGlobalSearch(false);
       } finally {
           setIsSearching(false);
@@ -356,10 +357,38 @@ function App() {
   const [inputModal, setInputModal] = useState({ isOpen: false, title: '', defaultValue: '', onConfirm: () => {} });
   const [detailsModal, setDetailsModal] = useState(null);
   const [confirmModal, setConfirmModal] = useState({ isOpen: false, title: '', message: '', type: 'info', onConfirm: () => {} });
+  const [alertModal, setAlertModal] = useState({ isOpen: false, title: '', message: '', type: 'error' });
 
   // Language State
   const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
   const t = translations[lang];
+
+  const showAlert = useCallback((message, title, type = 'error') => {
+      setAlertModal({
+          isOpen: true,
+          title: title || (type === 'error' ? t.failed : 'Alert'),
+          message: message?.toString() || '',
+          type
+      });
+  }, [t]);
+
+  // Global Error Handlers
+  useEffect(() => {
+      const handleUnhandledRejection = (event) => {
+          console.error('Unhandled Rejection:', event.reason);
+          showAlert(event.reason?.message || 'Unknown Async Error', 'System Error', 'error');
+      };
+      const handleError = (event) => {
+           console.error('Global Error:', event.error);
+           showAlert(event.message || 'Unknown Error', 'Application Error', 'error');
+      };
+      window.addEventListener('unhandledrejection', handleUnhandledRejection);
+      window.addEventListener('error', handleError);
+      return () => {
+          window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+          window.removeEventListener('error', handleError);
+      };
+  }, [showAlert]);
 
   const toggleLang = () => {
     const newLang = lang === 'en' ? 'zh' : 'en';
@@ -787,7 +816,7 @@ function App() {
             }
             return t;
         }));
-        alert(t.uploadFailed);
+        showAlert(t.uploadFailed, t.failed, 'error');
     });
   };
 
@@ -805,7 +834,7 @@ function App() {
             await api.deleteItems(Array.from(selectedPaths), activeDrive); 
             fetchFiles(currentPath); 
             setSelectedPaths(new Set()); 
-        } catch (err) { alert(t.deleteFailed); }
+        } catch (err) { showAlert(t.deleteFailed, t.failed, 'error'); }
     };
 
     const checkFoldersAndConfirm = async () => {
@@ -846,7 +875,7 @@ function App() {
   };
   const handleMove = async (items, destination) => {
     if (items.includes(destination)) return;
-    try { await api.moveItems(items, destination, activeDrive); fetchFiles(currentPath); setSelectedPaths(new Set()); } catch (err) { alert(t.moveFailed); }
+    try { await api.moveItems(items, destination, activeDrive); fetchFiles(currentPath); setSelectedPaths(new Set()); } catch (err) { showAlert(t.moveFailed, t.failed, 'error'); }
   };
   const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   const handleCopy = () => { setClipboard({ mode: 'copy', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
@@ -935,7 +964,7 @@ function App() {
             }
             return t;
         }));
-        alert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''));
+        showAlert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''), t.failed, 'error');
     });
   };
   
@@ -951,14 +980,14 @@ function App() {
       onConfirm: async (newName) => {
         if (!newName || newName === oldName) return;
         if (files.some(f => f.name === newName)) {
-            alert(t.fileExists);
+            showAlert(t.fileExists, t.failed, 'warning');
             return;
         }
         try {
             await api.renameItem(oldPath, newName, currentPath, activeDrive);
             fetchFiles(currentPath);
             setSelectedPaths(new Set());
-        } catch (err) { alert(t.renameFailed); }
+        } catch (err) { showAlert(t.renameFailed, t.failed, 'error'); }
       }
     });
   };
@@ -987,7 +1016,7 @@ function App() {
                 localStorage.setItem('last_path', '/');
               }
               fetchDrives();
-            } catch (err) { alert('Failed to remove drive'); }
+            } catch (err) { showAlert('Failed to remove drive', t.failed, 'error'); }
         }
     });
   };
@@ -1005,8 +1034,8 @@ function App() {
                 await api.updateDrive(id, { name: newName });
                 setDrives(prev => prev.map(d => d.id === id ? { ...d, name: newName } : d));
             } catch (err) {
-                if (err.response?.status === 409) alert(t.nameTaken);
-                else alert('Failed to update name');
+                if (err.response?.status === 409) showAlert(t.nameTaken, t.failed, 'warning');
+                else showAlert('Failed to update name', t.failed, 'error');
             }
         }
     });
@@ -1091,7 +1120,7 @@ function App() {
       api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete)
       .catch(err => {
           setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
-          alert(t.downloadFailed + ': ' + err.message);
+          showAlert(t.downloadFailed + ': ' + err.message, t.failed, 'error');
       });
   };
 
@@ -1513,7 +1542,7 @@ function App() {
                               onConfirm: async (name) => {
                                   if (!name) return;
                                   if (files.some(f => f.name === name)) {
-                                      alert(t.folderExists);
+                                      showAlert(t.folderExists, t.failed, 'warning');
                                       return;
                                   }
                                   try {
@@ -1522,7 +1551,7 @@ function App() {
                                       await api.createFolder(newPath, activeDrive);
                                       fetchFiles(currentPath);
                                       setIsIslandExpanded(false);
-                                  } catch (err) { alert(t.createFolderFailed); }
+                                  } catch (err) { showAlert(t.createFolderFailed, t.failed, 'error'); }
                               }
                           });
                         }}
@@ -1614,6 +1643,15 @@ function App() {
                 />
             )}
         </AnimatePresence>
+
+        <AlertModal 
+            isOpen={alertModal.isOpen}
+            title={alertModal.title}
+            message={alertModal.message}
+            type={alertModal.type}
+            onClose={() => setAlertModal(prev => ({ ...prev, isOpen: false }))}
+            lang={lang}
+        />
 
         <AnimatePresence>{isAddDriveOpen && <div className="fixed inset-0 z-[60]"><AddDriveModal onClose={() => setIsAddDriveOpen(false)} onAdded={(newDrive) => {
           if (newDrive) {
