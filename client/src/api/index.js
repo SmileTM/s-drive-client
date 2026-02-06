@@ -396,26 +396,45 @@ const ServerAPI = {
   moveItems: async (items, destination, driveId) => {
     await axios.post('/api/move', { items, destination, drive: driveId });
   },
-  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress) => {
+  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete) => {
       for (let i = 0; i < items.length; i++) {
           const item = items[i];
-          const fileName = item.split('/').pop();
+          const itemPath = item.path || item;
+          const fileName = itemPath.split('/').pop();
+          
           if (onProgress) onProgress(i + 1, items.length, fileName);
+          
           await axios.post('/api/transfer', {
-              items: [item],
+              items: [itemPath],
               sourceDrive: sourceDriveId,
               destDrive: destDriveId,
               destPath: destPath,
               move: isMove
           });
+
+          if (onItemComplete) onItemComplete(fileName);
       }
   },
-  uploadFiles: async (path, files, driveId) => {
+  uploadFiles: async (path, files, driveId, onProgress, onItemComplete) => {
     const formData = new FormData();
     files.forEach(f => formData.append('files', f));
-    await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}`, formData, { 
-      headers: { 'Content-Type': 'multipart/form-data' } 
-    });
+    
+    // Axios upload progress is for the WHOLE batch
+    const config = { 
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (progressEvent) => {
+          if (onProgress && progressEvent.total) {
+              // Aggregate progress for the batch
+              onProgress(1, 1, 'Uploading...', 0, progressEvent.loaded, progressEvent.total);
+          }
+      }
+    };
+
+    await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}`, formData, config);
+    
+    if (onItemComplete) {
+        files.forEach(f => onItemComplete(f.name));
+    }
   },
   getDrives: async () => {
     const res = await axios.get(`/api/drives?t=${Date.now()}`);
@@ -842,7 +861,7 @@ const NativeAPI = {
                     await NativeAPI.deleteItems([itemPath], sourceDriveId);
                 }
                 
-                if (onItemComplete) onItemComplete(items[i]);
+                if (onItemComplete) onItemComplete(itemName);
                 continue; // Done with this directory item
             }
 
