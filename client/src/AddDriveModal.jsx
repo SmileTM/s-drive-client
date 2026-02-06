@@ -9,21 +9,35 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
   const t = translations[lang];
   const [loading, setLoading] = useState(false);
   const [testStatus, setTestStatus] = useState({ type: 'idle', msg: '' });
+  const [protocol, setProtocol] = useState('webdav'); // 'webdav' or 'smb'
   const [formData, setFormData] = useState({
     name: '',
     url: '',
     username: '',
-    password: ''
+    password: '',
+    // SMB specific
+    address: '',
+    share: '',
+    domain: ''
   });
 
   const handleTest = async () => {
-    if (!formData.url) {
+    if (protocol === 'webdav' && !formData.url) {
       setTestStatus({ type: 'error', msg: t.urlRequired });
       return;
     }
+    if (protocol === 'smb' && (!formData.address || !formData.share)) {
+      setTestStatus({ type: 'error', msg: t.hostShareRequired });
+      return;
+    }
+
     setTestStatus({ type: 'testing', msg: t.testing });
     try {
-      await api.testConnection(formData);
+      const payload = protocol === 'webdav' 
+        ? { type: 'webdav', url: formData.url, username: formData.username, password: formData.password }
+        : { type: 'smb', address: formData.address, share: formData.share, domain: formData.domain, username: formData.username, password: formData.password };
+      
+      await api.testConnection(payload);
       setTestStatus({ type: 'success', msg: t.connectionSuccess });
     } catch (err) {
       setTestStatus({ type: 'error', msg: t.connectionFailed });
@@ -37,15 +51,35 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
     setTestStatus({ type: 'testing', msg: t.testing });
     
     try {
-      if (!formData.name || !formData.url) {
-        alert(t.nameUrlRequired);
+      if (!formData.name) {
+        alert(t.nameRequired);
         setLoading(false);
         return;
       }
 
+      const payload = protocol === 'webdav' 
+        ? { 
+            type: 'webdav', 
+            name: formData.name,
+            url: formData.url, 
+            username: formData.username, 
+            password: formData.password,
+            quota: null
+          }
+        : { 
+            type: 'smb',
+            name: formData.name, 
+            address: formData.address, 
+            share: formData.share, 
+            domain: formData.domain, 
+            username: formData.username, 
+            password: formData.password,
+            quota: null
+          };
+
       // Step 1: Verify Connection First
       try {
-        await api.testConnection(formData);
+        await api.testConnection(payload);
       } catch (testErr) {
         setTestStatus({ type: 'error', msg: t.connectionFailed });
         // Don't proceed if test fails
@@ -54,13 +88,7 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
       }
 
       // Step 2: Save Drive
-      const drivePayload = {
-        type: 'webdav',
-        quota: null,
-        ...formData
-      };
-
-      const newDrive = await api.addDrive(drivePayload);
+      const newDrive = await api.addDrive(payload);
       onAdded(newDrive); 
       onClose();
     } catch (err) {
@@ -111,6 +139,30 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           
+          {/* Protocol Selector */}
+          <div className="flex bg-slate-100 p-1 rounded-2xl">
+            <button
+              type="button"
+              onClick={() => setProtocol('webdav')}
+              className={clsx(
+                "flex-1 py-2 text-xs font-medium rounded-xl transition-all",
+                protocol === 'webdav' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              WebDAV
+            </button>
+            <button
+              type="button"
+              onClick={() => setProtocol('smb')}
+              className={clsx(
+                "flex-1 py-2 text-xs font-medium rounded-xl transition-all",
+                protocol === 'smb' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              SMB / CIFS
+            </button>
+          </div>
+
           <div>
             <label htmlFor="drive-name" className="block text-xs font-medium text-slate-500 mb-1 ml-1">{t.displayName}</label>
             <input 
@@ -124,21 +176,64 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
             />
           </div>
 
-          <div>
-            <label htmlFor="drive-url" className="block text-xs font-medium text-slate-500 mb-1 ml-1">{t.webdavUrl}</label>
-            <input 
-              id="drive-url"
-              name="url"
-              type="url" 
-              placeholder="https://dav.example.com/webdav/"
-              className="w-full px-4 py-3 bg-slate-50/50 border border-slate-200 rounded-2xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-50 outline-none transition-all text-sm text-slate-700"
-              value={formData.url}
-              onChange={e => setFormData({...formData, url: e.target.value})}
-            />
-            <p className="mt-1.5 text-[10px] text-slate-400 ml-1">
-              {t.tipRoot}
-            </p>
-          </div>
+          {protocol === 'webdav' ? (
+            <div>
+              <label htmlFor="drive-url" className="block text-xs font-medium text-slate-500 mb-1 ml-1">{t.webdavUrl}</label>
+              <input 
+                id="drive-url"
+                name="url"
+                type="url" 
+                placeholder="https://dav.example.com/webdav/"
+                className="w-full px-4 py-3 bg-slate-50/50 border border-slate-200 rounded-2xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-50 outline-none transition-all text-sm text-slate-700"
+                value={formData.url}
+                onChange={e => setFormData({...formData, url: e.target.value})}
+              />
+              <p className="mt-1.5 text-[10px] text-slate-400 ml-1">
+                {t.tipRoot}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+               <div className="grid grid-cols-3 gap-4">
+                  <div className="col-span-2">
+                    <label htmlFor="smb-address" className="block text-xs font-medium text-slate-500 mb-1 ml-1">{t.host}</label>
+                    <input 
+                      id="smb-address"
+                      name="address"
+                      type="text" 
+                      placeholder="192.168.1.10"
+                      className="w-full px-4 py-3 bg-slate-50/50 border border-slate-200 rounded-2xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-50 outline-none transition-all text-sm text-slate-700"
+                      value={formData.address}
+                      onChange={e => setFormData({...formData, address: e.target.value})}
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label htmlFor="smb-share" className="block text-xs font-medium text-slate-500 mb-1 ml-1">{t.shareName}</label>
+                    <input 
+                      id="smb-share"
+                      name="share"
+                      type="text" 
+                      placeholder="Public"
+                      className="w-full px-4 py-3 bg-slate-50/50 border border-slate-200 rounded-2xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-50 outline-none transition-all text-sm text-slate-700"
+                      value={formData.share}
+                      onChange={e => setFormData({...formData, share: e.target.value})}
+                    />
+                  </div>
+               </div>
+               <div>
+                  <label htmlFor="smb-domain" className="block text-xs font-medium text-slate-500 mb-1 ml-1">{t.domain}</label>
+                  <input 
+                    id="smb-domain"
+                    name="domain"
+                    type="text" 
+                    placeholder="WORKGROUP"
+                    className="w-full px-4 py-3 bg-slate-50/50 border border-slate-200 rounded-2xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-50 outline-none transition-all text-sm text-slate-700"
+                    value={formData.domain}
+                    onChange={e => setFormData({...formData, domain: e.target.value})}
+                  />
+               </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div>

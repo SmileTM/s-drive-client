@@ -5,6 +5,7 @@ import { Preferences } from '@capacitor/preferences';
 import { createClient } from 'webdav';
 import { Buffer } from 'buffer';
 import { encrypt, decrypt } from '../utils/clientCrypto';
+import { translations } from '../i18n';
 
 // --- Native Plugin Interface ---
 const WebDavNative = registerPlugin('WebDavNative');
@@ -356,6 +357,11 @@ const getWebDAVClient = (driveConfig) => {
 
     // If on Mobile (Native), use our Custom Native Client
     if (Capacitor.isNativePlatform()) {
+        if (driveConfig.type === 'smb') {
+            const lang = localStorage.getItem('app_lang') || 'zh';
+            const t = translations[lang] || translations['en'];
+            throw new Error(t.smbNotSupported);
+        }
         return new NativeWebDAVClient({ ...driveConfig, password });
     }
 

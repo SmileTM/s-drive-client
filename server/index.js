@@ -1,6 +1,7 @@
 const express = require('express');
 const { v2: webdavServer } = require('webdav-server');
 const { createClient } = require('webdav');
+const SMB2 = require('@marsaud/smb2');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs-extra');
@@ -20,67 +21,6 @@ const PORT = process.env.PORT || 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
 const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
 const CONFIG_FILE = path.join(APP_DATA_DIR, 'drives.json');
-// ...
-// ...
-
-// GET /api/preview (Image Preview & Conversion)
-app.get('/api/preview', async (req, res) => {
-    try {
-        const { path: reqPath, drive: driveId = 'local' } = req.query;
-        if (!reqPath) return res.status(400).send('Path required');
-        const config = await getDriveConfig(driveId);
-        
-        const fileName = path.basename(reqPath);
-        const isHeic = /\.(heic|heif)$/i.test(fileName);
-        
-        // Setup Source Stream
-        let inputStream;
-        if (config.type === 'local') {
-             const absPath = resolveSafePath(reqPath);
-             // Verify existence before stream (optional but good) to avoid stream error immediately
-             if (!fs.existsSync(absPath)) return res.status(404).send('File not found');
-             inputStream = fs.createReadStream(absPath);
-        } else {
-             const client = getWebDAVClient(config);
-             inputStream = client.createReadStream(reqPath);
-        }
-
-        // Global Stream Error Handler (Vital to prevent crashes)
-        inputStream.on('error', (err) => {
-            console.error('[Preview Stream Error]', err);
-            if (!res.headersSent) res.status(500).end();
-        });
-
-        if (isHeic && sharp) {
-            res.setHeader('Content-Type', 'image/jpeg');
-            const transform = sharp().toFormat('jpeg', { quality: 80 });
-            
-            inputStream
-                .on('error', err => {
-                     console.error('[Preview Stream Error]', err);
-                     if (!res.headersSent) res.status(502).end();
-                })
-                .pipe(transform)
-                .on('error', err => {
-                     console.error('[Preview Convert Error]', err);
-                     // If conversion fails, maybe stream original? 
-                     // But header is already jpeg.
-                     if (!res.headersSent) res.status(500).end();
-                })
-                .pipe(res);
-        } else {
-            // Passthrough for standard images (or could resize here too)
-            const mimeType = mime.lookup(fileName) || 'application/octet-stream';
-            res.setHeader('Content-Type', mimeType);
-            inputStream.pipe(res);
-        }
-
-    } catch (err) {
-        console.error('[Preview API Error]', err);
-        if (!res.headersSent) res.status(500).send(err.message);
-    }
-});
-
 
 // Ensure storage directory exists
 fs.ensureDirSync(STORAGE_DIR);
@@ -115,8 +55,32 @@ const getWebDAVClient = (config) => {
     });
 };
 
+const getSMBClient = (config) => {
+    // config.address: "192.168.1.100"
+    // config.share: "Public"
+    // config.domain: ""
+    return new SMB2({
+        share: `\\\\${config.address}\\${config.share}`,
+        domain: config.domain || '',
+        username: config.username,
+        password: config.password,
+        autoCloseTimeout: 0 // Keep connection open for a bit if possible, or 0 for default
+    });
+};
+
 // Helper: Normalize file info for frontend
-const normalizeFile = (file, driveId) => {
+const normalizeFile = (file, driveId, type = 'webdav') => {
+    if (type === 'smb') {
+        // SMB2 stats structure handled separately or here if object passed
+        return {
+            name: file.name,
+            path: file.name, // SMB returns name relative to listed folder usually, parent context needed for full path?
+            isDirectory: file.isDirectory(),
+            size: file.size,
+            mtime: file.changeTime, // SMB2 uses changeTime/lastWriteTime
+            type: file.isDirectory() ? 'folder' : mime.lookup(file.name) || 'application/octet-stream'
+        };
+    }
     return {
         name: file.basename || path.basename(file.filename),
         path: file.filename, // Remote paths are already relative to its root
@@ -125,6 +89,17 @@ const normalizeFile = (file, driveId) => {
         mtime: file.lastmod,
         type: file.type === 'directory' ? 'folder' : mime.lookup(file.filename) || 'application/octet-stream'
     };
+};
+
+// Helper: Safe path resolution for Local
+const resolveSafePath = (userPath) => {
+    // Remove leading slashes to ensure it's relative
+    const safeSuffix = path.normalize(userPath).replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
+    const absolutePath = path.resolve(STORAGE_DIR, safeSuffix);
+    if (!absolutePath.startsWith(STORAGE_DIR)) {
+        throw new Error('Access denied: Path traversal detected');
+    }
+    return absolutePath;
 };
 
 // --- Drives API ---
@@ -167,6 +142,9 @@ app.get('/api/drives', async (req, res) => {
                     const total = stats.blocks * stats.bsize;
                     const available = stats.bfree * stats.bsize;
                     return { ...publicDrive, quota: { used: total - available, total } };
+                } else if (internalDrive.type === 'smb') {
+                    // SMB Quota not easily available via basic client
+                    return { ...publicDrive, quota: null };
                 }
             } catch (e) {}
             return { ...publicDrive, quota: null };
@@ -203,9 +181,19 @@ app.post('/api/drives', async (req, res) => {
             drives = [{ id: 'local', name: 'Local Storage', type: 'local', path: './storage' }];
         }
 
-        // Check for duplicates (URL + Username)
-        if (drives.some(d => d.url === newDrive.url && d.username === newDrive.username)) {
-            console.warn('[WARN] Duplicate Drive:', newDrive.url);
+        // Check for duplicates (URL + Username) or (Address + Share + Username)
+        const isDuplicate = drives.some(d => {
+            if (d.type === 'webdav' && newDrive.type === 'webdav') {
+                return d.url === newDrive.url && d.username === newDrive.username;
+            }
+            if (d.type === 'smb' && newDrive.type === 'smb') {
+                return d.address === newDrive.address && d.share === newDrive.share && d.username === newDrive.username;
+            }
+            return false;
+        });
+
+        if (isDuplicate) {
+            console.warn('[WARN] Duplicate Drive');
             return res.status(409).json({ error: 'This drive account is already added' });
         }
 
@@ -239,14 +227,22 @@ app.post('/api/drives', async (req, res) => {
 app.post('/api/drives/test', async (req, res) => {
     try {
         const config = req.body;
-        // Config comes plain text from client request body
-        const client = createClient(config.url, {
-            username: config.username,
-            password: config.password
-        });
-        await client.getDirectoryContents('/'); // Try to list root
-        res.json({ success: true });
+        
+        if (config.type === 'smb') {
+             const client = getSMBClient(config);
+             const files = await client.readdir(''); // Root
+             res.json({ success: true, count: files.length });
+        } else {
+            // WebDAV
+            const client = createClient(config.url, {
+                username: config.username,
+                password: config.password
+            });
+            await client.getDirectoryContents('/'); // Try to list root
+            res.json({ success: true });
+        }
     } catch (err) {
+        console.error('[Drive Test Failed]', err);
         res.status(400).json({ error: 'Connection failed', details: err.message });
     }
 });
@@ -291,19 +287,6 @@ app.patch('/api/drives/:id', async (req, res) => {
     }
 });
 
-// --- Core File APIs (Proxy Logic) ---
-
-// Helper: Safe path resolution
-const resolveSafePath = (userPath) => {
-    // Remove leading slashes to ensure it's relative
-    const safeSuffix = path.normalize(userPath).replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
-    const absolutePath = path.resolve(STORAGE_DIR, safeSuffix);
-    if (!absolutePath.startsWith(STORAGE_DIR)) {
-        throw new Error('Access denied: Path traversal detected');
-    }
-    return absolutePath;
-};
-
 // GET /api/files?path=/&drive=local
 app.get('/api/files', async (req, res) => {
     try {
@@ -345,6 +328,44 @@ app.get('/api/files', async (req, res) => {
                 };
             }));
             res.json({ path: safePath, files: fileList });
+        } else if (config.type === 'smb') {
+            const client = getSMBClient(config);
+            // Strip leading slashes for SMB
+            const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\'); 
+            
+            try {
+                // @marsaud/smb2 readdir returns just names by default.
+                const names = await client.readdir(smbPath);
+                const results = await Promise.all(names.map(async name => {
+                     try {
+                         const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
+                         const stats = await client.stat(itemPath);
+                         
+                         // Construct full relative path for frontend
+                         const webPath = path.posix.join(reqPath, name);
+                         
+                         return {
+                             name: name,
+                             path: webPath,
+                             isDirectory: stats.isDirectory(),
+                             size: stats.size,
+                             mtime: stats.changeTime,
+                             type: stats.isDirectory() ? 'folder' : mime.lookup(name) || 'application/octet-stream'
+                         };
+                     } catch(e) {
+                         return null; 
+                     }
+                }));
+                
+                res.json({
+                    path: reqPath,
+                    files: results.filter(f => f !== null)
+                });
+            } catch (smbErr) {
+                 console.error('SMB List Error:', smbErr);
+                 res.status(502).json({ error: `SMB Error: ${smbErr.message}` });
+            }
+
         } else {
             // WebDAV Proxy
             const client = getWebDAVClient(config);
@@ -415,14 +436,22 @@ app.get('/api/search', async (req, res) => {
 
             await walk(absoluteRoot);
             res.json(results);
+        } else if (config.type === 'smb') {
+            // SMB Search - Shallow only for now
+            const client = getSMBClient(config);
+            const smbPath = searchPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            const names = await client.readdir(smbPath);
+            const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
+            const results = matches.map(name => ({
+                name,
+                path: path.posix.join(searchPath, name),
+                isDirectory: false, // Don't know without stat
+                type: mime.lookup(name) || 'application/octet-stream'
+            }));
+            res.json(results);
+
         } else {
-            // WebDAV Search (Naive: Filter current directory only, or try deep)
-            // Recursive WebDAV is risky. For now, we search CURRENT directory only via proxy
-            // To be safe and consistent with previous "current view" behavior but server-side.
-            // OR: We try to get "deep" but with caution.
-            
-            // Current Decision: Only search current folder for WebDAV to prevent timeouts.
-            // Users can navigate and search.
+            // WebDAV Search (Naive)
             const client = getWebDAVClient(config);
             const items = await client.getDirectoryContents(searchPath);
             const results = items
@@ -445,6 +474,47 @@ app.get('/api/raw', async (req, res) => {
 
         if (config.type === 'local') {
             res.sendFile(resolveSafePath(reqPath));
+        } else if (config.type === 'smb') {
+            const client = getSMBClient(config);
+            const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            
+            const range = req.headers.range;
+            let options = {};
+            
+            if (range) {
+                const parts = range.replace(/bytes=/, "").split("-");
+                const start = parseInt(parts[0], 10);
+                const end = parts[1] ? parseInt(parts[1], 10) : undefined;
+                options.start = start;
+                if (end) options.end = end;
+                res.status(206);
+                
+                // We need file size for Content-Range header
+                const stats = await client.stat(smbPath);
+                const fileSize = stats.size;
+                const finalEnd = end || (fileSize - 1);
+                const chunksize = (finalEnd - start) + 1;
+
+                res.setHeader('Content-Range', `bytes ${start}-${finalEnd}/${fileSize}`);
+                res.setHeader('Content-Length', chunksize);
+                res.setHeader('Accept-Ranges', 'bytes');
+            } else {
+                const stats = await client.stat(smbPath);
+                res.setHeader('Content-Length', stats.size);
+                res.setHeader('Accept-Ranges', 'bytes');
+            }
+
+            const fileName = path.basename(reqPath);
+            const mimeType = mime.lookup(fileName) || 'application/octet-stream';
+            res.setHeader('Content-Type', mimeType);
+
+            const stream = await client.createReadStream(smbPath, options);
+            stream.pipe(res);
+            stream.on('error', err => {
+                console.error('SMB Stream Error', err);
+                if(!res.headersSent) res.status(500).end();
+            });
+
         } else {
             const client = getWebDAVClient(config);
             
@@ -452,8 +522,6 @@ app.get('/api/raw', async (req, res) => {
                 method: 'GET',
                 headers: {},
                 responseType: 'stream',
-                // Important: validateStatus to allow 2xx and others like 416 to be handled manually if needed
-                // But webdav lib might wrap axios. Let's try basic usage.
             };
 
             // Forward Range Header
@@ -462,23 +530,17 @@ app.get('/api/raw', async (req, res) => {
             }
 
             try {
-                // Use customRequest to bypass potential createReadStream limitations
-                // and get full access to upstream response headers/status
                 const response = await client.customRequest(reqPath, options);
                 
-                // Helper to get header (Handles Fetch Headers object vs Axios plain object)
                 const getHeader = (key) => {
                     if (response.headers && typeof response.headers.get === 'function') {
                         return response.headers.get(key);
                     }
-                    // Axios headers are usually lowercased, but let's be safe
                     return response.headers ? (response.headers[key] || response.headers[key.toLowerCase()]) : null;
                 };
 
-                // Forward Status (200, 206, etc.)
                 res.status(response.status);
                 
-                // Forward specific headers
                 const forwardHeaders = [
                     'content-type',
                     'content-length',
@@ -492,23 +554,17 @@ app.get('/api/raw', async (req, res) => {
                 forwardHeaders.forEach(key => {
                     const val = getHeader(key);
                     if (val) {
-                        // If we are about to pipe a stream that might be decompressed or modified, 
-                        // sometimes it's safer to let the server calculate content-length or use chunked encoding.
-                        // But for PDF/Video, Safari REQUIRES content-length and content-range to match exactly.
                         res.setHeader(key, val);
                     }
                 });
 
-                // Ensure Accept-Ranges is advertised if it's a 206 or upstream says so
                 if (response.status === 206 && !res.getHeader('accept-ranges')) {
                     res.setHeader('Accept-Ranges', 'bytes');
                 }
 
-                // Get Stream: Prioritize body (Fetch) to avoid DeprecationWarning on data (node-fetch)
                 let stream = response.body || response.data;
                 if (!stream) throw new Error('No response stream available');
 
-                // Fallback Content-Type if upstream didn't send one
                 if (!getHeader('content-type')) {
                     const fileName = path.basename(reqPath);
                     const mimeType = mime.lookup(fileName) || 'application/octet-stream';
@@ -516,7 +572,6 @@ app.get('/api/raw', async (req, res) => {
                 }
 
                 if (typeof stream.pipe !== 'function') {
-                    // Handle Web Stream (Node 18+ native fetch) if necessary
                     try {
                         const { Readable } = require('stream');
                         if (Readable.fromWeb) {
@@ -533,16 +588,13 @@ app.get('/api/raw', async (req, res) => {
                         console.error('Upstream Stream Error:', streamErr);
                     });
                 } else {
-                    // Fallback for non-stream data?
                     console.error('[Raw] Response is not a stream');
                     res.status(500).send('Upstream response is not a stream');
                 }
 
             } catch (err) {
-                // Handle Upstream Errors (404, 416, 401, etc.)
                 if (err.response) {
                     res.status(err.response.status);
-                    // Forward headers for error response too (like Content-Range for 416)
                     const errHeaders = ['content-range', 'content-length', 'content-type'];
                     errHeaders.forEach(key => {
                         if (err.response.headers[key]) res.setHeader(key, err.response.headers[key]);
@@ -565,6 +617,53 @@ app.get('/api/raw', async (req, res) => {
     }
 });
 
+// GET /api/preview (Image Preview & Conversion)
+app.get('/api/preview', async (req, res) => {
+    try {
+        const { path: reqPath, drive: driveId = 'local' } = req.query;
+        if (!reqPath) return res.status(400).send('Path required');
+        const config = await getDriveConfig(driveId);
+        
+        const fileName = path.basename(reqPath);
+        const isHeic = /\.(heic|heif)$/i.test(fileName);
+        
+        // Setup Source Stream
+        let inputStream;
+        if (config.type === 'local') {
+             const absPath = resolveSafePath(reqPath);
+             if (!fs.existsSync(absPath)) return res.status(404).send('File not found');
+             inputStream = fs.createReadStream(absPath);
+        } else if (config.type === 'smb') {
+             const client = getSMBClient(config);
+             const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
+             inputStream = await client.createReadStream(smbPath);
+        } else {
+             const client = getWebDAVClient(config);
+             inputStream = client.createReadStream(reqPath);
+        }
+
+        inputStream.on('error', (err) => {
+            console.error('[Preview Stream Error]', err);
+            if (!res.headersSent) res.status(500).end();
+        });
+
+        if (isHeic && sharp) {
+            res.setHeader('Content-Type', 'image/jpeg');
+            const transform = sharp().toFormat('jpeg', { quality: 80 });
+            inputStream.pipe(transform).pipe(res);
+        } else {
+            const mimeType = mime.lookup(fileName) || 'application/octet-stream';
+            res.setHeader('Content-Type', mimeType);
+            inputStream.pipe(res);
+        }
+
+    } catch (err) {
+        console.error('[Preview API Error]', err);
+        if (!res.headersSent) res.status(500).send(err.message);
+    }
+});
+
+
 // POST /api/mkdir
 app.post('/api/mkdir', async (req, res) => {
     try {
@@ -574,8 +673,11 @@ app.post('/api/mkdir', async (req, res) => {
 
         if (config.type === 'local') {
             const absPath = resolveSafePath(reqPath);
-            console.log(`[Mkdir] Creating local directory: ${absPath}`);
             await fs.ensureDir(absPath);
+        } else if (config.type === 'smb') {
+            const client = getSMBClient(config);
+            const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            await client.mkdir(smbPath);
         } else {
             const client = getWebDAVClient(config);
             await client.createDirectory(reqPath);
@@ -587,6 +689,21 @@ app.post('/api/mkdir', async (req, res) => {
     }
 });
 
+// Helper: Recursive SMB Delete
+const rmDirRecursiveSMB = async (client, dirPath) => {
+    const items = await client.readdir(dirPath);
+    for (const item of items) {
+        const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
+        const stats = await client.stat(itemPath);
+        if (stats.isDirectory()) {
+            await rmDirRecursiveSMB(client, itemPath);
+        } else {
+            await client.unlink(itemPath);
+        }
+    }
+    await client.rmdir(dirPath);
+};
+
 // POST /api/delete
 app.post('/api/delete', async (req, res) => {
     try {
@@ -597,8 +714,25 @@ app.post('/api/delete', async (req, res) => {
         if (config.type === 'local') {
             await Promise.all(items.map(async itemPath => {
                 const absPath = resolveSafePath(itemPath);
-                console.log(`[Delete] Local item: ${absPath}`);
                 await fs.remove(absPath);
+            }));
+        } else if (config.type === 'smb') {
+            const client = getSMBClient(config);
+            await Promise.all(items.map(async item => {
+                const smbPath = item.replace(/^\/+/, '').replace(/\//g, '\\');
+                try {
+                    const stats = await client.stat(smbPath);
+                    if (stats.isDirectory()) {
+                         await rmDirRecursiveSMB(client, smbPath); 
+                    } else {
+                         await client.unlink(smbPath);
+                    }
+                } catch(e) {
+                    // Ignore if not found, else throw
+                    if (!e.message.includes('STATUS_OBJECT_NAME_NOT_FOUND') && !e.message.includes('STATUS_NoSuchFile')) {
+                         throw e;
+                    }
+                }
             }));
         } else {
             const client = getWebDAVClient(config);
@@ -624,8 +758,17 @@ app.post('/api/move', async (req, res) => {
                 const absDestDir = resolveSafePath(destination);
                 const absNewPath = path.join(absDestDir, path.basename(absItem));
                 
-                console.log(`[Move] ${absItem} -> ${absNewPath}`);
                 if (absItem !== absNewPath) await fs.move(absItem, absNewPath, { overwrite: true });
+            }));
+        } else if (config.type === 'smb') {
+            const client = getSMBClient(config);
+            await Promise.all(items.map(item => {
+                const smbOld = item.replace(/^\/+/, '').replace(/\//g, '\\');
+                const fileName = path.basename(item);
+                const smbDestDir = destination.replace(/^\/+/, '').replace(/\//g, '\\');
+                const smbNew = smbDestDir === '\\' || smbDestDir === '' ? fileName : `${smbDestDir}\\${fileName}`;
+                
+                return client.rename(smbOld, smbNew);
             }));
         } else {
             const client = getWebDAVClient(config);
@@ -644,6 +787,103 @@ app.post('/api/move', async (req, res) => {
 
 const { pipeline } = require('stream/promises');
 
+// Helper: Abstract File System Interface for Transfer
+const getFSAdapter = (config) => {
+    if (config.type === 'local') {
+        return {
+            stat: async (p) => { 
+                const s = await fs.stat(resolveSafePath(p));
+                return { isDirectory: () => s.isDirectory(), size: s.size };
+            },
+            readdir: async (p) => {
+                const files = await fs.readdir(resolveSafePath(p));
+                return files; // returns names
+            },
+            mkdir: async (p) => fs.ensureDir(resolveSafePath(p)),
+            createReadStream: async (p) => fs.createReadStream(resolveSafePath(p)),
+            createWriteStream: async (p) => fs.createWriteStream(resolveSafePath(p)),
+            unlink: async (p) => fs.remove(resolveSafePath(p)), // fs-extra remove handles dirs too
+            join: (base, name) => path.posix.join(base, name) // Logic uses posix paths internally for recursion
+        };
+    } else if (config.type === 'smb') {
+        const client = getSMBClient(config);
+        const toSMB = (p) => p.replace(/^\/+/, '').replace(/\//g, '\\');
+        return {
+            stat: async (p) => client.stat(toSMB(p)),
+            readdir: async (p) => client.readdir(toSMB(p)),
+            mkdir: async (p) => client.mkdir(toSMB(p)),
+            createReadStream: async (p) => client.createReadStream(toSMB(p)),
+            createWriteStream: async (p) => client.createWriteStream(toSMB(p)),
+            unlink: async (p) => {
+                const smbP = toSMB(p);
+                const stats = await client.stat(smbP);
+                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbP);
+                else await client.unlink(smbP);
+            },
+            join: (base, name) => path.posix.join(base, name)
+        };
+    } else {
+        const client = getWebDAVClient(config);
+        const toWebDAV = (p) => p.replace(/^\/+/, ''); // Ensure no leading slash for some clients if needed
+        return {
+            stat: async (p) => {
+                const res = await client.stat(toWebDAV(p));
+                return { isDirectory: () => res.type === 'directory', size: res.size };
+            },
+            readdir: async (p) => {
+                const items = await client.getDirectoryContents(toWebDAV(p));
+                // getDirectoryContents returns objects, we need names
+                // Filter out current directory entry if present
+                return items
+                    .filter(i => i.filename !== toWebDAV(p) && i.filename !== '/' + toWebDAV(p))
+                    .map(i => i.basename);
+            },
+            mkdir: async (p) => client.createDirectory(toWebDAV(p)),
+            createReadStream: async (p) => client.createReadStream(toWebDAV(p)),
+            createWriteStream: async (p) => {
+                // webdav lib: putFileContents accepts stream. 
+                // But we need a Writable stream interface.
+                // We can use a PassThrough and pipe it to putFileContents?
+                // Actually webdav lib `createWriteStream` returns a stream that uploads.
+                return client.createWriteStream(toWebDAV(p));
+            },
+            unlink: async (p) => client.deleteFile(toWebDAV(p)),
+            join: (base, name) => path.posix.join(base, name)
+        };
+    }
+};
+
+// Recursive Transfer Function
+const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) => {
+    const stats = await srcAdapter.stat(srcPath);
+    
+    if (stats.isDirectory()) {
+        // Create Dest Dir
+        try { await dstAdapter.mkdir(dstPath); } catch (e) { /* ignore exist error */ }
+        
+        // List Children
+        const children = await srcAdapter.readdir(srcPath);
+        for (const childName of children) {
+            if (childName === '.' || childName === '..') continue;
+            const childSrc = srcAdapter.join(srcPath, childName);
+            const childDst = dstAdapter.join(dstPath, childName);
+            await transferItemRecursive(srcAdapter, dstAdapter, childSrc, childDst);
+        }
+    } else {
+        // Copy File
+        const readStream = await srcAdapter.createReadStream(srcPath);
+        const writeStream = await dstAdapter.createWriteStream(dstPath);
+        
+        // Error handling
+        await new Promise((resolve, reject) => {
+             readStream.on('error', reject);
+             writeStream.on('error', reject);
+             writeStream.on('finish', resolve); // Writable stream finishes
+             readStream.pipe(writeStream);
+        });
+    }
+};
+
 // POST /api/transfer (Cross-drive copy/move)
 app.post('/api/transfer', async (req, res) => {
     try {
@@ -653,56 +893,23 @@ app.post('/api/transfer', async (req, res) => {
         const srcConfig = await getDriveConfig(sourceDrive);
         const dstConfig = await getDriveConfig(destDrive);
 
+        const srcAdapter = getFSAdapter(srcConfig);
+        const dstAdapter = getFSAdapter(dstConfig);
+
         for (const itemPath of items) {
             const fileName = path.basename(itemPath);
-            // Construct target path (WebDAV is posix, Local depends on OS but internal logic uses /)
-            // We use path.posix.join for consistency in URL/Virtual paths
             const targetPath = path.posix.join(destPath, fileName);
-
-            // 1. Get Read Stream
-            let readStream;
-            if (srcConfig.type === 'local') {
-                const absPath = resolveSafePath(itemPath);
-                if (!fs.existsSync(absPath)) continue; // Skip missing
-                readStream = fs.createReadStream(absPath);
-            } else {
-                const client = getWebDAVClient(srcConfig);
-                readStream = client.createReadStream(itemPath);
-            }
-
-            // Prevent crash on read error (e.g. file deleted during transfer)
-            readStream.on('error', (err) => {
-                console.error(`[Transfer Stream Error] ${itemPath}:`, err);
-            });
-
-            // 2. Write Stream
-            if (dstConfig.type === 'local') {
-                const absDestDir = resolveSafePath(destPath);
-                await fs.ensureDir(absDestDir);
-                const absDestFile = path.join(absDestDir, fileName);
-                const writeStream = fs.createWriteStream(absDestFile);
+            
+            try {
+                await transferItemRecursive(srcAdapter, dstAdapter, itemPath, targetPath);
                 
-                // Add error handling for writeStream
-                writeStream.on('error', (err) => {
-                    console.error(`[Transfer Write Error] ${absDestFile}:`, err);
-                    readStream.destroy(); // Stop reading if write fails
-                });
-
-                await pipeline(readStream, writeStream);
-            } else {
-                const client = getWebDAVClient(dstConfig);
-                // webdav lib putFileContents accepts stream
-                await client.putFileContents(targetPath, readStream);
-            }
-
-            // 3. Delete Source if Move
-            if (move) {
-                if (srcConfig.type === 'local') {
-                    await fs.remove(resolveSafePath(itemPath));
-                } else {
-                    const client = getWebDAVClient(srcConfig);
-                    await client.deleteFile(itemPath);
+                // If Move, delete source after successful transfer
+                if (move) {
+                    await srcAdapter.unlink(itemPath);
                 }
+            } catch (e) {
+                console.error(`[Transfer Failed] ${itemPath} -> ${targetPath}:`, e);
+                throw e; // Stop batch on error
             }
         }
         res.json({ success: true });
@@ -729,10 +936,17 @@ app.post('/api/rename', async (req, res) => {
 
             console.log(`[Rename] ${absOld} -> ${absNew}`);
             await fs.rename(absOld, absNew);
+        } else if (config.type === 'smb') {
+            const client = getSMBClient(config);
+            const smbOld = oldPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            const parts = smbOld.split('\\');
+            parts.pop();
+            const smbNew = [...parts, newName].join('\\');
+            await client.rename(smbOld, smbNew);
+
         } else {
             // WebDAV Rename
             const client = getWebDAVClient(config);
-            // Strip leading slashes
             const cleanOldPath = oldPath.replace(/^\/+/, '');
             
             const parentDir = path.dirname(cleanOldPath);
@@ -752,7 +966,6 @@ app.post('/api/rename', async (req, res) => {
 app.post('/api/prepare-drag', async (req, res) => {
     try {
         const { items, drive: driveId = 'local' } = req.body;
-        console.log(`[Drag] Preparing ${items?.length} items from ${driveId}`);
         
         if (!items || items.length === 0) return res.json({ files: [] });
 
@@ -760,7 +973,6 @@ app.post('/api/prepare-drag', async (req, res) => {
         const resolvedFiles = [];
 
         if (config.type === 'local') {
-            // Return absolute local paths
             for (const itemPath of items) {
                 const absPath = resolveSafePath(itemPath);
                 if (fs.existsSync(absPath)) {
@@ -768,27 +980,29 @@ app.post('/api/prepare-drag', async (req, res) => {
                 }
             }
         } else {
-            // WebDAV: Download to Temp in Parallel
-            const client = getWebDAVClient(config);
             const tempDir = path.join(os.tmpdir(), 'webdav-drag-cache');
             await fs.ensureDir(tempDir);
 
-            // Parallelize downloads
             const downloadPromises = items.map(async (itemPath) => {
                 try {
                     const fileName = path.basename(itemPath);
                     const tempFilePath = path.join(tempDir, fileName);
                     
-                    console.log(`[Drag] Downloading ${itemPath} to ${tempFilePath}`);
-                    const content = await client.getFileContents(itemPath, { format: 'binary' });
-                    await fs.writeFile(tempFilePath, content);
+                    if (config.type === 'smb') {
+                        const client = getSMBClient(config);
+                        const readStream = await client.createReadStream(itemPath.replace(/^\/+/, '').replace(/\//g, '\\'));
+                        const writeStream = fs.createWriteStream(tempFilePath);
+                        await pipeline(readStream, writeStream);
+                    } else {
+                         const client = getWebDAVClient(config);
+                         const content = await client.getFileContents(itemPath, { format: 'binary' });
+                         await fs.writeFile(tempFilePath, content);
+                    }
                     return tempFilePath;
                 } catch (e) {
-                    console.error(`[Drag] Failed to download ${itemPath}:`, e.message);
                     return null;
                 }
             });
-
             const results = await Promise.all(downloadPromises);
             resolvedFiles.push(...results.filter(p => p !== null));
         }
@@ -804,7 +1018,6 @@ app.post('/api/prepare-drag', async (req, res) => {
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
-        console.log(`[Upload] Destination check: drive=${driveId}, path=${reqPath}`);
         
         try {
             if (driveId === 'local') {
@@ -816,7 +1029,6 @@ const storage = multer.diskStorage({
                 cb(null, tempDir); 
             }
         } catch (e) {
-            console.error('[Upload] Destination Error:', e);
             cb(e);
         }
     },
@@ -841,25 +1053,28 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
         const config = await getDriveConfig(driveId);
 
         if (config.type !== 'local') {
-            const client = getWebDAVClient(config);
             
             for (const file of uploadedFiles) {
                 try {
-                    console.log(`[Upload] Transferring to WebDAV: ${file.filename}`);
-                    // Ensure remote path is absolute (starts with /)
-                    // path.posix.join handles slash deduplication
                     const remotePath = path.posix.join('/', reqPath, file.filename);
+                    console.log(`[Upload] Transferring to ${config.type}: ${file.filename}`);
                     
                     const readStream = fs.createReadStream(file.path);
-                    readStream.on('error', (err) => console.error(`[Upload Stream Error] ${file.filename}:`, err));
 
-                    await client.putFileContents(remotePath, readStream);
+                    if (config.type === 'smb') {
+                        const client = getSMBClient(config);
+                        const smbPath = remotePath.replace(/^\/+/, '').replace(/\//g, '\\');
+                        const writeStream = await client.createWriteStream(smbPath);
+                        await pipeline(readStream, writeStream);
+                    } else {
+                         const client = getWebDAVClient(config);
+                         await client.putFileContents(remotePath, readStream);
+                    }
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
-                    console.error(`[Upload] Failed to upload ${file.filename} to WebDAV:`, e);
-                    throw e; // Stop processing to report error
+                    console.error(`[Upload] Failed to upload ${file.filename}:`, e);
+                    throw e; 
                 } finally {
-                    // Always cleanup temp file
                     await fs.remove(file.path).catch(e => console.error('Failed to cleanup temp file:', e));
                 }
             }
@@ -869,7 +1084,6 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         console.error('[Upload API Error]', err);
-        // Attempt cleanup on error for any remaining files
         if (uploadedFiles.length > 0 && driveId !== 'local') {
             for (const file of uploadedFiles) {
                 await fs.remove(file.path).catch(() => {});
