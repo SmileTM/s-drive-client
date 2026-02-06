@@ -41,15 +41,21 @@ const CustomAudioPlayer = ({ url, autoPlay = false }) => {
         const updateTime = () => setCurrentTime(audio.currentTime);
         const updateDuration = () => setDuration(audio.duration);
         const onEnded = () => setIsPlaying(false);
+        const onPlay = () => setIsPlaying(true);
+        const onPause = () => setIsPlaying(false);
 
         audio.addEventListener('timeupdate', updateTime);
         audio.addEventListener('loadedmetadata', updateDuration);
         audio.addEventListener('ended', onEnded);
+        audio.addEventListener('play', onPlay);
+        audio.addEventListener('pause', onPause);
 
         return () => {
             audio.removeEventListener('timeupdate', updateTime);
             audio.removeEventListener('loadedmetadata', updateDuration);
             audio.removeEventListener('ended', onEnded);
+            audio.removeEventListener('play', onPlay);
+            audio.removeEventListener('pause', onPause);
         };
     }, [url, autoPlay]);
 
@@ -60,7 +66,6 @@ const CustomAudioPlayer = ({ url, autoPlay = false }) => {
         } else {
             audioRef.current.play();
         }
-        setIsPlaying(!isPlaying);
     };
 
     const handleSeek = (e) => {
@@ -138,7 +143,7 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
             video.removeEventListener('pause', onPause);
             video.removeEventListener('timeupdate', updateTime);
             video.removeEventListener('loadedmetadata', updateDuration);
-            video.addEventListener('ended', onEnded);
+            video.removeEventListener('ended', onEnded);
         };
     }, [url]);
 
@@ -239,6 +244,8 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
     const load = async () => {
         // Reset Zoom state on file change
         isZoomed.current = false;
+        setUrl('');
+        setContent(null);
 
         if (isHeic) {
             setLoading(true);
@@ -452,7 +459,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
 
         {isVideo && url && (
-          <CustomVideoPlayer url={url} autoPlay={true} />
+          <CustomVideoPlayer key={url} url={url} autoPlay={true} />
         )}
 
         {isAudio && url && (
@@ -461,7 +468,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
               <DocumentIcon className="w-12 h-12 text-indigo-500" />
             </div>
             <h3 className="font-medium text-slate-800 text-center truncate w-full px-2">{file.name}</h3>
-            <CustomAudioPlayer url={url} autoPlay={true} />
+            <CustomAudioPlayer key={url} url={url} autoPlay={true} />
           </div>
         )}
 
