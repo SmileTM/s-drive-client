@@ -106,7 +106,12 @@ const getDriveConfig = async (driveId) => {
 const getWebDAVClient = (config) => {
     return createClient(config.url.trim(), {
         username: config.username,
-        password: config.password // Config already has decrypted password
+        password: config.password, // Config already has decrypted password
+        headers: {
+            // Jianguoyun and some other WebDAV servers block unknown/empty User-Agents
+            // Mimic a standard client or just be explicit
+            'User-Agent': 'WebDavClient/1.0.0 (Electron)'
+        }
     });
 };
 
@@ -676,6 +681,13 @@ app.post('/api/transfer', async (req, res) => {
                 await fs.ensureDir(absDestDir);
                 const absDestFile = path.join(absDestDir, fileName);
                 const writeStream = fs.createWriteStream(absDestFile);
+                
+                // Add error handling for writeStream
+                writeStream.on('error', (err) => {
+                    console.error(`[Transfer Write Error] ${absDestFile}:`, err);
+                    readStream.destroy(); // Stop reading if write fails
+                });
+
                 await pipeline(readStream, writeStream);
             } else {
                 const client = getWebDAVClient(dstConfig);
