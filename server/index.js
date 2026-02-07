@@ -1076,7 +1076,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                 } else {
                     // Ignore STATUS_FILE_CLOSED as it likely means the server closed the handle before we could destroy the stream
                     if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                        console.warn(`[Transfer Warn] Swallowed cleanup error for ${srcPath}:`, err.message);
+                        // Benign error during cleanup, silent ignore
                     } else {
                         throw err;
                     }

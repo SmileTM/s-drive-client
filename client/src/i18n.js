@@ -104,7 +104,13 @@ export const translations = {
     globalSearchNotSupported: "Global search not supported on mobile yet",
     featureUnavailable: "Feature Unavailable",
     shareNameNotFound: "Share Name Not Found. Please check the share name.",
-    unknownError: "Unknown Error"
+    unknownError: "Unknown Error",
+    // Conflict Resolution
+    conflictTitle: "File Conflict",
+    conflictMessage: "The file \"{file}\" already exists in the destination.",
+    skip: "Skip",
+    applyToAll: "Apply to all remaining conflicts",
+    keepBoth: "Keep Both"
   },
   zh: {
     appTitle: "云盘管理",
@@ -211,6 +217,12 @@ export const translations = {
     globalSearchNotSupported: "移动端暂不支持全局搜索",
     featureUnavailable: "功能未开放",
     shareNameNotFound: "共享名称未找到，请检查共享名是否正确。",
-    unknownError: "未知错误"
+    unknownError: "未知错误",
+    // Conflict Resolution
+    conflictTitle: "文件冲突",
+    conflictMessage: "目标位置已存在名为 “{file}” 的文件。",
+    skip: "跳过",
+    applyToAll: "应用到所有剩余冲突",
+    keepBoth: "保留两者"
   }
 };

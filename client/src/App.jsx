@@ -40,6 +40,7 @@ import AddDriveModal from './AddDriveModal';
 import InputModal from './InputModal';
 import DetailsModal from './DetailsModal';
 import ConfirmModal from './ConfirmModal';
+import ConflictModal from './components/ConflictModal';
 import AlertModal from './AlertModal';
 import { translations } from './i18n';
 
@@ -300,7 +301,8 @@ function App() {
   const [loading, setLoading] = useState(false);
   // Removed simple uploading/progress state
   const [tasks, setTasks] = useState([]); // { id, name, status, progress, speed, currentBytes, totalBytes }
-  const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+  const [transferDashboardOpen, setTransferDashboardOpen] = useState(false);
+  const [conflictModal, setConflictModal] = useState({ isOpen: false, fileName: '', resolve: null });
   
   const [isIslandExpanded, setIsIslandExpanded] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState(new Set());
@@ -902,7 +904,7 @@ function App() {
   const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   const handleCopy = () => { setClipboard({ mode: 'copy', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   
-  const handlePaste = () => { 
+  const handlePaste = async () => { 
     if (!clipboard || !clipboard.items) return; 
     
     // Check if cross-drive
@@ -913,6 +915,7 @@ function App() {
     const items = clipboard.items;
     
     setClipboard(null); 
+    setTransferDashboardOpen(true);
 
     // 1. Create Tasks
     const batchId = Date.now();
@@ -921,89 +924,137 @@ function App() {
         name: path.split('/').pop(),
         status: 'pending',
         currentBytes: 0,
-        totalBytes: 0, // Unknown initially for remote files
+        totalBytes: 0,
         speed: 0,
         type: isMove ? 'move' : 'copy'
     }));
     setTasks(prev => [...newTasks, ...prev]);
 
-    // Prepare items with IDs
-    const itemsWithId = items.map((path, i) => ({
-        path: path,
-        id: newTasks[i].id
-    }));
+    // 2. Process Queue Logic
+    let globalConflictPolicy = null; // null | 'overwrite' | 'skip'
 
-    // 2. Start Transfer
-    const onProgress = (index, total, name, speed, currentBytes, totalBytes) => {
-        const taskIndex = index - 1;
-        if (taskIndex >= 0 && taskIndex < newTasks.length) {
-            const taskId = newTasks[taskIndex].id;
-            setTasks(prev => prev.map(t => {
-                if (t.id === taskId) {
-                    if (t.status === 'error') return t; // Ignore if cancelled/failed
-                    const isDone = currentBytes === totalBytes && totalBytes > 0;
-                    return { 
-                        ...t, 
-                        status: isDone ? 'done' : 'active',
-                        currentBytes,
-                        // Update totalBytes if we just learned it
-                        totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes, 
-                        speed 
-                    };
+    // Helper: Promisified Conflict Modal
+    const resolveConflict = (fileName) => {
+        return new Promise((resolve) => {
+            setConflictModal({
+                isOpen: true,
+                fileName,
+                resolve: (action, applyToAll) => {
+                    setConflictModal(prev => ({ ...prev, isOpen: false }));
+                    resolve({ action, applyToAll });
                 }
-                // Cleanup previous
-                if (newTasks.some(nt => nt.id === t.id) && newTasks.indexOf(newTasks.find(nt => nt.id === t.id)) < taskIndex) {
-                     if (t.status !== 'done') return { ...t, status: 'done', currentBytes: t.totalBytes };
-                }
-                return t;
-            }));
-        }
+            });
+        });
     };
-    
-    const onComplete = (finishedItemName) => {
-         const task = newTasks.find(t => t.name === finishedItemName);
-         if (task) {
-              setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
-         }
+
+    // Helper: Update Task Status
+    const updateTask = (id, updates) => {
+        setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+    };
+
+    // Helper: Progress Callback
+    const onProgress = (taskId) => (index, total, name, speed, currentBytes, totalBytes) => {
+        setTasks(prev => prev.map(t => {
+            if (t.id === taskId) {
+                if (t.status === 'error') return t; // Ignore if cancelled/failed
+                const isDone = currentBytes === totalBytes && totalBytes > 0;
+                return { 
+                    ...t, 
+                    status: isDone ? 'done' : 'active',
+                    currentBytes,
+                    totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes, 
+                    speed 
+                };
+            }
+            return t;
+        }));
+    };
+
+    const onComplete = (taskId) => {
+         updateTask(taskId, { status: 'done', speed: 0 });
          if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
     };
 
-    const executeTransfer = (overwrite = false) => {
-        const transferPromise = (sourceDrive === destDrive) 
-            ? (isMove 
-                ? api.moveItems(items, targetPath, activeDrive, overwrite) 
-                : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete, overwrite))
-            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete, overwrite);
-        
-        transferPromise
-            .then(() => {
-                // Ensure final refresh after all items are done (crucial for same-drive moves)
-                if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
-            })
-            .catch(err => {
-            setTasks(prev => prev.map(t => {
-                if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
-                    return { ...t, status: 'error' };
-                }
-                return t;
-            }));
+    // 3. Iterate and Transfer
+    for (let i = 0; i < items.length; i++) {
+        const itemPath = items[i];
+        const taskId = newTasks[i].id;
+        const itemName = itemPath.split('/').pop();
+        const itemsWithId = [{ path: itemPath, id: taskId }];
+
+        updateTask(taskId, { status: 'active' });
+
+        try {
+            // First attempt: overwrite = false (unless global policy says overwrite)
+            let shouldOverwrite = (globalConflictPolicy === 'overwrite');
             
-            if (err.response && err.response.status === 409) {
-                 setConfirmModal({
-                    isOpen: true,
-                    title: t.fileAlreadyExists,
-                    message: t.confirmOverwriteSingle, // Reuse message
-                    type: 'warning',
-                    confirmText: t.overwrite,
-                    onConfirm: () => executeTransfer(true) // Retry with overwrite
-                });
-            } else {
-                 showAlert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''), t.failed, 'error');
+            if (globalConflictPolicy === 'skip') {
+                updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
+                continue;
             }
-        });
-    };
+
+            // Execute Transfer
+            const performTransfer = async (overwrite) => {
+                return (sourceDrive === destDrive) 
+                    ? (isMove 
+                        ? api.moveItems([itemPath], targetPath, activeDrive, overwrite) 
+                        : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress(taskId), () => onComplete(taskId), overwrite))
+                    : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress(taskId), () => onComplete(taskId), overwrite);
+            };
+
+            await performTransfer(shouldOverwrite);
+
+        } catch (err) {
+            // Check for Conflict (409)
+            if (err.response && err.response.status === 409) {
+                if (globalConflictPolicy === 'skip') {
+                     updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
+                     continue;
+                }
+                
+                if (globalConflictPolicy === 'overwrite') {
+                     try {
+                        await performTransfer(true);
+                     } catch (retryErr) {
+                        updateTask(taskId, { status: 'error' });
+                        showAlert(`${itemName}: ${retryErr.message}`, t.failed, 'error');
+                     }
+                     continue;
+                }
+
+                // Ask User
+                const { action, applyToAll } = await resolveConflict(itemName);
+                
+                if (action === 'cancel') {
+                    // Cancel remaining
+                    for (let j = i; j < items.length; j++) {
+                        updateTask(newTasks[j].id, { status: 'error', name: newTasks[j].name + ' (Cancelled)' });
+                    }
+                    break; 
+                }
+
+                if (applyToAll) {
+                    globalConflictPolicy = action;
+                }
+
+                if (action === 'skip') {
+                    updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
+                } else if (action === 'overwrite') {
+                    try {
+                        await performTransfer(true);
+                    } catch (retryErr) {
+                        updateTask(taskId, { status: 'error' });
+                    }
+                }
+            } else {
+                console.error("Transfer Error:", err);
+                updateTask(taskId, { status: 'error' });
+            }
+        }
+    }
     
-    executeTransfer(false);
+    // Final Refresh
+    if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
   };
   
   const handleRename = () => {
@@ -1393,7 +1444,7 @@ function App() {
                       total: tasks.filter(t => t.status !== 'done' && t.status !== 'error').reduce((acc, t) => acc + (t.totalBytes || 0), 0)
                   }} 
                   activeCount={tasks.filter(t => t.status === 'active' || t.status === 'pending').length}
-                  onClick={() => setIsDashboardOpen(true)}
+                  onClick={() => setTransferDashboardOpen(true)}
                />
 
               {isSelectionMode ? (
@@ -1720,6 +1771,14 @@ function App() {
                 />
             )}
         </AnimatePresence>
+        
+        <ConflictModal
+            isOpen={conflictModal.isOpen}
+            fileName={conflictModal.fileName}
+            onResolve={conflictModal.resolve}
+            onCancel={() => conflictModal.resolve && conflictModal.resolve('cancel', false)}
+            lang={lang}
+        />
 
         <AlertModal 
             isOpen={alertModal.isOpen}
@@ -1741,8 +1800,8 @@ function App() {
         }} lang={lang} /></div>}</AnimatePresence>
 
         <TransferDashboard 
-            isOpen={isDashboardOpen} 
-            onClose={() => setIsDashboardOpen(false)} 
+            isOpen={transferDashboardOpen} 
+            onClose={() => setTransferDashboardOpen(false)} 
             tasks={tasks}
             onClearCompleted={() => setTasks(prev => prev.filter(t => t.status !== 'done' && t.status !== 'error'))}
             onCancel={handleCancelTask}
