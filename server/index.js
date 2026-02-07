@@ -1538,8 +1538,9 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                                     } catch (retryErr) {
                                         throw retryErr; 
                                     }
-                                } else if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                                    console.warn(`[Upload Warn] Swallowed cleanup error for ${remotePath}:`, err.message);
+                                } else if (!retry && err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                                    console.warn(`[Upload Warn] STATUS_FILE_CLOSED for ${remotePath}. Retrying...`);
+                                    await performUpload(true);
                                 } else {
                                     throw err;
                                 }
