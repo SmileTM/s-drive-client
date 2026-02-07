@@ -1235,9 +1235,8 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                     } catch (retryErr) {
                         throw retryErr; // Fail if delete fails or retry fails
                     }
-                } else if (!retry && err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                    console.warn(`[Transfer Warn] STATUS_FILE_CLOSED for ${dstPath}. Retrying...`);
-                    await performCopy(true);
+                } else if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                    console.warn(`[Transfer Warn] STATUS_FILE_CLOSED (benign) for ${dstPath}. Ignoring.`);
                 } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
                     // Stream destroyed (likely via cancel)
                     console.log(`[Transfer] Cancelled, cleaning up: ${dstPath}`);
