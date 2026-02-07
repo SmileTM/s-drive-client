@@ -595,7 +595,7 @@ const ServerAPI = {
           if (onItemComplete) onItemComplete(fileName);
       }
   },
-  uploadFiles: async (path, files, driveId, onProgress, onItemComplete) => {
+  uploadFiles: async (path, files, driveId, onProgress, onItemComplete, overwrite = false) => {
     // Process files sequentially for granular progress
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -633,7 +633,7 @@ const ServerAPI = {
         };
 
         try {
-            await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}&taskId=${taskId}`, formData, config);
+            await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}&taskId=${taskId}&overwrite=${overwrite}`, formData, config);
         } finally {
             delete serverProgressCallbacks[taskId];
         }

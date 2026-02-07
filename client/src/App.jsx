@@ -762,6 +762,8 @@ function App() {
         return f;
     });
 
+    const shouldOverwrite = duplicates.length > 0;
+
     api.uploadFiles(
         currentPath, 
         filesWithId, 
@@ -810,7 +812,8 @@ function App() {
             if (currentPathRef.current === currentPath) {
                  fetchFilesRef.current(currentPath);
             }
-        }
+        },
+        shouldOverwrite
     ).catch(err => {
         // Mark remaining pending tasks as error
         setTasks(prev => prev.map(t => {

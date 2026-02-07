@@ -1462,8 +1462,9 @@ const upload = multer({
 
 app.post('/api/upload', upload.array('files'), async (req, res) => {
     const uploadedFiles = req.files || [];
-    const { path: reqPath = '/', drive: driveId = 'local', taskId: queryTaskId = null } = req.query;
-    console.log(`[Upload] Processing ${uploadedFiles.length} files. Drive: ${driveId}. taskId: ${queryTaskId}`);
+    const { path: reqPath = '/', drive: driveId = 'local', taskId: queryTaskId = null, overwrite = 'false' } = req.query;
+    const shouldOverwrite = overwrite === 'true';
+    console.log(`[Upload] Processing ${uploadedFiles.length} files. Drive: ${driveId}. taskId: ${queryTaskId} overwrite: ${shouldOverwrite}`);
 
     try {
         const config = await getDriveConfig(driveId);
@@ -1475,44 +1476,102 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     const remotePath = path.posix.join('/', reqPath, file.filename);
                     console.log(`[Upload] Transferring to ${config.type}: ${file.filename}`);
                     
-                    const readStream = fs.createReadStream(file.path);
-                    const progressStream = createProgressStream(queryTaskId, file.size);
-                    let writeStream = null;
-
-                    if (queryTaskId) {
-                        activeTasks.set(queryTaskId, {
-                            cancel: () => {
-                                console.log(`[Upload ${queryTaskId}] Cancellation triggered`);
-                                if (readStream) readStream.destroy();
-                                if (progressStream) progressStream.destroy();
-                                if (writeStream && typeof writeStream.destroy === 'function') writeStream.destroy();
-                            }
-                        });
-                    }
-
                     if (config.type === 'smb') {
                         // Use autoCloseTimeout: 0 to prevent STATUS_FILE_CLOSED during upload
                         const client = getSMBClient(config, { autoCloseTimeout: 0 });
-                        try {
-                            const smbPath = toSMBPath(remotePath);
-                            writeStream = await client.createWriteStream(smbPath);
-                            await pipeline(readStream, progressStream, writeStream);
-                        } catch (err) {
-                            if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                                console.warn(`[Upload Warn] Swallowed cleanup error for ${remotePath}:`, err.message);
-                            } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
-                                 // Stream destroyed (likely via cancel)
-                                 throw new Error('Upload Cancelled');
-                            } else {
-                                throw err;
+                        
+                        const performUpload = async (retry = false) => {
+                            const readStream = fs.createReadStream(file.path);
+                            const progressStream = createProgressStream(queryTaskId, file.size);
+                            let writeStream = null;
+
+                            // Register cancel handler for this attempt
+                            if (queryTaskId) {
+                                activeTasks.set(queryTaskId, {
+                                    cancel: () => {
+                                        console.log(`[Upload ${queryTaskId}] Cancellation triggered`);
+                                        if (readStream) readStream.destroy();
+                                        if (progressStream) progressStream.destroy();
+                                        if (writeStream && typeof writeStream.destroy === 'function') writeStream.destroy();
+                                    }
+                                });
                             }
+
+                            try {
+                                const smbPath = toSMBPath(remotePath);
+                                writeStream = await client.createWriteStream(smbPath);
+                                
+                                // Check if cancelled during await
+                                if (readStream.destroyed || progressStream.destroyed) {
+                                    if (writeStream) writeStream.destroy();
+                                    throw new Error('Upload Cancelled');
+                                }
+
+                                // Update cancel handler to include the new writeStream instance
+                                if (queryTaskId) {
+                                    activeTasks.set(queryTaskId, {
+                                        cancel: () => {
+                                            console.log(`[Upload ${queryTaskId}] Cancellation triggered (Active Stream)`);
+                                            if (readStream) readStream.destroy();
+                                            if (progressStream) progressStream.destroy();
+                                            if (writeStream) writeStream.destroy();
+                                        }
+                                    });
+                                }
+
+                                await pipeline(readStream, progressStream, writeStream);
+                            } catch (err) {
+                                if (readStream) readStream.destroy();
+                                if (progressStream) progressStream.destroy();
+                                if (writeStream) writeStream.destroy();
+
+                                if (err.message === 'Upload Cancelled' || err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+                                    throw new Error('Upload Cancelled');
+                                }
+
+                                if (shouldOverwrite && !retry && (err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.message?.includes('STATUS_OBJECT_NAME_COLLISION'))) {
+                                    console.log(`[Upload] Collision detected for ${remotePath}. Deleting and retrying...`);
+                                    try {
+                                        const smbPath = toSMBPath(remotePath);
+                                        await executeSMBCommand(client, () => client.unlink(smbPath));
+                                        await performUpload(true); // Retry once
+                                    } catch (retryErr) {
+                                        throw retryErr; 
+                                    }
+                                } else if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                                    console.warn(`[Upload Warn] Swallowed cleanup error for ${remotePath}:`, err.message);
+                                } else {
+                                    throw err;
+                                }
+                            }
+                        };
+
+                        try {
+                            await performUpload();
                         } finally {
                             await client.disconnect();
                         }
+
                     } else {
                          const client = getWebDAVClient(config);
+                         // WebDAV usually overwrites by default or we can set header. 
+                         // Check if we need Overwrite header. Default for putFileContents is usually overwrite.
+                         const readStream = fs.createReadStream(file.path);
+                         const progressStream = createProgressStream(queryTaskId, file.size);
+                         
+                         if (queryTaskId) {
+                            activeTasks.set(queryTaskId, {
+                                cancel: () => {
+                                    if (readStream) readStream.destroy();
+                                    if (progressStream) progressStream.destroy();
+                                }
+                            });
+                        }
+                        
                          try {
-                             await client.putFileContents(remotePath, progressStream);
+                             // webdav-client putFileContents usually overwrites.
+                             // To be safe we could add options but let's stick to default which works for most.
+                             await client.putFileContents(remotePath, progressStream, { overwrite: shouldOverwrite });
                          } catch (err) {
                              if (readStream.destroyed || progressStream.destroyed) {
                                  throw new Error('Upload Cancelled');
