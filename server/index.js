@@ -216,6 +216,8 @@ const ensureSMBConnected = async (client) => {
             await client.readdir(''); 
         } catch (e) {
             // Ignore readdir errors, just check connected state
+            // EISCONN means socket already connected (race condition), which is fine.
+            if (e.code === 'EISCONN') return; 
         }
     })();
 
