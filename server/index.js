@@ -55,7 +55,7 @@ const getWebDAVClient = (config) => {
     });
 };
 
-const getSMBClient = (config) => {
+const getSMBClient = (config, options = {}) => {
     // config.address: "192.168.1.100" or "192.168.1.100:445"
     // config.share: "Public"
     // config.domain: ""
@@ -80,7 +80,8 @@ const getSMBClient = (config) => {
         domain: config.domain || '',
         username: config.username,
         password: config.password,
-        port: port // Optional port
+        port: port, // Optional port
+        ...options
     });
 };
 
@@ -831,10 +832,12 @@ const getFSAdapter = (config) => {
             createReadStream: async (p) => fs.createReadStream(resolveSafePath(p)),
             createWriteStream: async (p) => fs.createWriteStream(resolveSafePath(p)),
             unlink: async (p) => fs.remove(resolveSafePath(p)), // fs-extra remove handles dirs too
-            join: (base, name) => path.posix.join(base, name) // Logic uses posix paths internally for recursion
+            join: (base, name) => path.posix.join(base, name), // Logic uses posix paths internally for recursion
+            close: async () => {}
         };
     } else if (config.type === 'smb') {
-        const client = getSMBClient(config);
+        // Disable autoClose for transfer to avoid connection drops
+        const client = getSMBClient(config, { autoCloseTimeout: 0 });
         const toSMB = (p) => p.replace(/^\/+/, '').replace(/\//g, '\\');
         return {
             stat: async (p) => client.stat(toSMB(p)),
@@ -848,7 +851,8 @@ const getFSAdapter = (config) => {
                 if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbP);
                 else await client.unlink(smbP);
             },
-            join: (base, name) => path.posix.join(base, name)
+            join: (base, name) => path.posix.join(base, name),
+            close: async () => client.disconnect()
         };
     } else {
         const client = getWebDAVClient(config);
@@ -876,7 +880,8 @@ const getFSAdapter = (config) => {
                 return client.createWriteStream(toWebDAV(p));
             },
             unlink: async (p) => client.deleteFile(toWebDAV(p)),
-            join: (base, name) => path.posix.join(base, name)
+            join: (base, name) => path.posix.join(base, name),
+            close: async () => {}
         };
     }
 };
@@ -914,6 +919,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) =
 
 // POST /api/transfer (Cross-drive copy/move)
 app.post('/api/transfer', async (req, res) => {
+    let srcAdapter, dstAdapter;
     try {
         const { items, sourceDrive, destDrive, destPath, move } = req.body;
         if (!items || !sourceDrive || !destDrive) return res.status(400).json({ error: 'Missing parameters' });
@@ -921,8 +927,8 @@ app.post('/api/transfer', async (req, res) => {
         const srcConfig = await getDriveConfig(sourceDrive);
         const dstConfig = await getDriveConfig(destDrive);
 
-        const srcAdapter = getFSAdapter(srcConfig);
-        const dstAdapter = getFSAdapter(dstConfig);
+        srcAdapter = getFSAdapter(srcConfig);
+        dstAdapter = getFSAdapter(dstConfig);
 
         for (const itemPath of items) {
             const fileName = path.basename(itemPath);
@@ -944,6 +950,9 @@ app.post('/api/transfer', async (req, res) => {
     } catch (err) {
         console.error('[Transfer Error]', err);
         res.status(500).json({ error: err.message });
+    } finally {
+        if (srcAdapter && srcAdapter.close) await srcAdapter.close();
+        if (dstAdapter && dstAdapter.close) await dstAdapter.close();
     }
 });
 
