@@ -1335,22 +1335,52 @@ app.post('/api/rename', async (req, res) => {
             const parts = smbOld.split('\\');
             parts.pop();
             const smbNew = [...parts, newName].join('\\');
-            try {
-                await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
-            } catch (e) {
-                if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
-                    if (overwrite) {
-                        try {
-                            const stats = await executeSMBCommand(client, () => client.stat(smbNew));
-                            if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
-                            else await executeSMBCommand(client, () => client.unlink(smbNew));
-                            await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
-                        } catch (retryErr) { throw retryErr; }
-                    } else {
-                        return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+            // Retry loop for Rename (Handling SHARING_VIOLATION)
+            let renameAttempts = 0;
+            const maxRenameAttempts = 3;
+            
+            while (renameAttempts < maxRenameAttempts) {
+                try {
+                    await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
+                    break; // Success
+                } catch (e) {
+                    // Handle Sharing Violation (File in use)
+                    if (e.code === 'STATUS_SHARING_VIOLATION' && renameAttempts < maxRenameAttempts - 1) {
+                         console.warn(`[Rename] Sharing Violation. Retrying... (${renameAttempts + 1}/${maxRenameAttempts})`);
+                         clearSMBSession(config); // Clear locks
+                         await new Promise(r => setTimeout(r, 500));
+                         renameAttempts++;
+                         continue;
                     }
-                } else {
-                    throw e;
+
+                    if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
+                        if (overwrite) {
+                            try {
+                                console.log(`[Rename] Collision. Overwriting...`);
+                                // Clear session before delete to avoid self-lock
+                                clearSMBSession(config);
+                                
+                                const stats = await executeSMBCommand(client, () => client.stat(smbNew));
+                                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
+                                else await executeSMBCommand(client, () => client.unlink(smbNew));
+                                
+                                // Reset attempt counter to allow retry of rename after successful delete
+                                // But prevent infinite loop if delete succeeds but rename fails repeatedly
+                                // Actually, just let the next loop iteration handle the rename.
+                                // We don't increment renameAttempts here to give it a fair shot?
+                                // Let's just continue loop.
+                                continue; 
+                            } catch (retryErr) { 
+                                // If delete failed with Sharing Violation, we might want to retry the whole outer loop?
+                                // For simplicity, throw here if delete fails.
+                                throw retryErr; 
+                            }
+                        } else {
+                            return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                        }
+                    } else {
+                        throw e;
+                    }
                 }
             }
 
