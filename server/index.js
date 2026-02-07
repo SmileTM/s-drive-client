@@ -756,10 +756,6 @@ app.get('/api/preview', async (req, res) => {
              const smbPath = toSMBPath(reqPath);
              try {
                  inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
-                 inputStream.on('error', (err) => {
-                     if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
-                     console.error('[Preview Stream Error]', err);
-                 });
              } catch(e) {
                  if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
                      return res.status(404).send('File not found');
@@ -772,6 +768,7 @@ app.get('/api/preview', async (req, res) => {
         }
 
         inputStream.on('error', (err) => {
+            if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
             console.error('[Preview Stream Error]', err);
             if (!res.headersSent) res.status(500).end();
         });
