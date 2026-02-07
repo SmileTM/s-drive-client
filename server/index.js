@@ -948,7 +948,7 @@ app.post('/api/mkdir', async (req, res) => {
     }
 });
 
-// Helper: Recursive SMB Delete (Strict Depth-First)
+// Helper: Recursive SMB Delete (Parallelized with Batching)
 const rmDirRecursiveSMB = async (client, dirPath) => {
     // 1. List all children first
     let items = [];
@@ -959,21 +959,24 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
         throw err;
     }
 
-    // 2. Process children (Depth-First)
-    for (const item of items) {
-        const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
-        try {
-            const stats = await executeSMBCommand(client, () => client.stat(itemPath));
-            if (stats.isDirectory()) {
-                await rmDirRecursiveSMB(client, itemPath); // Recursively delete sub-folders
-            } else {
-                await executeSMBCommand(client, () => client.unlink(itemPath)); // Delete file
+    // 2. Process children (Parallelized with Batching)
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < items.length; i += BATCH_SIZE) {
+        const chunk = items.slice(i, i + BATCH_SIZE);
+        await Promise.all(chunk.map(async (item) => {
+            const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
+            try {
+                const stats = await executeSMBCommand(client, () => client.stat(itemPath));
+                if (stats.isDirectory()) {
+                    await rmDirRecursiveSMB(client, itemPath); // Recursively delete sub-folders
+                } else {
+                    await executeSMBCommand(client, () => client.unlink(itemPath)); // Delete file
+                }
+            } catch (err) {
+                if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+                console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
             }
-        } catch (err) {
-            if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') continue;
-            // Log warning but continue best-effort
-            console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
-        }
+        }));
     }
 
     // 3. Delete the directory itself (with simple retry for sync lag)
@@ -1015,7 +1018,8 @@ app.post('/api/delete', async (req, res) => {
             clearSMBSession(config);
             dedicatedClient = getSMBClient(config, { forceNew: true });
             const client = dedicatedClient;
-            for (const item of items) {
+            
+            await Promise.all(items.map(async (item) => {
                 const smbPath = toSMBPath(item);
                 try {
                     const stats = await executeSMBCommand(client, () => client.stat(smbPath));
@@ -1033,7 +1037,7 @@ app.post('/api/delete', async (req, res) => {
                          throw e;
                     }
                 }
-            }
+            }));
         } else {
             const client = getWebDAVClient(config);
             await Promise.all(items.map(item => client.deleteFile(item.replace(/^\/+/, ''))));
