@@ -1055,6 +1055,27 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                 retryCount++;
                 continue;
             }
+
+            // Attempt to clear Read-Only/Hidden if deletion failed due to access denied
+            if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
+                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes and retry... (${retryCount + 1}/5)`);
+                 try {
+                     if (typeof client.setFileAttributes === 'function') {
+                         await executeSMBCommand(client, () => client.setFileAttributes(dirPath, { 
+                             hidden: false, 
+                             readOnly: false, 
+                             system: false,
+                             archive: false
+                         }));
+                     }
+                 } catch (attrErr) {
+                    console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
+                 }
+                 await new Promise(r => setTimeout(r, 200));
+                 retryCount++;
+                 continue;
+            }
+
             throw err;
         }
     }
