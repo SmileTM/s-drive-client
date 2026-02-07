@@ -621,6 +621,7 @@ app.get('/api/raw', async (req, res) => {
                 const stream = await executeSMBCommand(client, () => client.createReadStream(smbPath, options));
                 
                 stream.on('error', (err) => {
+                    if (err.code === 'STATUS_FILE_CLOSED') return;
                     console.error('SMB Stream Error', err);
                 });
 
@@ -756,6 +757,7 @@ app.get('/api/preview', async (req, res) => {
              try {
                  inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
                  inputStream.on('error', (err) => {
+                     if (err.code === 'STATUS_FILE_CLOSED') return;
                      console.error('[Preview Stream Error]', err);
                  });
              } catch(e) {
