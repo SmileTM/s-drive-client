@@ -672,6 +672,13 @@ const ServerAPI = {
     const res = await axios.get(`/api/search?query=${encodeURIComponent(query)}&drive=${driveId}&path=${encodeURIComponent(rootPath)}`);
     return res.data;
   },
+  cancelTask: async (taskId) => {
+      try {
+          await axios.post('/api/cancel', { taskId });
+      } catch (e) {
+          console.error('[ServerAPI] Cancel failed', e);
+      }
+  },
   requestPermissions: async () => {}
 };
 

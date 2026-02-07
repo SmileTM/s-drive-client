@@ -60,6 +60,23 @@ function createProgressStream(taskId, totalSize) {
     });
 }
 
+const activeTasks = new Map(); // taskId -> { cancel: Function }
+
+app.post('/api/cancel', (req, res) => {
+    const { taskId } = req.body;
+    if (activeTasks.has(taskId)) {
+        console.log(`[API] Cancelling task ${taskId}`);
+        const task = activeTasks.get(taskId);
+        if (task && typeof task.cancel === 'function') {
+            task.cancel();
+        }
+        activeTasks.delete(taskId);
+        res.json({ success: true });
+    } else {
+        res.status(404).json({ error: 'Task not found or already completed' });
+    }
+});
+
 const PORT = process.env.PORT || 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
 const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
@@ -1188,6 +1205,18 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                 readStream = await srcAdapter.createReadStream(srcPath);
                 progressStream = createProgressStream(taskId, stats.size);
                 writeStream = await dstAdapter.createWriteStream(dstPath);
+
+                if (taskId) {
+                    activeTasks.set(taskId, {
+                        cancel: () => {
+                            console.log(`[Task ${taskId}] Cancellation triggered`);
+                            if (readStream) readStream.destroy();
+                            if (writeStream) writeStream.destroy();
+                            if (progressStream) progressStream.destroy();
+                        }
+                    });
+                }
+                
                 await pipeline(readStream, progressStream, writeStream);
             } catch (err) {
                 if (readStream) readStream.destroy();
@@ -1207,10 +1236,17 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                     // Ignore STATUS_FILE_CLOSED as it likely means the server closed the handle before we could destroy the stream
                     if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
                         // Benign error during cleanup, silent ignore
+                    } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+                        // Stream destroyed (likely via cancel)
+                         const cancelErr = new Error('Transfer Cancelled');
+                         cancelErr.code = 'CANCELLED';
+                         throw cancelErr;
                     } else {
                         throw err;
                     }
                 }
+            } finally {
+                if (taskId) activeTasks.delete(taskId);
             }
         };
 
@@ -1440,17 +1476,32 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     
                     const readStream = fs.createReadStream(file.path);
                     const progressStream = createProgressStream(queryTaskId, file.size);
+                    let writeStream = null;
+
+                    if (queryTaskId) {
+                        activeTasks.set(queryTaskId, {
+                            cancel: () => {
+                                console.log(`[Upload ${queryTaskId}] Cancellation triggered`);
+                                if (readStream) readStream.destroy();
+                                if (progressStream) progressStream.destroy();
+                                if (writeStream && typeof writeStream.destroy === 'function') writeStream.destroy();
+                            }
+                        });
+                    }
 
                     if (config.type === 'smb') {
                         // Use autoCloseTimeout: 0 to prevent STATUS_FILE_CLOSED during upload
                         const client = getSMBClient(config, { autoCloseTimeout: 0 });
                         try {
                             const smbPath = toSMBPath(remotePath);
-                            const writeStream = await client.createWriteStream(smbPath);
+                            writeStream = await client.createWriteStream(smbPath);
                             await pipeline(readStream, progressStream, writeStream);
                         } catch (err) {
                             if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
                                 console.warn(`[Upload Warn] Swallowed cleanup error for ${remotePath}:`, err.message);
+                            } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+                                 // Stream destroyed (likely via cancel)
+                                 throw new Error('Upload Cancelled');
                             } else {
                                 throw err;
                             }
@@ -1459,13 +1510,25 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                         }
                     } else {
                          const client = getWebDAVClient(config);
-                         await client.putFileContents(remotePath, progressStream);
+                         try {
+                             await client.putFileContents(remotePath, progressStream);
+                         } catch (err) {
+                             if (readStream.destroyed || progressStream.destroyed) {
+                                 throw new Error('Upload Cancelled');
+                             }
+                             throw err;
+                         }
                     }
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
-                    console.error(`[Upload] Failed to upload ${file.filename}:`, e);
-                    throw e; 
+                    if (e.message === 'Upload Cancelled') {
+                        console.log(`[Upload] Cancelled: ${file.filename}`);
+                    } else {
+                        console.error(`[Upload] Failed to upload ${file.filename}:`, e);
+                        throw e; 
+                    }
                 } finally {
+                    if (queryTaskId) activeTasks.delete(queryTaskId);
                     await fs.remove(file.path).catch(e => console.error('Failed to cleanup temp file:', e));
                 }
             }
