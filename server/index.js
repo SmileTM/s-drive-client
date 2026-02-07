@@ -133,6 +133,31 @@ const ensureSMBConnected = async (client) => {
     }
 };
 
+const RETRY_ERRORS = ['EPIPE', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENOTFOUND', 'STATUS_NETWORK_NAME_DELETED', 'STATUS_USER_SESSION_DELETED', 'STATUS_CONNECTION_DISCONNECTED', 'STATUS_FILE_CLOSED'];
+
+// Helper: Execute SMB Command with Retry
+const executeSMBCommand = async (client, commandFn) => {
+    try {
+        await ensureSMBConnected(client);
+        return await commandFn();
+    } catch (err) {
+        const isRetryable = RETRY_ERRORS.some(code => 
+            err.code === code || 
+            (err.message && err.message.includes(code))
+        );
+        
+        if (isRetryable) {
+            console.log(`[SMB Retry] Connection error (${err.code || err.message}), reconnecting...`);
+            // Force disconnect/reset state
+            client.disconnect(); 
+            // Retry once
+            await ensureSMBConnected(client);
+            return await commandFn();
+        }
+        throw err;
+    }
+};
+
 // Helper: Normalize file info for frontend
 const normalizeFile = (file, driveId, type = 'webdav') => {
     if (type === 'smb') {
@@ -403,13 +428,13 @@ app.get('/api/files', async (req, res) => {
             res.json({ path: safePath, files: fileList });
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
-            await ensureSMBConnected(client);
             // Strip leading slashes for SMB
             const smbPath = toSMBPath(reqPath);
             
             try {
                 // @marsaud/smb2 readdir returns just names by default.
-                const names = await client.readdir(smbPath);
+                // Wrap readdir in executeSMBCommand
+                const names = await executeSMBCommand(client, () => client.readdir(smbPath));
                 
                 // Process files in chunks to avoid STATUS_INSUFFICIENT_RESOURCES
                 const results = [];
@@ -420,7 +445,8 @@ app.get('/api/files', async (req, res) => {
                     const chunkResults = await Promise.all(chunk.map(async name => {
                         try {
                             const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
-                            const stats = await client.stat(itemPath);
+                            // Wrap stat in executeSMBCommand (concurrently might be heavy, but retry handles dropping)
+                            const stats = await executeSMBCommand(client, () => client.stat(itemPath));
                             
                             // Construct full relative path for frontend
                             const webPath = path.posix.join(reqPath, name);
@@ -522,9 +548,8 @@ app.get('/api/search', async (req, res) => {
         } else if (config.type === 'smb') {
             // SMB Search - Shallow only for now
             const client = getSMBClient(config);
-            await ensureSMBConnected(client);
             const smbPath = toSMBPath(searchPath);
-            const names = await client.readdir(smbPath);
+            const names = await executeSMBCommand(client, () => client.readdir(smbPath));
             const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
             const results = matches.map(name => ({
                 name,
@@ -560,7 +585,6 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const client = getSMBClient(config, { tag: 'preview' });
-            await ensureSMBConnected(client);
             const smbPath = toSMBPath(reqPath);
             
             try {
@@ -576,7 +600,7 @@ app.get('/api/raw', async (req, res) => {
                     res.status(206);
                     
                     // We need file size for Content-Range header
-                    const stats = await client.stat(smbPath);
+                    const stats = await executeSMBCommand(client, () => client.stat(smbPath));
                     const fileSize = stats.size;
                     const finalEnd = end || (fileSize - 1);
                     const chunksize = (finalEnd - start) + 1;
@@ -585,7 +609,7 @@ app.get('/api/raw', async (req, res) => {
                     res.setHeader('Content-Length', chunksize);
                     res.setHeader('Accept-Ranges', 'bytes');
                 } else {
-                    const stats = await client.stat(smbPath);
+                    const stats = await executeSMBCommand(client, () => client.stat(smbPath));
                     res.setHeader('Content-Length', stats.size);
                     res.setHeader('Accept-Ranges', 'bytes');
                 }
@@ -594,7 +618,7 @@ app.get('/api/raw', async (req, res) => {
                 const mimeType = mime.lookup(fileName) || 'application/octet-stream';
                 res.setHeader('Content-Type', mimeType);
 
-                const stream = await client.createReadStream(smbPath, options);
+                const stream = await executeSMBCommand(client, () => client.createReadStream(smbPath, options));
                 
                 stream.on('error', (err) => {
                     console.error('SMB Stream Error', err);
@@ -728,10 +752,9 @@ app.get('/api/preview', async (req, res) => {
              inputStream = fs.createReadStream(absPath);
         } else if (config.type === 'smb') {
              const client = getSMBClient(config, { tag: 'preview' });
-             await ensureSMBConnected(client);
              const smbPath = toSMBPath(reqPath);
              try {
-                 inputStream = await client.createReadStream(smbPath);
+                 inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
                  inputStream.on('error', (err) => {
                      console.error('[Preview Stream Error]', err);
                  });
@@ -781,7 +804,7 @@ app.post('/api/mkdir', async (req, res) => {
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
             const smbPath = toSMBPath(reqPath);
-            await client.mkdir(smbPath);
+            await executeSMBCommand(client, () => client.mkdir(smbPath));
         } else {
             const client = getWebDAVClient(config);
             await client.createDirectory(reqPath);
@@ -795,17 +818,17 @@ app.post('/api/mkdir', async (req, res) => {
 
 // Helper: Recursive SMB Delete
 const rmDirRecursiveSMB = async (client, dirPath) => {
-    const items = await client.readdir(dirPath);
+    const items = await executeSMBCommand(client, () => client.readdir(dirPath));
     for (const item of items) {
         const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
-        const stats = await client.stat(itemPath);
+        const stats = await executeSMBCommand(client, () => client.stat(itemPath));
         if (stats.isDirectory()) {
             await rmDirRecursiveSMB(client, itemPath);
         } else {
-            await client.unlink(itemPath);
+            await executeSMBCommand(client, () => client.unlink(itemPath));
         }
     }
-    await client.rmdir(dirPath);
+    await executeSMBCommand(client, () => client.rmdir(dirPath));
 };
 
 // POST /api/delete
@@ -825,11 +848,11 @@ app.post('/api/delete', async (req, res) => {
             for (const item of items) {
                 const smbPath = toSMBPath(item);
                 try {
-                    const stats = await client.stat(smbPath);
+                    const stats = await executeSMBCommand(client, () => client.stat(smbPath));
                     if (stats.isDirectory()) {
                          await rmDirRecursiveSMB(client, smbPath); 
                     } else {
-                         await client.unlink(smbPath);
+                         await executeSMBCommand(client, () => client.unlink(smbPath));
                     }
                 } catch(e) {
                     // Ignore if not found, else throw
@@ -884,16 +907,16 @@ app.post('/api/move', async (req, res) => {
                 const smbNew = smbDestDir === '\\' || smbDestDir === '' ? fileName : `${smbDestDir}\\${fileName}`;
                 
                 try {
-                    await client.rename(smbOld, smbNew);
+                    await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
                 } catch (e) {
                     if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
                         if (overwrite) {
                             // Delete destination and retry
                             try {
-                                const stats = await client.stat(smbNew);
+                                const stats = await executeSMBCommand(client, () => client.stat(smbNew));
                                 if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
-                                else await client.unlink(smbNew);
-                                await client.rename(smbOld, smbNew);
+                                else await executeSMBCommand(client, () => client.unlink(smbNew));
+                                await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
                             } catch (retryErr) {
                                 throw retryErr;
                             }
@@ -954,16 +977,16 @@ const getFSAdapter = (config) => {
         const client = getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 5 });
         const toSMB = toSMBPath;
         return {
-            stat: async (p) => client.stat(toSMB(p)),
-            readdir: async (p) => client.readdir(toSMB(p)),
-            mkdir: async (p) => client.mkdir(toSMB(p)),
-            createReadStream: async (p) => client.createReadStream(toSMB(p)),
-            createWriteStream: async (p) => client.createWriteStream(toSMB(p)),
+            stat: async (p) => executeSMBCommand(client, () => client.stat(toSMB(p))),
+            readdir: async (p) => executeSMBCommand(client, () => client.readdir(toSMB(p))),
+            mkdir: async (p) => executeSMBCommand(client, () => client.mkdir(toSMB(p))),
+            createReadStream: async (p) => executeSMBCommand(client, () => client.createReadStream(toSMB(p))),
+            createWriteStream: async (p) => executeSMBCommand(client, () => client.createWriteStream(toSMB(p))),
             unlink: async (p) => {
                 const smbP = toSMB(p);
-                const stats = await client.stat(smbP);
+                const stats = await executeSMBCommand(client, () => client.stat(smbP));
                 if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbP);
-                else await client.unlink(smbP);
+                else await executeSMBCommand(client, () => client.unlink(smbP));
             },
             join: (base, name) => path.posix.join(base, name),
             close: async () => client.disconnect()
@@ -1139,15 +1162,15 @@ app.post('/api/rename', async (req, res) => {
             parts.pop();
             const smbNew = [...parts, newName].join('\\');
             try {
-                await client.rename(smbOld, smbNew);
+                await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
             } catch (e) {
                 if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
                     if (overwrite) {
                         try {
-                            const stats = await client.stat(smbNew);
+                            const stats = await executeSMBCommand(client, () => client.stat(smbNew));
                             if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
-                            else await client.unlink(smbNew);
-                            await client.rename(smbOld, smbNew);
+                            else await executeSMBCommand(client, () => client.unlink(smbNew));
+                            await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
                         } catch (retryErr) { throw retryErr; }
                     } else {
                         return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
@@ -1210,8 +1233,7 @@ app.post('/api/prepare-drag', async (req, res) => {
                     
                     if (config.type === 'smb') {
                         const client = getSMBClient(config, { tag: 'preview' });
-                        await ensureSMBConnected(client);
-                        const readStream = await client.createReadStream(toSMBPath(itemPath));
+                        const readStream = await executeSMBCommand(client, () => client.createReadStream(toSMBPath(itemPath)));
                         const writeStream = fs.createWriteStream(tempFilePath);
                         await pipeline(readStream, writeStream);
                     } else {
