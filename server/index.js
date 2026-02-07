@@ -88,7 +88,7 @@ const getSMBClient = (config, options = {}) => {
         password: config.password,
         port: port, // Optional port
         packetConcurrency: 5,
-        autoCloseTimeout: 30000, // Default 30s auto-close for cached clients
+        autoCloseTimeout: 0, // Keep cached connections alive to prevent race conditions
         ...options
     });
 
