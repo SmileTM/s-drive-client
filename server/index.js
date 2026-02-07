@@ -1114,8 +1114,12 @@ app.post('/api/transfer', async (req, res) => {
                     await srcAdapter.unlink(itemPath);
                 }
             } catch (e) {
+                if (e.code === 'EXIST') {
+                     console.log(`[Transfer Info] Target exists, returning 409 for: ${targetPath}`);
+                     return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                }
                 console.error(`[Transfer Failed] ${itemPath} -> ${targetPath}:`, e);
-                if (e.code === 'EXIST' || (e.response && (e.response.status === 412 || e.response.status === 409))) {
+                if (e.response && (e.response.status === 412 || e.response.status === 409)) {
                      return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
                 }
                 throw e; // Stop batch on error
