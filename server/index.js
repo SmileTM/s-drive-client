@@ -1051,15 +1051,15 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
 
     // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
-    while (retryCount < 10) {
+    while (retryCount < 3) {
         let loopClient = client;
         let tempClient = null;
 
         // If stubbornly failing, try a fresh client
-        if (retryCount >= 2 && config) {
+        if (retryCount >= 1 && config) {
             try {
                 // Only log once per stubborn directory (or if retryCount is low enough to care)
-                if (retryCount === 2) console.log(`[Delete] Spawning dedicated fresh client for stubborn directory: ${dirPath}`);
+                if (retryCount === 1) console.log(`[Delete] Spawning dedicated fresh client for stubborn directory: ${dirPath}`);
                 tempClient = getSMBClient(config, { forceNew: true });
                 loopClient = tempClient;
             } catch (e) {
@@ -1090,7 +1090,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
             }
             
             if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
-                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/10)`);
+                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/3)`);
                 
                 // If directory is not empty, try to see WHAT is left and delete it
                 if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
@@ -1111,14 +1111,14 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                 
                 if (tempClient) { try { await tempClient.disconnect(); } catch (e) {} }
 
-                await new Promise(r => setTimeout(r, 1000 + (retryCount * 500))); // Increasing backoff
+                await new Promise(r => setTimeout(r, 200 + (retryCount * 100))); // Reduced backoff
                 retryCount++;
                 continue;
             }
 
             // Attempt to clear Read-Only/Hidden if deletion failed due to access denied
             if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
-                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes and retry... (${retryCount + 1}/10)`);
+                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes and retry... (${retryCount + 1}/3)`);
                  try {
                      if (typeof loopClient.setFileAttributes === 'function') {
                          await executeSMBCommand(loopClient, () => loopClient.setFileAttributes(dirPath, { 
@@ -1134,7 +1134,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                  
                  if (tempClient) { try { await tempClient.disconnect(); } catch (e) {} }
                  
-                 await new Promise(r => setTimeout(r, 500));
+                 await new Promise(r => setTimeout(r, 200));
                  retryCount++;
                  continue;
             }
