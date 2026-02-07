@@ -394,6 +394,8 @@ app.get('/api/files', async (req, res) => {
             } catch (smbErr) {
                  console.error('SMB List Error:', smbErr);
                  res.status(502).json({ error: `SMB Error: ${smbErr.message}` });
+            } finally {
+                await client.disconnect();
             }
 
         } else {
@@ -469,16 +471,20 @@ app.get('/api/search', async (req, res) => {
         } else if (config.type === 'smb') {
             // SMB Search - Shallow only for now
             const client = getSMBClient(config);
-            const smbPath = searchPath.replace(/^\/+/, '').replace(/\//g, '\\');
-            const names = await client.readdir(smbPath);
-            const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
-            const results = matches.map(name => ({
-                name,
-                path: path.posix.join(searchPath, name),
-                isDirectory: false, // Don't know without stat
-                type: mime.lookup(name) || 'application/octet-stream'
-            }));
-            res.json(results);
+            try {
+                const smbPath = searchPath.replace(/^\/+/, '').replace(/\//g, '\\');
+                const names = await client.readdir(smbPath);
+                const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
+                const results = matches.map(name => ({
+                    name,
+                    path: path.posix.join(searchPath, name),
+                    isDirectory: false, // Don't know without stat
+                    type: mime.lookup(name) || 'application/octet-stream'
+                }));
+                res.json(results);
+            } finally {
+                await client.disconnect();
+            }
 
         } else {
             // WebDAV Search (Naive)
@@ -508,42 +514,55 @@ app.get('/api/raw', async (req, res) => {
             const client = getSMBClient(config);
             const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
             
-            const range = req.headers.range;
-            let options = {};
-            
-            if (range) {
-                const parts = range.replace(/bytes=/, "").split("-");
-                const start = parseInt(parts[0], 10);
-                const end = parts[1] ? parseInt(parts[1], 10) : undefined;
-                options.start = start;
-                if (end) options.end = end;
-                res.status(206);
+            try {
+                const range = req.headers.range;
+                let options = {};
                 
-                // We need file size for Content-Range header
-                const stats = await client.stat(smbPath);
-                const fileSize = stats.size;
-                const finalEnd = end || (fileSize - 1);
-                const chunksize = (finalEnd - start) + 1;
+                if (range) {
+                    const parts = range.replace(/bytes=/, "").split("-");
+                    const start = parseInt(parts[0], 10);
+                    const end = parts[1] ? parseInt(parts[1], 10) : undefined;
+                    options.start = start;
+                    if (end) options.end = end;
+                    res.status(206);
+                    
+                    // We need file size for Content-Range header
+                    const stats = await client.stat(smbPath);
+                    const fileSize = stats.size;
+                    const finalEnd = end || (fileSize - 1);
+                    const chunksize = (finalEnd - start) + 1;
 
-                res.setHeader('Content-Range', `bytes ${start}-${finalEnd}/${fileSize}`);
-                res.setHeader('Content-Length', chunksize);
-                res.setHeader('Accept-Ranges', 'bytes');
-            } else {
-                const stats = await client.stat(smbPath);
-                res.setHeader('Content-Length', stats.size);
-                res.setHeader('Accept-Ranges', 'bytes');
+                    res.setHeader('Content-Range', `bytes ${start}-${finalEnd}/${fileSize}`);
+                    res.setHeader('Content-Length', chunksize);
+                    res.setHeader('Accept-Ranges', 'bytes');
+                } else {
+                    const stats = await client.stat(smbPath);
+                    res.setHeader('Content-Length', stats.size);
+                    res.setHeader('Accept-Ranges', 'bytes');
+                }
+
+                const fileName = path.basename(reqPath);
+                const mimeType = mime.lookup(fileName) || 'application/octet-stream';
+                res.setHeader('Content-Type', mimeType);
+
+                const stream = await client.createReadStream(smbPath, options);
+                
+                const cleanup = async () => {
+                    try { await client.disconnect(); } catch (e) { /* ignore */ }
+                };
+                
+                stream.on('end', cleanup);
+                stream.on('error', (err) => {
+                    console.error('SMB Stream Error', err);
+                    cleanup();
+                });
+                res.on('close', cleanup); // Client disconnected
+
+                stream.pipe(res);
+            } catch (e) {
+                await client.disconnect();
+                throw e;
             }
-
-            const fileName = path.basename(reqPath);
-            const mimeType = mime.lookup(fileName) || 'application/octet-stream';
-            res.setHeader('Content-Type', mimeType);
-
-            const stream = await client.createReadStream(smbPath, options);
-            stream.pipe(res);
-            stream.on('error', err => {
-                console.error('SMB Stream Error', err);
-                if(!res.headersSent) res.status(500).end();
-            });
 
         } else {
             const client = getWebDAVClient(config);
@@ -666,7 +685,21 @@ app.get('/api/preview', async (req, res) => {
         } else if (config.type === 'smb') {
              const client = getSMBClient(config);
              const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
-             inputStream = await client.createReadStream(smbPath);
+             try {
+                 inputStream = await client.createReadStream(smbPath);
+                 const cleanup = async () => {
+                     try { await client.disconnect(); } catch (e) {}
+                 };
+                 inputStream.on('end', cleanup);
+                 inputStream.on('error', (err) => {
+                     console.error('[Preview Stream Error]', err);
+                     cleanup();
+                 });
+                 res.on('close', cleanup);
+             } catch(e) {
+                 await client.disconnect();
+                 throw e;
+             }
         } else {
              const client = getWebDAVClient(config);
              inputStream = client.createReadStream(reqPath);
