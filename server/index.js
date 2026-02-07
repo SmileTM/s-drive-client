@@ -1051,9 +1051,8 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
 
     // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
-    // Reduce internal retries to 1. If it fails after cleanup, it's likely a lock issue 
-    // that requires the outer loop to disconnect and reconnect.
-    while (retryCount <= 1) {
+    // Retry up to 3 times to allow for propagation of child deletions (Delete Pending state)
+    while (retryCount < 3) {
         try {
             // console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
             await executeSMBCommand(client, () => client.rmdir(dirPath));
@@ -1073,14 +1072,8 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
             }
             
             if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
-                if (retryCount >= 1) {
-                    // If we already retried and cleaned up once, and still fail, give up
-                    // to let the outer loop handle connection reset.
-                    throw err;
-                }
+                // console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying...`);
 
-                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying and cleaning...`);
-                
                 // If directory is not empty, try to see WHAT is left and delete it
                 if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
                     try {
@@ -1091,21 +1084,20 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                              console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}, cleaning up...`);
                              await processItems(client, remainingItems);
                          } else {
-                             console.warn(`[Delete] Directory ${dirPath} is not empty but readdir found 0 items. Possible hidden/system files?`);
+                             // console.warn(`[Delete] Directory ${dirPath} is not empty but readdir found 0 items.`);
                          }
                     } catch (readErr) {
                         // If readdir fails, maybe it's gone or access denied, just continue to wait/retry
                     }
                 }
 
-                await new Promise(r => setTimeout(r, 200)); 
+                await new Promise(r => setTimeout(r, 500 + (retryCount * 200))); 
                 retryCount++;
                 continue;
             }
 
             // Attempt to clear Read-Only/Hidden if deletion failed due to access denied
             if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
-                 // console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes...`);
                  try {
                      if (typeof client.setFileAttributes === 'function') {
                          await executeSMBCommand(client, () => client.setFileAttributes(dirPath, { 
@@ -1119,7 +1111,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
                  }
                  
-                 await new Promise(r => setTimeout(r, 200));
+                 await new Promise(r => setTimeout(r, 500));
                  retryCount++;
                  continue;
             }
