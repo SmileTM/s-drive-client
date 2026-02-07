@@ -1051,56 +1051,45 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
 
     // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
-    while (retryCount < 3) {
-        let loopClient = client;
-        let tempClient = null;
-
-        // If stubbornly failing, try a fresh client
-        if (retryCount >= 1 && config) {
-            try {
-                // Only log once per stubborn directory (or if retryCount is low enough to care)
-                if (retryCount === 1) console.log(`[Delete] Spawning dedicated fresh client for stubborn directory: ${dirPath}`);
-                tempClient = getSMBClient(config, { forceNew: true });
-                loopClient = tempClient;
-            } catch (e) {
-                console.warn('[Delete] Failed to spawn temp client:', e);
-            }
-        }
-
+    // Reduce internal retries to 1. If it fails after cleanup, it's likely a lock issue 
+    // that requires the outer loop to disconnect and reconnect.
+    while (retryCount <= 1) {
         try {
-            console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
-            await executeSMBCommand(loopClient, () => loopClient.rmdir(dirPath));
+            // console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
+            await executeSMBCommand(client, () => client.rmdir(dirPath));
             
             // Verify deletion
             try {
-                await executeSMBCommand(loopClient, () => loopClient.stat(dirPath));
+                await executeSMBCommand(client, () => client.stat(dirPath));
+                // If stat succeeds, it still exists
                 console.warn(`[Delete Warning] rmdir succeeded for ${dirPath} but it still exists! (Ghost directory?)`);
             } catch (e) {
                 // If stat fails, it's likely gone (good)
             }
-            
-            if (tempClient) {
-                try { await tempClient.disconnect(); } catch (e) {}
-            }
             return;
         } catch (err) {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') {
-                if (tempClient) { try { await tempClient.disconnect(); } catch (e) {} }
                 return;
             }
             
             if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
-                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/3)`);
+                if (retryCount >= 1) {
+                    // If we already retried and cleaned up once, and still fail, give up
+                    // to let the outer loop handle connection reset.
+                    throw err;
+                }
+
+                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying and cleaning...`);
                 
                 // If directory is not empty, try to see WHAT is left and delete it
                 if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
                     try {
-                         let remainingItems = await executeSMBCommand(loopClient, () => loopClient.readdir(dirPath));
+                         let remainingItems = await executeSMBCommand(client, () => client.readdir(dirPath));
                          remainingItems = remainingItems.filter(name => name !== '.' && name !== '..');
                          
                          if (remainingItems.length > 0) {
-                             console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}: [${remainingItems.join(', ')}], cleaning up...`);
-                             await processItems(loopClient, remainingItems);
+                             console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}, cleaning up...`);
+                             await processItems(client, remainingItems);
                          } else {
                              console.warn(`[Delete] Directory ${dirPath} is not empty but readdir found 0 items. Possible hidden/system files?`);
                          }
@@ -1108,20 +1097,18 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                         // If readdir fails, maybe it's gone or access denied, just continue to wait/retry
                     }
                 }
-                
-                if (tempClient) { try { await tempClient.disconnect(); } catch (e) {} }
 
-                await new Promise(r => setTimeout(r, 200 + (retryCount * 100))); // Reduced backoff
+                await new Promise(r => setTimeout(r, 200)); 
                 retryCount++;
                 continue;
             }
 
             // Attempt to clear Read-Only/Hidden if deletion failed due to access denied
             if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
-                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes and retry... (${retryCount + 1}/3)`);
+                 // console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes...`);
                  try {
-                     if (typeof loopClient.setFileAttributes === 'function') {
-                         await executeSMBCommand(loopClient, () => loopClient.setFileAttributes(dirPath, { 
+                     if (typeof client.setFileAttributes === 'function') {
+                         await executeSMBCommand(client, () => client.setFileAttributes(dirPath, { 
                              hidden: false, 
                              readOnly: false, 
                              system: false,
@@ -1132,14 +1119,11 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
                  }
                  
-                 if (tempClient) { try { await tempClient.disconnect(); } catch (e) {} }
-                 
                  await new Promise(r => setTimeout(r, 200));
                  retryCount++;
                  continue;
             }
 
-            if (tempClient) { try { await tempClient.disconnect(); } catch (e) {} }
             throw err;
         }
     }
