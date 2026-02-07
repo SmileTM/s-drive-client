@@ -111,7 +111,7 @@ const normalizeFile = (file, driveId, type = 'webdav') => {
 
 // Helper: SMB Path Normalizer
 const toSMBPath = (p) => {
-    return p.replace(/^\/+/, '').replace(/\//g, '\\').normalize('NFC');
+    return p.replace(/^\/+/, '').replace(/\//g, '\\');
 };
 
 // Helper: Safe path resolution for Local
@@ -566,6 +566,9 @@ app.get('/api/raw', async (req, res) => {
                 stream.pipe(res);
             } catch (e) {
                 await client.disconnect();
+                if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
+                    return res.status(404).send('File not found');
+                }
                 throw e;
             }
 
@@ -703,6 +706,9 @@ app.get('/api/preview', async (req, res) => {
                  res.on('close', cleanup);
              } catch(e) {
                  await client.disconnect();
+                 if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
+                     return res.status(404).send('File not found');
+                 }
                  throw e;
              }
         } else {
