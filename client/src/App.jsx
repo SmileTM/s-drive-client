@@ -901,8 +901,16 @@ function App() {
     executeMove(false);
   };
   
-  const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
-  const handleCopy = () => { setClipboard({ mode: 'copy', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
+  const handleCut = () => { 
+      const selectedItems = files.filter(f => selectedPaths.has(f.path));
+      setClipboard({ mode: 'move', items: selectedItems, driveId: activeDrive }); 
+      setSelectedPaths(new Set()); 
+  };
+  const handleCopy = () => { 
+      const selectedItems = files.filter(f => selectedPaths.has(f.path));
+      setClipboard({ mode: 'copy', items: selectedItems, driveId: activeDrive }); 
+      setSelectedPaths(new Set()); 
+  };
   
   const handlePaste = async () => { 
     if (!clipboard || !clipboard.items) return; 
@@ -919,15 +927,18 @@ function App() {
 
     // 1. Create Tasks
     const batchId = Date.now();
-    const newTasks = items.map((path, i) => ({
-        id: `transfer_${batchId}_${i}`,
-        name: path.split('/').pop(),
-        status: 'pending',
-        currentBytes: 0,
-        totalBytes: 0,
-        speed: 0,
-        type: isMove ? 'move' : 'copy'
-    }));
+    const newTasks = items.map((item, i) => {
+        const path = item.path || item; // Handle object or string
+        return {
+            id: `transfer_${batchId}_${i}`,
+            name: path.split('/').pop(),
+            status: 'pending',
+            currentBytes: 0,
+            totalBytes: item.size || 0, // Use pre-known size
+            speed: 0,
+            type: isMove ? 'move' : 'copy'
+        };
+    });
     setTasks(prev => [...newTasks, ...prev]);
 
     // 2. Process Queue Logic
@@ -977,7 +988,8 @@ function App() {
 
     // 3. Iterate and Transfer
     for (let i = 0; i < items.length; i++) {
-        const itemPath = items[i];
+        const itemObj = items[i];
+        const itemPath = itemObj.path || itemObj;
         const taskId = newTasks[i].id;
         const itemName = itemPath.split('/').pop();
         const itemsWithId = [{ path: itemPath, id: taskId }];
