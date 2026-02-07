@@ -1161,28 +1161,58 @@ app.post('/api/delete', async (req, res) => {
             }));
         } else if (config.type === 'smb') {
             clearSMBSession(config);
-            dedicatedClient = getSMBClient(config, { forceNew: true });
-            const client = dedicatedClient;
             
-            await Promise.all(items.map(async (item) => {
-                const smbPath = toSMBPath(item);
+            let attempts = 0;
+            const MAX_RETRIES = 3;
+            let lastError = null;
+
+            while (attempts < MAX_RETRIES) {
+                attempts++;
+                dedicatedClient = getSMBClient(config, { forceNew: true });
+                const client = dedicatedClient;
+
                 try {
-                    const stats = await executeSMBCommand(client, () => client.stat(smbPath));
-                    if (stats.isDirectory()) {
-                         await rmDirRecursiveSMB(client, smbPath, config); 
-                    } else {
-                         await executeSMBCommand(client, () => client.unlink(smbPath));
-                    }
-                } catch(e) {
-                    // Ignore if not found or pending delete
-                    const isNotFound = e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.message?.includes('STATUS_OBJECT_NAME_NOT_FOUND') || e.message?.includes('STATUS_NoSuchFile');
-                    const isPending = e.code === 'STATUS_DELETE_PENDING' || e.message?.includes('STATUS_DELETE_PENDING');
+                    await Promise.all(items.map(async (item) => {
+                        const smbPath = toSMBPath(item);
+                        try {
+                            const stats = await executeSMBCommand(client, () => client.stat(smbPath));
+                            if (stats.isDirectory()) {
+                                await rmDirRecursiveSMB(client, smbPath, config); 
+                            } else {
+                                await executeSMBCommand(client, () => client.unlink(smbPath));
+                            }
+                        } catch(e) {
+                            // Ignore if not found or pending delete
+                            const isNotFound = e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.message?.includes('STATUS_OBJECT_NAME_NOT_FOUND') || e.message?.includes('STATUS_NoSuchFile');
+                            const isPending = e.code === 'STATUS_DELETE_PENDING' || e.message?.includes('STATUS_DELETE_PENDING');
+                            
+                            if (!isNotFound && !isPending) {
+                                throw e;
+                            }
+                        }
+                    }));
                     
-                    if (!isNotFound && !isPending) {
-                         throw e;
+                    // Success!
+                    break;
+                } catch (err) {
+                    lastError = err;
+                    console.error(`[Delete] Attempt ${attempts}/${MAX_RETRIES} failed: ${err.message}. Reconnecting...`);
+                    
+                    if (dedicatedClient) {
+                        try { dedicatedClient.disconnect(); } catch(e) {}
+                        dedicatedClient = null;
+                    }
+                    
+                    if (attempts < MAX_RETRIES) {
+                        await new Promise(r => setTimeout(r, 1000)); // Wait for locks to release
                     }
                 }
-            }));
+            }
+
+            if (lastError && attempts === MAX_RETRIES) {
+                throw lastError;
+            }
+
         } else {
             const client = getWebDAVClient(config);
             await Promise.all(items.map(item => client.deleteFile(item.replace(/^\/+/, ''))));
