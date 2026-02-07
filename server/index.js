@@ -1230,21 +1230,19 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                     } catch (retryErr) {
                         throw retryErr; // Fail if delete fails or retry fails
                     }
-                } else {
-                    // Ignore STATUS_FILE_CLOSED as it likely means the server closed the handle before we could destroy the stream
-                    if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                        // Benign error during cleanup, silent ignore
-                    } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
-                        // Stream destroyed (likely via cancel)
-                         console.log(`[Transfer] Cancelled, cleaning up: ${dstPath}`);
-                         try { await dstAdapter.unlink(dstPath); } catch(cleanupErr) { console.warn('[Transfer] Cleanup failed:', cleanupErr.message); }
+                } else if (!retry && err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                    console.warn(`[Transfer Warn] STATUS_FILE_CLOSED for ${dstPath}. Retrying...`);
+                    await performCopy(true);
+                } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+                    // Stream destroyed (likely via cancel)
+                    console.log(`[Transfer] Cancelled, cleaning up: ${dstPath}`);
+                    try { await dstAdapter.unlink(dstPath); } catch(cleanupErr) { console.warn('[Transfer] Cleanup failed:', cleanupErr.message); }
 
-                         const cancelErr = new Error('Transfer Cancelled');
-                         cancelErr.code = 'CANCELLED';
-                         throw cancelErr;
-                    } else {
-                        throw err;
-                    }
+                    const cancelErr = new Error('Transfer Cancelled');
+                    cancelErr.code = 'CANCELLED';
+                    throw cancelErr;
+                } else {
+                    throw err;
                 }
             } finally {
                 if (taskId) activeTasks.delete(taskId);
