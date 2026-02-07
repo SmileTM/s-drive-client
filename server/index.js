@@ -954,6 +954,8 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
     let items = [];
     try {
         items = await executeSMBCommand(client, () => client.readdir(dirPath));
+        // Filter out . and .. if they exist (though smb2 usually handles this, it's safer)
+        items = items.filter(name => name !== '.' && name !== '..');
     } catch (err) {
         if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
         throw err;
@@ -975,6 +977,33 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                     }
                 } catch (err) {
                     if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+                    
+                    // Try to clear Read-Only attribute if deletion failed
+                    if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
+                        try {
+                             console.log(`[Delete] Attempting to clear Read-Only/Hidden for ${itemPath}`);
+                             // 0x80 = Normal, 0 = Clear all? 
+                             // SMB2 usually exposes setFileAttributes or similar?
+                             // @marsaud/smb2 might not expose it directly on 'client', let's check if it has a way.
+                             // Standard fs doesn't, but SMB protocol does.
+                             // If client has setMetadata or similar?
+                             // If not available, we can't do much but log.
+                             if (typeof client.setFileAttributes === 'function') {
+                                 await executeSMBCommand(client, () => client.setFileAttributes(itemPath, { 
+                                     hidden: false, 
+                                     readOnly: false, 
+                                     system: false,
+                                     archive: false
+                                 }));
+                                 // Retry delete once
+                                 await executeSMBCommand(client, () => client.unlink(itemPath));
+                                 return;
+                             }
+                        } catch (attrErr) {
+                            console.warn(`[Delete] Failed to clear attributes for ${itemPath}:`, attrErr.message);
+                        }
+                    }
+
                     console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
                 }
             }));
@@ -999,9 +1028,11 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                 // If directory is not empty, try to see WHAT is left and delete it
                 if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
                     try {
-                         const remainingItems = await executeSMBCommand(client, () => client.readdir(dirPath));
+                         let remainingItems = await executeSMBCommand(client, () => client.readdir(dirPath));
+                         remainingItems = remainingItems.filter(name => name !== '.' && name !== '..');
+                         
                          if (remainingItems.length > 0) {
-                             console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}, cleaning up...`);
+                             console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}: [${remainingItems.join(', ')}], cleaning up...`);
                              await processItems(remainingItems);
                          }
                     } catch (readErr) {
