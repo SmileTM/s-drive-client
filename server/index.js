@@ -1024,7 +1024,7 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
     while (retryCount < 5) {
         try {
             await executeSMBCommand(client, () => client.rmdir(dirPath));
-            break;
+            return;
         } catch (err) {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
             
