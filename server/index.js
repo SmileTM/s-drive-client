@@ -1427,7 +1427,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                         throw retryErr; // Fail if delete fails or retry fails
                     }
                 } else if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                    console.warn(`[Transfer Warn] STATUS_FILE_CLOSED (benign) for ${dstPath}. Ignoring.`);
+                    // console.warn(`[Transfer Warn] STATUS_FILE_CLOSED (benign) for ${dstPath}. Ignoring.`);
                 } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
                     // Stream destroyed (likely via cancel)
                     console.log(`[Transfer] Cancelled, cleaning up: ${dstPath}`);
@@ -1789,7 +1789,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                                         throw retryErr; 
                                     }
                                 } else if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                                    console.warn(`[Upload Warn] STATUS_FILE_CLOSED (benign) for ${remotePath}. Ignoring.`);
+                                    // console.warn(`[Upload Warn] STATUS_FILE_CLOSED (benign) for ${remotePath}. Ignoring.`);
                                 } else {
                                     throw err;
                                 }
