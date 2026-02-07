@@ -333,12 +333,12 @@ function App() {
               const results = await api.searchItems(searchQuery, activeDrive, '/'); 
               setSearchResults(results);
           } else {
-              showAlert("Global search not supported on mobile yet", "Feature Unavailable", 'warning');
+              showAlert(t.globalSearchNotSupported, t.featureUnavailable, 'warning');
               setIsGlobalSearch(false);
           }
       } catch (err) {
           console.error(err);
-          showAlert('Search failed', t.failed, 'error');
+          showAlert(t.searchFailed, t.failed, 'error');
           setIsGlobalSearch(false);
       } finally {
           setIsSearching(false);
@@ -1017,7 +1017,7 @@ function App() {
                 localStorage.setItem('last_path', '/');
               }
               fetchDrives();
-            } catch (err) { showAlert('Failed to remove drive', t.failed, 'error'); }
+            } catch (err) { showAlert(t.removeDriveFailed, t.failed, 'error'); }
         }
     });
   };
@@ -1036,7 +1036,7 @@ function App() {
                 setDrives(prev => prev.map(d => d.id === id ? { ...d, name: newName } : d));
             } catch (err) {
                 if (err.response?.status === 409) showAlert(t.nameTaken, t.failed, 'warning');
-                else showAlert('Failed to update name', t.failed, 'error');
+                else showAlert(t.updateNameFailed, t.failed, 'error');
             }
         }
     });
@@ -1136,7 +1136,7 @@ function App() {
       } else if (task.type === 'download' && task.fullPath) {
           handleDownload({ name: task.name, path: task.fullPath, size: task.size });
       } else {
-          showAlert("Retry not supported for this task type", "Info", 'warning');
+          showAlert(t.retryNotSupported, "Info", 'warning');
       }
   };
 

@@ -73,13 +73,14 @@ const getSMBClient = (config) => {
         }
     }
 
+    const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
+
     return new SMB2({
-        share: `\\\\${address}\\${config.share}`,
+        share: `\\\\${address}\\${cleanShare}`,
         domain: config.domain || '',
         username: config.username,
         password: config.password,
-        port: port, // Optional port
-        autoCloseTimeout: 0 // Keep connection open for a bit if possible, or 0 for default
+        port: port // Optional port
     });
 };
 
@@ -258,6 +259,9 @@ app.post('/api/drives/test', async (req, res) => {
         }
     } catch (err) {
         console.error('[Drive Test Failed]', err);
+        if (err.code === 'STATUS_BAD_NETWORK_NAME') {
+             return res.status(400).json({ error: 'Share Name Not Found', details: `The share '${config.share}' does not exist on this host. Check the name in Finder/Explorer.` });
+        }
         res.status(400).json({ error: 'Connection failed', details: err.message });
     }
 });
@@ -351,26 +355,35 @@ app.get('/api/files', async (req, res) => {
             try {
                 // @marsaud/smb2 readdir returns just names by default.
                 const names = await client.readdir(smbPath);
-                const results = await Promise.all(names.map(async name => {
-                     try {
-                         const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
-                         const stats = await client.stat(itemPath);
-                         
-                         // Construct full relative path for frontend
-                         const webPath = path.posix.join(reqPath, name);
-                         
-                         return {
-                             name: name,
-                             path: webPath,
-                             isDirectory: stats.isDirectory(),
-                             size: stats.size,
-                             mtime: stats.changeTime,
-                             type: stats.isDirectory() ? 'folder' : mime.lookup(name) || 'application/octet-stream'
-                         };
-                     } catch(e) {
-                         return null; 
-                     }
-                }));
+                
+                // Process files in chunks to avoid STATUS_INSUFFICIENT_RESOURCES
+                const results = [];
+                const CHUNK_SIZE = 5;
+                
+                for (let i = 0; i < names.length; i += CHUNK_SIZE) {
+                    const chunk = names.slice(i, i + CHUNK_SIZE);
+                    const chunkResults = await Promise.all(chunk.map(async name => {
+                        try {
+                            const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
+                            const stats = await client.stat(itemPath);
+                            
+                            // Construct full relative path for frontend
+                            const webPath = path.posix.join(reqPath, name);
+                            
+                            return {
+                                name: name,
+                                path: webPath,
+                                isDirectory: stats.isDirectory(),
+                                size: stats.size,
+                                mtime: stats.changeTime,
+                                type: stats.isDirectory() ? 'folder' : mime.lookup(name) || 'application/octet-stream'
+                            };
+                        } catch(e) {
+                            return null; 
+                        }
+                    }));
+                    results.push(...chunkResults);
+                }
                 
                 res.json({
                     path: reqPath,
@@ -733,7 +746,7 @@ app.post('/api/delete', async (req, res) => {
             }));
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
-            await Promise.all(items.map(async item => {
+            for (const item of items) {
                 const smbPath = item.replace(/^\/+/, '').replace(/\//g, '\\');
                 try {
                     const stats = await client.stat(smbPath);
@@ -748,7 +761,7 @@ app.post('/api/delete', async (req, res) => {
                          throw e;
                     }
                 }
-            }));
+            }
         } else {
             const client = getWebDAVClient(config);
             await Promise.all(items.map(item => client.deleteFile(item.replace(/^\/+/, ''))));
@@ -777,14 +790,14 @@ app.post('/api/move', async (req, res) => {
             }));
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
-            await Promise.all(items.map(item => {
+            for (const item of items) {
                 const smbOld = item.replace(/^\/+/, '').replace(/\//g, '\\');
                 const fileName = path.basename(item);
                 const smbDestDir = destination.replace(/^\/+/, '').replace(/\//g, '\\');
                 const smbNew = smbDestDir === '\\' || smbDestDir === '' ? fileName : `${smbDestDir}\\${fileName}`;
                 
-                return client.rename(smbOld, smbNew);
-            }));
+                await client.rename(smbOld, smbNew);
+            }
         } else {
             const client = getWebDAVClient(config);
             await Promise.all(items.map(item => {

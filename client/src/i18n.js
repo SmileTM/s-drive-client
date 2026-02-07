@@ -91,7 +91,16 @@ export const translations = {
     failed: "Failed",
     retry: "Retry",
     totalSpeed: "Total Speed: {speed}",
-    remainingFiles: "Remaining: {count} files"
+    remainingFiles: "Remaining: {count} files",
+    // Errors & Alerts
+    searchFailed: "Search failed",
+    removeDriveFailed: "Failed to remove drive",
+    updateNameFailed: "Failed to update name",
+    retryNotSupported: "Retry not supported for this task type",
+    globalSearchNotSupported: "Global search not supported on mobile yet",
+    featureUnavailable: "Feature Unavailable",
+    shareNameNotFound: "Share Name Not Found. Please check the share name.",
+    unknownError: "Unknown Error"
   },
   zh: {
     appTitle: "云盘管理",
@@ -185,6 +194,15 @@ export const translations = {
     failed: "失败",
     retry: "重试",
     totalSpeed: "总速度: {speed}",
-    remainingFiles: "剩余: {count} 个文件"
+    remainingFiles: "剩余: {count} 个文件",
+    // Errors & Alerts
+    searchFailed: "搜索失败",
+    removeDriveFailed: "移除网盘失败",
+    updateNameFailed: "更新名称失败",
+    retryNotSupported: "此任务类型不支持重试",
+    globalSearchNotSupported: "移动端暂不支持全局搜索",
+    featureUnavailable: "功能未开放",
+    shareNameNotFound: "共享名称未找到，请检查共享名是否正确。",
+    unknownError: "未知错误"
   }
 };

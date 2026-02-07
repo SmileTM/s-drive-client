@@ -100,6 +100,8 @@ const AddDriveModal = ({ onClose, onAdded, lang = 'en' }) => {
         } else {
           alert(t.driveAccountAdded);
         }
+      } else if (msg.includes('Share Name Not Found')) {
+          alert(t.shareNameNotFound);
       } else {
         alert(`${t.failedToAdd}: ${msg}`);
       }
