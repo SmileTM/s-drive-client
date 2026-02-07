@@ -260,7 +260,7 @@ const normalizeFile = (file, driveId, type = 'webdav') => {
             path: file.name, // SMB returns name relative to listed folder usually, parent context needed for full path?
             isDirectory: file.isDirectory(),
             size: file.size,
-            mtime: file.changeTime, // SMB2 uses changeTime/lastWriteTime
+            mtime: file.lastWriteTime, // SMB2 uses changeTime/lastWriteTime
             type: file.isDirectory() ? 'folder' : mime.lookup(file.name) || 'application/octet-stream'
         };
     }
@@ -549,7 +549,7 @@ app.get('/api/files', async (req, res) => {
                                 path: webPath,
                                 isDirectory: stats.isDirectory(),
                                 size: stats.size,
-                                mtime: stats.changeTime,
+                                mtime: stats.lastWriteTime,
                                 type: stats.isDirectory() ? 'folder' : mime.lookup(name) || 'application/octet-stream'
                             };
                         } catch(e) {
