@@ -997,20 +997,35 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
             }
         }
 
-        // Copy File
-        const readStream = await srcAdapter.createReadStream(srcPath);
-        const writeStream = await dstAdapter.createWriteStream(dstPath);
-        
-        try {
-            await pipeline(readStream, writeStream);
-        } catch (err) {
-            // Ignore STATUS_FILE_CLOSED as it likely means the server closed the handle before we could destroy the stream
-            if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
-                console.warn(`[Transfer Warn] Swallowed cleanup error for ${srcPath}:`, err.message);
-            } else {
-                throw err;
+        // Helper to perform copy with retry on collision
+        const performCopy = async (retry = false) => {
+            const readStream = await srcAdapter.createReadStream(srcPath);
+            const writeStream = await dstAdapter.createWriteStream(dstPath);
+            
+            try {
+                await pipeline(readStream, writeStream);
+            } catch (err) {
+                // Handle SMB collision if overwriting is enabled
+                if (overwrite && !retry && (err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.message?.includes('STATUS_OBJECT_NAME_COLLISION'))) {
+                    console.log(`[Transfer] Collision detected for ${dstPath}. Deleting and retrying...`);
+                    try {
+                        await dstAdapter.unlink(dstPath);
+                        await performCopy(true); // Retry once
+                    } catch (retryErr) {
+                        throw retryErr; // Fail if delete fails or retry fails
+                    }
+                } else {
+                    // Ignore STATUS_FILE_CLOSED as it likely means the server closed the handle before we could destroy the stream
+                    if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                        console.warn(`[Transfer Warn] Swallowed cleanup error for ${srcPath}:`, err.message);
+                    } else {
+                        throw err;
+                    }
+                }
             }
-        }
+        };
+
+        await performCopy();
     }
 };
 
