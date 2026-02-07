@@ -792,6 +792,7 @@ app.get('/api/preview', async (req, res) => {
 
 // POST /api/mkdir
 app.post('/api/mkdir', async (req, res) => {
+    let dedicatedClient = null;
     try {
         const { path: reqPath, drive: driveId = 'local' } = req.body;
         console.log(`[DEBUG] POST /api/mkdir path="${reqPath}" drive="${driveId}"`);
@@ -801,7 +802,9 @@ app.post('/api/mkdir', async (req, res) => {
             const absPath = resolveSafePath(reqPath);
             await fs.ensureDir(absPath);
         } else if (config.type === 'smb') {
-            const client = getSMBClient(config);
+            // Use dedicated client for Write ops to prevent affecting read ops on shared connection
+            dedicatedClient = getSMBClient(config, { forceNew: true });
+            const client = dedicatedClient;
             const smbPath = toSMBPath(reqPath);
             
             // Retry loop to handle race condition where folder is still "deleting"
@@ -828,6 +831,8 @@ app.post('/api/mkdir', async (req, res) => {
     } catch (err) {
         console.error('[Mkdir Error]', err);
         res.status(500).json({ error: err.message });
+    } finally {
+        if (dedicatedClient) dedicatedClient.disconnect();
     }
 });
 
@@ -866,6 +871,7 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
 
 // POST /api/delete
 app.post('/api/delete', async (req, res) => {
+    let dedicatedClient = null;
     try {
         const { items, drive: driveId = 'local' } = req.body;
         console.log(`[DEBUG] POST /api/delete count=${items?.length} drive="${driveId}"`);
@@ -877,7 +883,8 @@ app.post('/api/delete', async (req, res) => {
                 await fs.remove(absPath);
             }));
         } else if (config.type === 'smb') {
-            const client = getSMBClient(config);
+            dedicatedClient = getSMBClient(config, { forceNew: true });
+            const client = dedicatedClient;
             for (const item of items) {
                 const smbPath = toSMBPath(item);
                 try {
@@ -905,6 +912,8 @@ app.post('/api/delete', async (req, res) => {
     } catch (err) {
         console.error('[Delete Error]', err);
         res.status(500).json({ error: err.message });
+    } finally {
+        if (dedicatedClient) dedicatedClient.disconnect();
     }
 });
 
