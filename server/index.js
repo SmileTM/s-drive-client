@@ -1288,7 +1288,11 @@ app.post('/api/transfer', async (req, res) => {
                      console.log(`[Transfer Info] Target exists, returning 409 for: ${targetPath}`);
                      return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
                 }
-                console.error(`[Transfer Failed] ${itemPath} -> ${targetPath}:`, e);
+                if (e.code === 'CANCELLED' || e.message === 'Transfer Cancelled') {
+                    console.log(`[Transfer Info] Transfer cancelled: ${itemPath} -> ${targetPath}`);
+                } else {
+                    console.error(`[Transfer Failed] ${itemPath} -> ${targetPath}:`, e);
+                }
                 if (e.response && (e.response.status === 412 || e.response.status === 409)) {
                      return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
                 }
@@ -1299,6 +1303,9 @@ app.post('/api/transfer', async (req, res) => {
     } catch (err) {
         if (!res.headersSent) {
              if (err.code === 'EXIST') return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+             if (err.code === 'CANCELLED' || err.message === 'Transfer Cancelled') {
+                 return res.json({ success: false, error: 'Cancelled' });
+             }
              console.error('[Transfer Error]', err);
              res.status(500).json({ error: err.message });
         }
@@ -1658,6 +1665,9 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
         }
         res.json({ success: true });
     } catch (err) {
+        if (err.message === 'Upload Cancelled') {
+            return res.json({ success: false, error: 'Cancelled' });
+        }
         console.error('[Upload API Error]', err);
         if (uploadedFiles.length > 0 && driveId !== 'local') {
             for (const file of uploadedFiles) {
