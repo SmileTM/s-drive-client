@@ -817,17 +817,35 @@ app.post('/api/mkdir', async (req, res) => {
 
 // Helper: Recursive SMB Delete
 const rmDirRecursiveSMB = async (client, dirPath) => {
-    const items = await executeSMBCommand(client, () => client.readdir(dirPath));
+    let items = [];
+    try {
+        items = await executeSMBCommand(client, () => client.readdir(dirPath));
+    } catch (err) {
+        if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+        throw err;
+    }
+
     for (const item of items) {
         const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
-        const stats = await executeSMBCommand(client, () => client.stat(itemPath));
-        if (stats.isDirectory()) {
-            await rmDirRecursiveSMB(client, itemPath);
-        } else {
-            await executeSMBCommand(client, () => client.unlink(itemPath));
+        try {
+            const stats = await executeSMBCommand(client, () => client.stat(itemPath));
+            if (stats.isDirectory()) {
+                await rmDirRecursiveSMB(client, itemPath);
+            } else {
+                await executeSMBCommand(client, () => client.unlink(itemPath));
+            }
+        } catch (err) {
+            if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') continue;
+            throw err;
         }
     }
-    await executeSMBCommand(client, () => client.rmdir(dirPath));
+
+    try {
+        await executeSMBCommand(client, () => client.rmdir(dirPath));
+    } catch (err) {
+        if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+        throw err;
+    }
 };
 
 // POST /api/delete
@@ -854,8 +872,11 @@ app.post('/api/delete', async (req, res) => {
                          await executeSMBCommand(client, () => client.unlink(smbPath));
                     }
                 } catch(e) {
-                    // Ignore if not found, else throw
-                    if (!e.message.includes('STATUS_OBJECT_NAME_NOT_FOUND') && !e.message.includes('STATUS_NoSuchFile')) {
+                    // Ignore if not found or pending delete
+                    const isNotFound = e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.message?.includes('STATUS_OBJECT_NAME_NOT_FOUND') || e.message?.includes('STATUS_NoSuchFile');
+                    const isPending = e.code === 'STATUS_DELETE_PENDING' || e.message?.includes('STATUS_DELETE_PENDING');
+                    
+                    if (!isNotFound && !isPending) {
                          throw e;
                     }
                 }
