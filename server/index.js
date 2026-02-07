@@ -81,6 +81,7 @@ const getSMBClient = (config, options = {}) => {
         username: config.username,
         password: config.password,
         port: port, // Optional port
+        packetConcurrency: 5,
         ...options
     });
 };
@@ -1095,9 +1096,13 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
 
                     if (config.type === 'smb') {
                         const client = getSMBClient(config);
-                        const smbPath = remotePath.replace(/^\/+/, '').replace(/\//g, '\\');
-                        const writeStream = await client.createWriteStream(smbPath);
-                        await pipeline(readStream, writeStream);
+                        try {
+                            const smbPath = remotePath.replace(/^\/+/, '').replace(/\//g, '\\');
+                            const writeStream = await client.createWriteStream(smbPath);
+                            await pipeline(readStream, writeStream);
+                        } finally {
+                            await client.disconnect();
+                        }
                     } else {
                          const client = getWebDAVClient(config);
                          await client.putFileContents(remotePath, readStream);
