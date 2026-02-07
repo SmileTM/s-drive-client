@@ -1055,12 +1055,15 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
 
         // Helper to perform copy with retry on collision
         const performCopy = async (retry = false) => {
-            const readStream = await srcAdapter.createReadStream(srcPath);
-            const writeStream = await dstAdapter.createWriteStream(dstPath);
-            
+            let readStream, writeStream;
             try {
+                readStream = await srcAdapter.createReadStream(srcPath);
+                writeStream = await dstAdapter.createWriteStream(dstPath);
                 await pipeline(readStream, writeStream);
             } catch (err) {
+                if (readStream) readStream.destroy();
+                if (writeStream) writeStream.destroy();
+
                 // Handle SMB collision if overwriting is enabled
                 if (overwrite && !retry && (err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.message?.includes('STATUS_OBJECT_NAME_COLLISION'))) {
                     console.log(`[Transfer] Collision detected for ${dstPath}. Deleting and retrying...`);
