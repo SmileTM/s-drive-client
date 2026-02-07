@@ -231,23 +231,33 @@ const ensureSMBConnected = async (client) => {
 const RETRY_ERRORS = ['EPIPE', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENOTFOUND', 'STATUS_NETWORK_NAME_DELETED', 'STATUS_USER_SESSION_DELETED', 'STATUS_CONNECTION_DISCONNECTED', 'STATUS_FILE_CLOSED'];
 
 // Helper: Execute SMB Command with Retry
-const executeSMBCommand = async (client, commandFn) => {
+const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
+    const run = async () => {
+        if (timeoutMs > 0) {
+            return Promise.race([
+                commandFn(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('SMB Command Timeout')), timeoutMs))
+            ]);
+        }
+        return commandFn();
+    };
+
     try {
         await ensureSMBConnected(client);
-        return await commandFn();
+        return await run();
     } catch (err) {
         const isRetryable = RETRY_ERRORS.some(code => 
             err.code === code || 
             (err.message && err.message.includes(code))
         );
         
-        if (isRetryable) {
-            console.log(`[SMB Retry] Connection error (${err.code || err.message}), reconnecting...`);
+        if (isRetryable || err.message === 'SMB Command Timeout') {
+            console.log(`[SMB Retry] Error (${err.code || err.message}), reconnecting...`);
             // Force disconnect/reset state
-            client.disconnect(); 
+            try { client.disconnect(); } catch(e) {} 
             // Retry once
             await ensureSMBConnected(client);
-            return await commandFn();
+            return await commandFn(); // Retry without timeout wrapper or with? Let's retry raw command to avoid double timeout race if just a hiccup.
         }
         throw err;
     }
@@ -528,8 +538,8 @@ app.get('/api/files', async (req, res) => {
             
             try {
                 // @marsaud/smb2 readdir returns just names by default.
-                // Wrap readdir in executeSMBCommand
-                const names = await executeSMBCommand(client, () => client.readdir(smbPath));
+                // Wrap readdir in executeSMBCommand with 10s timeout to prevent hanging during heavy uploads
+                const names = await executeSMBCommand(client, () => client.readdir(smbPath), 10000);
                 
                 // Process files in chunks to avoid STATUS_INSUFFICIENT_RESOURCES
                 const results = [];
@@ -541,7 +551,8 @@ app.get('/api/files', async (req, res) => {
                         try {
                             const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
                             // Wrap stat in executeSMBCommand (concurrently might be heavy, but retry handles dropping)
-                            const stats = await executeSMBCommand(client, () => client.stat(itemPath));
+                            // Use 5s timeout for individual stats
+                            const stats = await executeSMBCommand(client, () => client.stat(itemPath), 5000);
                             console.log(`[DEBUG] SMB Stat for ${name}:`, stats.lastWriteTime, typeof stats.lastWriteTime);
                             
                             // Construct full relative path for frontend
