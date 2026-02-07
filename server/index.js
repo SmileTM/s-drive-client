@@ -980,7 +980,33 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                         await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath)); // Delete file
                     }
                 } catch (err) {
-                    if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+                    console.log(`[Delete Debug] Stat/Process failed for ${itemPath}: ${err.code || err.message}`);
+
+                    if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING' || err.code === 'STATUS_NO_SUCH_FILE') {
+                        // The item appears in readdir but stat fails. It might be a ghost or in a weird state.
+                        // Try to blind delete it.
+                        console.log(`[Delete Debug] Attempting blind delete for ghost item: ${itemPath}`);
+                        try {
+                            // Try rmdir first (common for stubborn folders)
+                            await executeSMBCommand(targetClient, () => targetClient.rmdir(itemPath));
+                            console.log(`[Delete Debug] Blind rmdir success for ${itemPath}`);
+                            return;
+                        } catch (rmErr) {
+                            // If it's not a directory, try unlink
+                            if (rmErr.code === 'STATUS_NOT_A_DIRECTORY' || rmErr.code === 'STATUS_FILE_IS_A_DIRECTORY' || rmErr.message?.includes('Not a directory')) {
+                                try {
+                                    await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
+                                    console.log(`[Delete Debug] Blind unlink success for ${itemPath}`);
+                                    return;
+                                } catch (ulErr) {
+                                     console.log(`[Delete Debug] Blind unlink failed for ${itemPath}: ${ulErr.code}`);
+                                }
+                            } else {
+                                console.log(`[Delete Debug] Blind rmdir failed for ${itemPath}: ${rmErr.code}`);
+                            }
+                        }
+                        return;
+                    }
                     
                     // Try to clear Read-Only attribute if deletion failed
                     if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
