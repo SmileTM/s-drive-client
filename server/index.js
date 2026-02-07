@@ -948,8 +948,9 @@ app.post('/api/mkdir', async (req, res) => {
     }
 });
 
-// Helper: Recursive SMB Delete
+// Helper: Recursive SMB Delete (Strict Depth-First)
 const rmDirRecursiveSMB = async (client, dirPath) => {
+    // 1. List all children first
     let items = [];
     try {
         items = await executeSMBCommand(client, () => client.readdir(dirPath));
@@ -958,21 +959,24 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
         throw err;
     }
 
+    // 2. Process children (Depth-First)
     for (const item of items) {
         const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
         try {
             const stats = await executeSMBCommand(client, () => client.stat(itemPath));
             if (stats.isDirectory()) {
-                await rmDirRecursiveSMB(client, itemPath);
+                await rmDirRecursiveSMB(client, itemPath); // Recursively delete sub-folders
             } else {
-                await executeSMBCommand(client, () => client.unlink(itemPath));
+                await executeSMBCommand(client, () => client.unlink(itemPath)); // Delete file
             }
         } catch (err) {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') continue;
-            throw err;
+            // Log warning but continue best-effort
+            console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
         }
     }
 
+    // 3. Delete the directory itself (with simple retry for sync lag)
     let retryCount = 0;
     while (retryCount < 5) {
         try {
@@ -981,36 +985,12 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
         } catch (err) {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
             
-            if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
-                console.log(`[Delete] Directory not empty for ${dirPath}. Retrying... (${retryCount + 1}/5)`);
-                await new Promise(r => setTimeout(r, 500));
+            if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
+                // If not empty after we just cleared it, it's likely a sync/cache lag.
+                // Wait and retry.
+                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/5)`);
+                await new Promise(r => setTimeout(r, 500)); 
                 retryCount++;
-                
-                // Aggressive retry: Re-scan and delete content if stuck
-                if (retryCount >= 2) {
-                     console.log(`[Delete] Re-scanning content for ${dirPath}...`);
-                     try {
-                         const lingering = await executeSMBCommand(client, () => client.readdir(dirPath));
-                         for (const l of lingering) {
-                            const lPath = dirPath === '\\' ? l : `${dirPath}\\${l}`;
-                            try {
-                                const lStats = await executeSMBCommand(client, () => client.stat(lPath));
-                                if (lStats.isDirectory()) {
-                                    await rmDirRecursiveSMB(client, lPath);
-                                } else {
-                                    await executeSMBCommand(client, () => client.unlink(lPath));
-                                }
-                            } catch(e) {
-                                // Ignore if already gone or access denied (best effort)
-                                if (e.code !== 'STATUS_OBJECT_NAME_NOT_FOUND' && e.code !== 'STATUS_DELETE_PENDING') {
-                                     console.warn(`[Delete] Failed to clean lingering item ${lPath}:`, e.message);
-                                }
-                            }
-                         }
-                     } catch(e) {
-                         // Ignore list error
-                     }
-                }
                 continue;
             }
             throw err;
