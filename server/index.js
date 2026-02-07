@@ -973,11 +973,35 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
         }
     }
 
-    try {
-        await executeSMBCommand(client, () => client.rmdir(dirPath));
-    } catch (err) {
-        if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
-        throw err;
+    let retryCount = 0;
+    while (retryCount < 5) {
+        try {
+            await executeSMBCommand(client, () => client.rmdir(dirPath));
+            break;
+        } catch (err) {
+            if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+            
+            if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
+                console.log(`[Delete] Directory not empty for ${dirPath}. Retrying... (${retryCount + 1}/5)`);
+                await new Promise(r => setTimeout(r, 500));
+                retryCount++;
+                
+                // Optional: Re-scan and delete if something appeared? 
+                // For now, let's assume it's a "delete pending" lag for children.
+                if (retryCount === 3) {
+                     // Aggressive retry: try to list and delete children again if stuck
+                     try {
+                         const lingering = await executeSMBCommand(client, () => client.readdir(dirPath));
+                         for (const l of lingering) {
+                            const lPath = dirPath === '\\' ? l : `${dirPath}\\${l}`;
+                            try { await executeSMBCommand(client, () => client.unlink(lPath)); } catch(e){}
+                         }
+                     } catch(e) {}
+                }
+                continue;
+            }
+            throw err;
+        }
     }
 };
 
