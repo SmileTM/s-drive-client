@@ -96,7 +96,7 @@ const getSMBClient = (config, options = {}) => {
         return createClient();
     }
 
-    const key = `${address}|${cleanShare}|${config.username}`;
+    const key = `${address}|${cleanShare}|${config.username}|${config.password}`;
     if (!smbClients.has(key)) {
         smbClients.set(key, createClient());
     }
@@ -1021,6 +1021,7 @@ app.post('/api/transfer', async (req, res) => {
     let srcAdapter, dstAdapter;
     try {
         const { items, sourceDrive, destDrive, destPath, move, overwrite = false } = req.body;
+        console.log(`[DEBUG] POST /api/transfer count=${items?.length} from=${sourceDrive} to=${destDrive} overwrite=${overwrite}`);
         if (!items || !sourceDrive || !destDrive) return res.status(400).json({ error: 'Missing parameters' });
 
         const srcConfig = await getDriveConfig(sourceDrive);
