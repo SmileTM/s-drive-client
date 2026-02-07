@@ -961,6 +961,28 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
         throw err;
     }
 
+    // Helper: Wait for item to disappear
+    const waitForDeletion = async (targetClient, itemPath) => {
+        let retries = 0;
+        while (retries < 10) { // Wait up to 2 seconds
+            try {
+                await executeSMBCommand(targetClient, () => targetClient.stat(itemPath));
+                // If stat succeeds, it's still there
+                await new Promise(r => setTimeout(r, 200));
+                retries++;
+            } catch (e) {
+                // If stat fails with Not Found, it's gone!
+                if (e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.code === 'STATUS_NO_SUCH_FILE') {
+                    return;
+                }
+                // If still pending or other error, wait
+                await new Promise(r => setTimeout(r, 200));
+                retries++;
+            }
+        }
+        // console.warn(`[Delete Warn] Item ${itemPath} still exists after waiting`);
+    };
+
     // Helper to process a list of items
     const processItems = async (targetClient, itemList) => {
         // Process with limited concurrency (5) to balance speed and stability
@@ -983,26 +1005,28 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     // console.log(`[Delete Debug] Stat/Process failed for ${itemPath}: ${err.code || err.message}`);
 
                     if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING' || err.code === 'STATUS_NO_SUCH_FILE') {
+                        // If it's pending, wait for it to actually go away
+                        if (err.code === 'STATUS_DELETE_PENDING') {
+                            await waitForDeletion(targetClient, itemPath);
+                            return;
+                        }
+
                         // The item appears in readdir but stat fails. It might be a ghost or in a weird state.
                         // Try to blind delete it.
-                        // console.log(`[Delete Debug] Attempting blind delete for ghost item: ${itemPath}`);
                         try {
                             // Try rmdir first (common for stubborn folders)
                             await executeSMBCommand(targetClient, () => targetClient.rmdir(itemPath));
-                            // console.log(`[Delete Debug] Blind rmdir success for ${itemPath}`);
                             return;
                         } catch (rmErr) {
                             // If it's not a directory, try unlink
                             if (rmErr.code === 'STATUS_NOT_A_DIRECTORY' || rmErr.code === 'STATUS_FILE_IS_A_DIRECTORY' || rmErr.message?.includes('Not a directory')) {
                                 try {
                                     await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
-                                    // console.log(`[Delete Debug] Blind unlink success for ${itemPath}`);
                                     return;
-                                } catch (ulErr) {
-                                     // console.log(`[Delete Debug] Blind unlink failed for ${itemPath}: ${ulErr.code}`);
-                                }
-                            } else {
-                                // console.log(`[Delete Debug] Blind rmdir failed for ${itemPath}: ${rmErr.code}`);
+                                } catch (ulErr) {}
+                            } else if (rmErr.code === 'STATUS_DELETE_PENDING') {
+                                await waitForDeletion(targetClient, itemPath);
+                                return;
                             }
                         }
                         return;
