@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { clsx } from 'clsx';
 import { translations } from './i18n';
 
-const ConfirmModal = ({ isOpen, title, message, onConfirm, onClose, lang = 'en', type = 'info' }) => {
+const ConfirmModal = ({ isOpen, title, message, onConfirm, onClose, lang = 'en', type = 'info', confirmText }) => {
     if (!isOpen) return null;
     const t = translations[lang];
 
@@ -42,8 +42,7 @@ const ConfirmModal = ({ isOpen, title, message, onConfirm, onClose, lang = 'en',
                             type === 'danger' ? "bg-red-500 hover:bg-red-600 shadow-red-200" : "bg-indigo-500 hover:bg-indigo-600"
                         )}
                     >
-                       {type === 'danger' ? t.delete : t.close} 
-                       {/* Note: Standardizing confirm button text might be needed, using dynamic prop if flexible */}
+                       {confirmText || (type === 'danger' ? t.delete : t.confirm)} 
                     </button>
                 </div>
             </motion.div>
