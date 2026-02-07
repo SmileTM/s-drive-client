@@ -837,7 +837,8 @@ const getFSAdapter = (config) => {
         };
     } else if (config.type === 'smb') {
         // Disable autoClose for transfer to avoid connection drops
-        const client = getSMBClient(config, { autoCloseTimeout: 0 });
+        // Limit packetConcurrency to avoid STATUS_INSUFFICIENT_RESOURCES
+        const client = getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 5 });
         const toSMB = (p) => p.replace(/^\/+/, '').replace(/\//g, '\\');
         return {
             stat: async (p) => client.stat(toSMB(p)),
@@ -907,13 +908,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) =
         const readStream = await srcAdapter.createReadStream(srcPath);
         const writeStream = await dstAdapter.createWriteStream(dstPath);
         
-        // Error handling
-        await new Promise((resolve, reject) => {
-             readStream.on('error', reject);
-             writeStream.on('error', reject);
-             writeStream.on('finish', resolve); // Writable stream finishes
-             readStream.pipe(writeStream);
-        });
+        await pipeline(readStream, writeStream);
     }
 };
 
