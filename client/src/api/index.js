@@ -525,13 +525,13 @@ const ServerAPI = {
   deleteItems: async (items, driveId) => {
     await axios.post('/api/delete', { items, drive: driveId });
   },
-  renameItem: async (oldPath, newName, currentPath, driveId) => {
-    await axios.post('/api/rename', { oldPath, newName, path: currentPath, drive: driveId });
+  renameItem: async (oldPath, newName, currentPath, driveId, overwrite = false) => {
+    await axios.post('/api/rename', { oldPath, newName, path: currentPath, drive: driveId, overwrite });
   },
-  moveItems: async (items, destination, driveId) => {
-    await axios.post('/api/move', { items, destination, drive: driveId });
+  moveItems: async (items, destination, driveId, overwrite = false) => {
+    await axios.post('/api/move', { items, destination, drive: driveId, overwrite });
   },
-  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete) => {
+  crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete, overwrite = false) => {
       for (let i = 0; i < items.length; i++) {
           const item = items[i];
           const itemPath = item.path || item;
@@ -544,7 +544,8 @@ const ServerAPI = {
               sourceDrive: sourceDriveId,
               destDrive: destDriveId,
               destPath: destPath,
-              move: isMove
+              move: isMove,
+              overwrite
           });
 
           if (onItemComplete) onItemComplete(fileName);

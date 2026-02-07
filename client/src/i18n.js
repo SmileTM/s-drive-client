@@ -28,6 +28,7 @@ export const translations = {
     confirmDeleteItems: "Delete {count} items?",
     confirmDeleteNonEmptyFolder: "Selected folder(s) are not empty. Are you sure you want to delete them and all their contents?",
     confirmOverwrite: "Overwrite {count} existing files?",
+    confirmOverwriteSingle: "Target file already exists. Overwrite?",
     uploadFailed: "Upload failed",
     deleteFailed: "Delete failed",
     moveFailed: "Move failed",
@@ -35,6 +36,7 @@ export const translations = {
     createFolderFailed: "Create folder failed",
     folderExists: "Folder already exists!",
     fileExists: "A file with this name already exists.",
+    fileAlreadyExists: "Target file already exists.",
     renamePrompt: "Rename to:",
     folderNamePrompt: "Folder Name:",
     // Modal
@@ -131,6 +133,7 @@ export const translations = {
     confirmDeleteItems: "确定删除 {count} 项吗？",
     confirmDeleteNonEmptyFolder: "所选文件夹中包含文件，确定要删除文件夹及其所有内容吗？",
     confirmOverwrite: "覆盖 {count} 个已存在的文件？",
+    confirmOverwriteSingle: "目标文件已存在，是否覆盖？",
     uploadFailed: "上传失败",
     deleteFailed: "删除失败",
     moveFailed: "移动失败",
@@ -138,6 +141,7 @@ export const translations = {
     createFolderFailed: "创建文件夹失败",
     folderExists: "文件夹已存在！",
     fileExists: "文件名已存在。",
+    fileAlreadyExists: "目标文件已存在。",
     renamePrompt: "重命名为：",
     folderNamePrompt: "文件夹名称：",
     // Modal

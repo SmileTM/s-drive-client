@@ -822,7 +822,7 @@ app.post('/api/delete', async (req, res) => {
 // POST /api/move
 app.post('/api/move', async (req, res) => {
     try {
-        const { items, destination, drive: driveId = 'local' } = req.body;
+        const { items, destination, drive: driveId = 'local', overwrite = false } = req.body;
         const config = await getDriveConfig(driveId);
 
         if (config.type === 'local') {
@@ -832,7 +832,18 @@ app.post('/api/move', async (req, res) => {
                 const absDestDir = resolveSafePath(destination);
                 const absNewPath = path.join(absDestDir, path.basename(absItem));
                 
-                if (absItem !== absNewPath) await fs.move(absItem, absNewPath, { overwrite: true });
+                if (absItem !== absNewPath) {
+                    try {
+                        await fs.move(absItem, absNewPath, { overwrite: overwrite });
+                    } catch (e) {
+                        if (e.message.includes('dest already exists')) {
+                            const error = new Error('File already exists');
+                            error.code = 'EXIST';
+                            throw error;
+                        }
+                        throw e;
+                    }
+                }
             }));
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
@@ -842,19 +853,45 @@ app.post('/api/move', async (req, res) => {
                 const smbDestDir = toSMBPath(destination);
                 const smbNew = smbDestDir === '\\' || smbDestDir === '' ? fileName : `${smbDestDir}\\${fileName}`;
                 
-                await client.rename(smbOld, smbNew);
+                try {
+                    await client.rename(smbOld, smbNew);
+                } catch (e) {
+                    if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
+                        if (overwrite) {
+                            // Delete destination and retry
+                            try {
+                                const stats = await client.stat(smbNew);
+                                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
+                                else await client.unlink(smbNew);
+                                await client.rename(smbOld, smbNew);
+                            } catch (retryErr) {
+                                throw retryErr;
+                            }
+                        } else {
+                            const error = new Error('File already exists');
+                            error.code = 'EXIST';
+                            throw error;
+                        }
+                    } else {
+                        throw e;
+                    }
+                }
             }
         } else {
             const client = getWebDAVClient(config);
             await Promise.all(items.map(item => {
                 const cleanDest = destination.replace(/^\/+/, '');
                 const destPath = path.posix.join(cleanDest, path.basename(item));
-                return client.moveFile(item.replace(/^\/+/, ''), destPath);
+                // Send Overwrite header
+                return client.moveFile(item.replace(/^\/+/, ''), destPath, { headers: { 'Overwrite': overwrite ? 'T' : 'F' } });
             }));
         }
         res.json({ success: true });
     } catch (err) {
         console.error('[Move Error]', err);
+        if (err.code === 'EXIST' || err.message.includes('dest already exists') || (err.response && (err.response.status === 412 || err.response.status === 409))) {
+             return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -934,7 +971,7 @@ const getFSAdapter = (config) => {
 };
 
 // Recursive Transfer Function
-const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) => {
+const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, overwrite = false) => {
     const stats = await srcAdapter.stat(srcPath);
     
     if (stats.isDirectory()) {
@@ -947,9 +984,23 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) =
             if (childName === '.' || childName === '..') continue;
             const childSrc = srcAdapter.join(srcPath, childName);
             const childDst = dstAdapter.join(dstPath, childName);
-            await transferItemRecursive(srcAdapter, dstAdapter, childSrc, childDst);
+            await transferItemRecursive(srcAdapter, dstAdapter, childSrc, childDst, overwrite);
         }
     } else {
+        // Check existence if not overwriting
+        if (!overwrite) {
+            try {
+                await dstAdapter.stat(dstPath);
+                // If we are here, file exists
+                const error = new Error('File already exists');
+                error.code = 'EXIST';
+                throw error;
+            } catch (e) {
+                if (e.code === 'EXIST') throw e;
+                // Otherwise ignore (not found)
+            }
+        }
+
         // Copy File
         const readStream = await srcAdapter.createReadStream(srcPath);
         const writeStream = await dstAdapter.createWriteStream(dstPath);
@@ -971,7 +1022,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) =
 app.post('/api/transfer', async (req, res) => {
     let srcAdapter, dstAdapter;
     try {
-        const { items, sourceDrive, destDrive, destPath, move } = req.body;
+        const { items, sourceDrive, destDrive, destPath, move, overwrite = false } = req.body;
         if (!items || !sourceDrive || !destDrive) return res.status(400).json({ error: 'Missing parameters' });
 
         const srcConfig = await getDriveConfig(sourceDrive);
@@ -985,7 +1036,7 @@ app.post('/api/transfer', async (req, res) => {
             const targetPath = path.posix.join(destPath, fileName);
             
             try {
-                await transferItemRecursive(srcAdapter, dstAdapter, itemPath, targetPath);
+                await transferItemRecursive(srcAdapter, dstAdapter, itemPath, targetPath, overwrite);
                 
                 // If Move, delete source after successful transfer
                 if (move) {
@@ -993,13 +1044,19 @@ app.post('/api/transfer', async (req, res) => {
                 }
             } catch (e) {
                 console.error(`[Transfer Failed] ${itemPath} -> ${targetPath}:`, e);
+                if (e.code === 'EXIST' || (e.response && (e.response.status === 412 || e.response.status === 409))) {
+                     return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                }
                 throw e; // Stop batch on error
             }
         }
         res.json({ success: true });
     } catch (err) {
-        console.error('[Transfer Error]', err);
-        res.status(500).json({ error: err.message });
+        if (!res.headersSent) {
+             if (err.code === 'EXIST') return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+             console.error('[Transfer Error]', err);
+             res.status(500).json({ error: err.message });
+        }
     } finally {
         if (srcAdapter && srcAdapter.close) await srcAdapter.close();
         if (dstAdapter && dstAdapter.close) await dstAdapter.close();
@@ -1009,8 +1066,8 @@ app.post('/api/transfer', async (req, res) => {
 // POST /api/rename
 app.post('/api/rename', async (req, res) => {
     try {
-        const { oldPath, newName, path: currentPath, drive: driveId = 'local' } = req.body;
-        console.log(`[DEBUG] POST /api/rename old="${oldPath}" new="${newName}" drive="${driveId}"`);
+        const { oldPath, newName, path: currentPath, drive: driveId = 'local', overwrite = false } = req.body;
+        console.log(`[DEBUG] POST /api/rename old="${oldPath}" new="${newName}" drive="${driveId}" overwrite=${overwrite}`);
         if (!oldPath || !newName) return res.status(400).json({ error: 'Missing parameters' });
 
         const config = await getDriveConfig(driveId);
@@ -1021,7 +1078,13 @@ app.post('/api/rename', async (req, res) => {
             const absDir = path.dirname(absOld);
             const absNew = path.join(absDir, newName); // Same dir, new name
 
+            if (!overwrite && await fs.pathExists(absNew)) {
+                 return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+            }
+
             console.log(`[Rename] ${absOld} -> ${absNew}`);
+            // fs.rename overwrites by default on POSIX, but we checked existence above if !overwrite.
+            // If overwrite=true, we just do it.
             await fs.rename(absOld, absNew);
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
@@ -1029,7 +1092,24 @@ app.post('/api/rename', async (req, res) => {
             const parts = smbOld.split('\\');
             parts.pop();
             const smbNew = [...parts, newName].join('\\');
-            await client.rename(smbOld, smbNew);
+            try {
+                await client.rename(smbOld, smbNew);
+            } catch (e) {
+                if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
+                    if (overwrite) {
+                        try {
+                            const stats = await client.stat(smbNew);
+                            if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
+                            else await client.unlink(smbNew);
+                            await client.rename(smbOld, smbNew);
+                        } catch (retryErr) { throw retryErr; }
+                    } else {
+                        return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                    }
+                } else {
+                    throw e;
+                }
+            }
 
         } else {
             // WebDAV Rename
@@ -1040,7 +1120,14 @@ app.post('/api/rename', async (req, res) => {
             const safeParentDir = parentDir.split(path.sep).join('/');
             const newPath = path.posix.join(safeParentDir, newName);
             
-            await client.moveFile(cleanOldPath, newPath);
+            try {
+                await client.moveFile(cleanOldPath, newPath, { headers: { 'Overwrite': overwrite ? 'T' : 'F' } });
+            } catch (e) {
+                if (e.response && (e.response.status === 412 || e.response.status === 409)) {
+                     return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                }
+                throw e;
+            }
         }
         res.json({ success: true });
     } catch (err) {

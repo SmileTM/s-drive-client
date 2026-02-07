@@ -876,8 +876,28 @@ function App() {
   };
   const handleMove = async (items, destination) => {
     if (items.includes(destination)) return;
-    try { await api.moveItems(items, destination, activeDrive); fetchFiles(currentPath); setSelectedPaths(new Set()); } catch (err) { showAlert(t.moveFailed, t.failed, 'error'); }
+    const executeMove = async (overwrite = false) => {
+        try { 
+            await api.moveItems(items, destination, activeDrive, overwrite); 
+            fetchFiles(currentPath); 
+            setSelectedPaths(new Set()); 
+        } catch (err) { 
+            if (err.response && err.response.status === 409) {
+                setConfirmModal({
+                    isOpen: true,
+                    title: t.fileAlreadyExists,
+                    message: t.confirmOverwriteSingle, // "Target file exists. Overwrite?"
+                    type: 'warning',
+                    onConfirm: () => executeMove(true) // Retry with overwrite
+                });
+            } else {
+                showAlert(t.moveFailed, t.failed, 'error'); 
+            }
+        }
+    };
+    executeMove(false);
   };
+  
   const handleCut = () => { setClipboard({ mode: 'move', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   const handleCopy = () => { setClipboard({ mode: 'copy', items: Array.from(selectedPaths), driveId: activeDrive }); setSelectedPaths(new Set()); };
   
@@ -947,26 +967,41 @@ function App() {
          if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
     };
 
-    const transferPromise = (sourceDrive === destDrive) 
-        ? (isMove 
-            ? api.moveItems(items, targetPath, activeDrive) 
-            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete))
-        : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete);
-    
-    transferPromise
-        .then(() => {
-            // Ensure final refresh after all items are done (crucial for same-drive moves)
-            if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
-        })
-        .catch(err => {
-        setTasks(prev => prev.map(t => {
-            if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
-                return { ...t, status: 'error' };
+    const executeTransfer = (overwrite = false) => {
+        const transferPromise = (sourceDrive === destDrive) 
+            ? (isMove 
+                ? api.moveItems(items, targetPath, activeDrive, overwrite) 
+                : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete, overwrite))
+            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress, onComplete, overwrite);
+        
+        transferPromise
+            .then(() => {
+                // Ensure final refresh after all items are done (crucial for same-drive moves)
+                if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+            })
+            .catch(err => {
+            setTasks(prev => prev.map(t => {
+                if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
+                    return { ...t, status: 'error' };
+                }
+                return t;
+            }));
+            
+            if (err.response && err.response.status === 409) {
+                 setConfirmModal({
+                    isOpen: true,
+                    title: t.fileAlreadyExists,
+                    message: t.confirmOverwriteSingle, // Reuse message
+                    type: 'warning',
+                    onConfirm: () => executeTransfer(true) // Retry with overwrite
+                });
+            } else {
+                 showAlert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''), t.failed, 'error');
             }
-            return t;
-        }));
-        showAlert((isMove ? t.moveFailed : 'Copy Failed') + ': ' + (err.message || ''), t.failed, 'error');
-    });
+        });
+    };
+    
+    executeTransfer(false);
   };
   
   const handleRename = () => {
@@ -974,21 +1009,43 @@ function App() {
     const oldPath = Array.from(selectedPaths)[0];
     const oldName = oldPath.split('/').pop();
     
+    const performRename = async (newName, overwrite = false) => {
+        try {
+            await api.renameItem(oldPath, newName, currentPath, activeDrive, overwrite);
+            fetchFiles(currentPath);
+            setSelectedPaths(new Set());
+            setInputModal(prev => ({ ...prev, isOpen: false })); // Close input modal on success
+        } catch (err) { 
+            if (err.response && err.response.status === 409) {
+                 setConfirmModal({
+                    isOpen: true,
+                    title: t.fileAlreadyExists,
+                    message: t.confirmOverwriteSingle,
+                    type: 'warning',
+                    onConfirm: () => performRename(newName, true)
+                 });
+            } else {
+                 showAlert(t.renameFailed, t.failed, 'error'); 
+            }
+        }
+    };
+
     setInputModal({
       isOpen: true,
       title: t.renamePrompt,
       defaultValue: oldName,
       onConfirm: async (newName) => {
         if (!newName || newName === oldName) return;
+        // Pre-check for local list to avoid API call if obvious
         if (files.some(f => f.name === newName)) {
-            showAlert(t.fileExists, t.failed, 'warning');
-            return;
+            // Ask immediately if seen in local list? 
+            // Better to let API handle logic consistency or just warn.
+            // Let's warn first, user can ignore? No, standard logic.
+            // Let's rely on API logic for robust "Ask to Overwrite"
+            // But UI currently blocks if in list.
+            // Let's REMOVE the pre-check blocking and let performRename handle 409.
         }
-        try {
-            await api.renameItem(oldPath, newName, currentPath, activeDrive);
-            fetchFiles(currentPath);
-            setSelectedPaths(new Set());
-        } catch (err) { showAlert(t.renameFailed, t.failed, 'error'); }
+        performRename(newName, false);
       }
     });
   };
