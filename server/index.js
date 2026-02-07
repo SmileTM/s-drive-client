@@ -1545,7 +1545,7 @@ app.post('/api/rename', async (req, res) => {
             // If overwrite=true, we just do it.
             await fs.rename(absOld, absNew);
         } else if (config.type === 'smb') {
-            const client = getSMBClient(config);
+            let client = getSMBClient(config);
             const smbOld = toSMBPath(oldPath);
             const parts = smbOld.split('\\');
             parts.pop();
@@ -1564,6 +1564,7 @@ app.post('/api/rename', async (req, res) => {
                          console.warn(`[Rename] Locked (${e.code}). Retrying... (${renameAttempts + 1}/${maxRenameAttempts})`);
                          clearSMBSession(config); // Clear locks
                          await new Promise(r => setTimeout(r, 500));
+                         client = getSMBClient(config); // Get fresh client
                          renameAttempts++;
                          continue;
                     }
@@ -1574,9 +1575,10 @@ app.post('/api/rename', async (req, res) => {
                                 console.log(`[Rename] Collision. Overwriting...`);
                                 // Clear session before delete to avoid self-lock
                                 clearSMBSession(config);
+                                client = getSMBClient(config); // Get fresh client
                                 
                                 const stats = await executeSMBCommand(client, () => client.stat(smbNew));
-                                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew);
+                                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew, config);
                                 else await executeSMBCommand(client, () => client.unlink(smbNew));
                                 
                                 // Reset attempt counter to allow retry of rename after successful delete
