@@ -109,6 +109,11 @@ const normalizeFile = (file, driveId, type = 'webdav') => {
     };
 };
 
+// Helper: SMB Path Normalizer
+const toSMBPath = (p) => {
+    return p.replace(/^\/+/, '').replace(/\//g, '\\').normalize('NFC');
+};
+
 // Helper: Safe path resolution for Local
 const resolveSafePath = (userPath) => {
     // Remove leading slashes to ensure it's relative
@@ -352,7 +357,7 @@ app.get('/api/files', async (req, res) => {
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
             // Strip leading slashes for SMB
-            const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\'); 
+            const smbPath = toSMBPath(reqPath);
             
             try {
                 // @marsaud/smb2 readdir returns just names by default.
@@ -472,7 +477,7 @@ app.get('/api/search', async (req, res) => {
             // SMB Search - Shallow only for now
             const client = getSMBClient(config);
             try {
-                const smbPath = searchPath.replace(/^\/+/, '').replace(/\//g, '\\');
+                const smbPath = toSMBPath(searchPath);
                 const names = await client.readdir(smbPath);
                 const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
                 const results = matches.map(name => ({
@@ -512,7 +517,7 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
-            const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            const smbPath = toSMBPath(reqPath);
             
             try {
                 const range = req.headers.range;
@@ -684,7 +689,7 @@ app.get('/api/preview', async (req, res) => {
              inputStream = fs.createReadStream(absPath);
         } else if (config.type === 'smb') {
              const client = getSMBClient(config);
-             const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
+             const smbPath = toSMBPath(reqPath);
              try {
                  inputStream = await client.createReadStream(smbPath);
                  const cleanup = async () => {
@@ -739,7 +744,7 @@ app.post('/api/mkdir', async (req, res) => {
             await fs.ensureDir(absPath);
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
-            const smbPath = reqPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            const smbPath = toSMBPath(reqPath);
             await client.mkdir(smbPath);
         } else {
             const client = getWebDAVClient(config);
@@ -782,7 +787,7 @@ app.post('/api/delete', async (req, res) => {
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
             for (const item of items) {
-                const smbPath = item.replace(/^\/+/, '').replace(/\//g, '\\');
+                const smbPath = toSMBPath(item);
                 try {
                     const stats = await client.stat(smbPath);
                     if (stats.isDirectory()) {
@@ -826,9 +831,9 @@ app.post('/api/move', async (req, res) => {
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
             for (const item of items) {
-                const smbOld = item.replace(/^\/+/, '').replace(/\//g, '\\');
+                const smbOld = toSMBPath(item);
                 const fileName = path.basename(item);
-                const smbDestDir = destination.replace(/^\/+/, '').replace(/\//g, '\\');
+                const smbDestDir = toSMBPath(destination);
                 const smbNew = smbDestDir === '\\' || smbDestDir === '' ? fileName : `${smbDestDir}\\${fileName}`;
                 
                 await client.rename(smbOld, smbNew);
@@ -872,8 +877,9 @@ const getFSAdapter = (config) => {
     } else if (config.type === 'smb') {
         // Disable autoClose for transfer to avoid connection drops
         // Limit packetConcurrency to avoid STATUS_INSUFFICIENT_RESOURCES
+        // autoCloseTimeout: 0 prevents the client from closing the connection while a stream is still active
         const client = getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 5 });
-        const toSMB = (p) => p.replace(/^\/+/, '').replace(/\//g, '\\');
+        const toSMB = toSMBPath;
         return {
             stat: async (p) => client.stat(toSMB(p)),
             readdir: async (p) => client.readdir(toSMB(p)),
@@ -1004,7 +1010,7 @@ app.post('/api/rename', async (req, res) => {
             await fs.rename(absOld, absNew);
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
-            const smbOld = oldPath.replace(/^\/+/, '').replace(/\//g, '\\');
+            const smbOld = toSMBPath(oldPath);
             const parts = smbOld.split('\\');
             parts.pop();
             const smbNew = [...parts, newName].join('\\');
@@ -1056,7 +1062,7 @@ app.post('/api/prepare-drag', async (req, res) => {
                     
                     if (config.type === 'smb') {
                         const client = getSMBClient(config);
-                        const readStream = await client.createReadStream(itemPath.replace(/^\/+/, '').replace(/\//g, '\\'));
+                        const readStream = await client.createReadStream(toSMBPath(itemPath));
                         const writeStream = fs.createWriteStream(tempFilePath);
                         await pipeline(readStream, writeStream);
                     } else {
@@ -1128,9 +1134,10 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     const readStream = fs.createReadStream(file.path);
 
                     if (config.type === 'smb') {
-                        const client = getSMBClient(config);
+                        // Use autoCloseTimeout: 0 to prevent STATUS_FILE_CLOSED during upload
+                        const client = getSMBClient(config, { autoCloseTimeout: 0 });
                         try {
-                            const smbPath = remotePath.replace(/^\/+/, '').replace(/\//g, '\\');
+                            const smbPath = toSMBPath(remotePath);
                             const writeStream = await client.createWriteStream(smbPath);
                             await pipeline(readStream, writeStream);
                         } finally {
