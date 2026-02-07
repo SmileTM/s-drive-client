@@ -1061,14 +1061,18 @@ const NativeAPI = {
                     // Register temporary callback
                     uploadCallbacks[transferId] = (info) => {
                         if (cancellationMap[transferId]?.cancelled) return;
-                        const { uploaded, total } = info;
+                        const { uploaded, total, speed: nativeSpeed } = info;
                         const now = Date.now();
-                        const timeDiff = (now - lastUpdate) / 1000;
                         
                         let speed = 0;
-                        if (timeDiff > 0) {
-                             const bytesDiff = uploaded - lastBytes;
-                             speed = bytesDiff / timeDiff;
+                        if (nativeSpeed !== undefined) {
+                            speed = nativeSpeed;
+                        } else {
+                            const timeDiff = (now - lastUpdate) / 1000;
+                            if (timeDiff > 0) {
+                                const bytesDiff = uploaded - lastBytes;
+                                speed = bytesDiff / timeDiff;
+                            }
                         }
                         
                         // Fallback to average if delta is weird or start
@@ -1115,14 +1119,18 @@ const NativeAPI = {
                          downloadListener = await WebDavNative.addListener('downloadProgress', (info) => {
                              if (info.id === transferId) {
                                  if (cancellationMap[transferId]?.cancelled) return;
-                                 const { downloaded, total } = info;
+                                 const { downloaded, total, speed: nativeSpeed } = info;
                                  const now = Date.now();
-                                 const timeDiff = (now - lastUpdate) / 1000;
                                  
                                  let speed = 0;
-                                 if (timeDiff > 0) {
-                                     const bytesDiff = downloaded - lastBytes;
-                                     speed = bytesDiff / timeDiff;
+                                 if (nativeSpeed !== undefined) {
+                                     speed = nativeSpeed;
+                                 } else {
+                                     const timeDiff = (now - lastUpdate) / 1000;
+                                     if (timeDiff > 0) {
+                                         const bytesDiff = downloaded - lastBytes;
+                                         speed = bytesDiff / timeDiff;
+                                     }
                                  }
                                  
                                   // Fallback
@@ -1200,7 +1208,7 @@ const NativeAPI = {
                          downloadListener = await WebDavNative.addListener('downloadProgress', (info) => {
                              if (info.id === downloadId) {
                                  if (cancellationMap[transferId]?.cancelled) return;
-                                 const { downloaded, total } = info;
+                                 const { downloaded, total, speed: nativeSpeed } = info;
                                  const now = Date.now();
                                  const timeDiff = (now - lastUpdate) / 1000;
                                  
@@ -1211,9 +1219,13 @@ const NativeAPI = {
                                  const visualTotal = phaseTotal * 2;
                                  
                                  let speed = 0;
-                                 if (timeDiff > 0) {
-                                     const bytesDiff = downloaded - lastBytes;
-                                     speed = bytesDiff / timeDiff;
+                                 if (nativeSpeed !== undefined) {
+                                     speed = nativeSpeed;
+                                 } else {
+                                     if (timeDiff > 0) {
+                                         const bytesDiff = downloaded - lastBytes;
+                                         speed = bytesDiff / timeDiff;
+                                     }
                                  }
                                  lastUpdate = now;
                                  lastBytes = downloaded;
@@ -1246,14 +1258,18 @@ const NativeAPI = {
 
                     uploadCallbacks[uploadId] = (info) => {
                         if (cancellationMap[transferId]?.cancelled) return;
-                        const { uploaded, total } = info;
+                        const { uploaded, total, speed: nativeSpeed } = info;
                         const now = Date.now();
-                        const timeDiff = (now - lastUpdate) / 1000;
                         
                         let speed = 0;
-                        if (timeDiff > 0) {
-                             const bytesDiff = uploaded - lastBytes;
-                             speed = bytesDiff / timeDiff;
+                        if (nativeSpeed !== undefined) {
+                            speed = nativeSpeed;
+                        } else {
+                            const timeDiff = (now - lastUpdate) / 1000;
+                            if (timeDiff > 0) {
+                                const bytesDiff = uploaded - lastBytes;
+                                speed = bytesDiff / timeDiff;
+                            }
                         }
                         lastUpdate = now;
                         lastBytes = uploaded;
@@ -1457,14 +1473,18 @@ const NativeAPI = {
                 uploadCallbacks[uploadId] = (info) => {
                     if (cancellationMap[uploadId]?.cancelled) return;
                     // console.log('[NativeWebDAV] Callback executing for:', uploadId);
-                    const { uploaded, total } = info;
+                    const { uploaded, total, speed: nativeSpeed } = info;
                     const now = Date.now();
-                    const timeDiff = (now - lastUpdate) / 1000;
                     
                     let speed = 0;
-                    if (timeDiff > 0) {
-                        const bytesDiff = uploaded - lastBytes;
-                        speed = bytesDiff / timeDiff;
+                    if (nativeSpeed !== undefined) {
+                        speed = nativeSpeed;
+                    } else {
+                        const timeDiff = (now - lastUpdate) / 1000;
+                        if (timeDiff > 0) {
+                            const bytesDiff = uploaded - lastBytes;
+                            speed = bytesDiff / timeDiff;
+                        }
                     }
                     
                     // Fallback

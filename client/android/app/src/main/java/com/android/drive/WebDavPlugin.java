@@ -481,7 +481,7 @@ public class WebDavPlugin extends Plugin {
                 try (InputStream in = smbFile.getInputStream();
                      FileOutputStream out = new FileOutputStream(localFile)) {
                     
-                    byte[] buffer = new byte[65536];
+                    byte[] buffer = new byte[262144]; // 256KB buffer
                     int read;
                     while ((read = in.read(buffer)) != -1) {
                         if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
@@ -491,18 +491,21 @@ public class WebDavPlugin extends Plugin {
                         downloaded += read;
 
                         long now = System.currentTimeMillis();
-                        if (now - lastUpdate > 500) {
+                        if (now - lastUpdate > 1000) {
                             if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
 
                             JSObject ret = new JSObject();
                             ret.put("downloaded", downloaded);
                             ret.put("total", fileSize);
-                            if (callbackId != null) ret.put("id", callbackId);
-                            notifyListeners("downloadProgress", ret);
-
+                            
                             long diffBytes = downloaded - lastBytes;
                             long diffTime = now - lastUpdate;
                             long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                            
+                            ret.put("speed", speed);
+                            if (callbackId != null) ret.put("id", callbackId);
+                            notifyListeners("downloadProgress", ret);
+
                             String speedStr = formatSpeed(speed);
                             
                             boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
@@ -592,7 +595,7 @@ public class WebDavPlugin extends Plugin {
                 try (InputStream in = new java.io.FileInputStream(localFile);
                      OutputStream out = smbFile.getOutputStream()) {
                     
-                    byte[] buffer = new byte[65536];
+                    byte[] buffer = new byte[262144]; // 256KB buffer
                     int read;
                     while ((read = in.read(buffer)) != -1) {
                         if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
@@ -602,18 +605,21 @@ public class WebDavPlugin extends Plugin {
                         uploaded += read;
 
                         long now = System.currentTimeMillis();
-                        if (now - lastUpdate > 500) {
+                        if (now - lastUpdate > 1000) {
                             if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
 
                             JSObject ret = new JSObject();
                             ret.put("uploaded", uploaded);
                             ret.put("total", fileSize);
-                            if (callbackId != null) ret.put("id", callbackId);
-                            notifyListeners("uploadProgress", ret);
-
+                            
                             long diffBytes = uploaded - lastBytes;
                             long diffTime = now - lastUpdate;
                             long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                            
+                            ret.put("speed", speed);
+                            if (callbackId != null) ret.put("id", callbackId);
+                            notifyListeners("uploadProgress", ret);
+
                             String speedStr = formatSpeed(speed);
                             
                             boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
@@ -1170,7 +1176,7 @@ public class WebDavPlugin extends Plugin {
                 @Override
                 public void writeTo(BufferedSink sink) throws IOException {
                     long fileLength = fileFinal.length();
-                    byte[] buffer = new byte[65536];
+                    byte[] buffer = new byte[262144]; // 256KB buffer
                     long uploaded = 0;
 
                     try (InputStream in = new java.io.FileInputStream(fileFinal)) {
@@ -1187,7 +1193,7 @@ public class WebDavPlugin extends Plugin {
                             uploaded += read;
                             
                             long now = System.currentTimeMillis();
-                            if (now - lastUpdate > 500) {
+                            if (now - lastUpdate > 1000) {
                                  // Re-check cancellation before updating UI to prevent overwriting "Cancelling..." state
                                  if (callbackId != null && !activeCalls.containsKey(callbackId)) {
                                      throw new IOException("Cancelled");
@@ -1196,14 +1202,17 @@ public class WebDavPlugin extends Plugin {
                                  JSObject ret = new JSObject();
                                  ret.put("uploaded", uploaded);
                                  ret.put("total", fileLength);
-                                 if (callbackId != null) ret.put("id", callbackId);
-                                 
-                                 notifyListeners("uploadProgress", ret);
                                  
                                  // Calculate Speed
                                  long diffBytes = uploaded - lastBytes;
                                  long diffTime = now - lastUpdate;
                                  long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                                 
+                                 ret.put("speed", speed);
+                                 if (callbackId != null) ret.put("id", callbackId);
+                                 
+                                 notifyListeners("uploadProgress", ret);
+                                 
                                  String speedStr = formatSpeed(speed);
                                  
                                  boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
@@ -1306,7 +1315,7 @@ public class WebDavPlugin extends Plugin {
                 try (InputStream in = response.body().byteStream();
                      FileOutputStream out = new FileOutputStream(file)) {
                     
-                    byte[] buffer = new byte[65536];
+                    byte[] buffer = new byte[262144]; // 256KB buffer
                     int read;
                     long lastUpdate = 0;
                     long lastBytes = 0;
@@ -1321,7 +1330,7 @@ public class WebDavPlugin extends Plugin {
                         downloaded += read;
                         
                         long now = System.currentTimeMillis();
-                        if (now - lastUpdate > 500) {
+                        if (now - lastUpdate > 1000) {
                             // Re-check cancellation before updating UI
                             if (callbackId != null && !activeCalls.containsKey(callbackId)) {
                                 throw new IOException("Cancelled");
@@ -1330,14 +1339,17 @@ public class WebDavPlugin extends Plugin {
                             JSObject ret = new JSObject();
                             ret.put("downloaded", downloaded);
                             ret.put("total", contentLength);
+                            
+                            long diffBytes = downloaded - lastBytes;
+                            long diffTime = now - lastUpdate;
+                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                            
+                            ret.put("speed", speed);
                             if (callbackId != null) ret.put("id", callbackId);
                             
                             notifyListeners("downloadProgress", ret);
                             
                             // Calculate Speed
-                            long diffBytes = downloaded - lastBytes;
-                            long diffTime = now - lastUpdate;
-                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
                             String speedStr = formatSpeed(speed);
                             
                             boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
