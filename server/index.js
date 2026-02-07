@@ -803,7 +803,23 @@ app.post('/api/mkdir', async (req, res) => {
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
             const smbPath = toSMBPath(reqPath);
-            await executeSMBCommand(client, () => client.mkdir(smbPath));
+            
+            // Retry loop to handle race condition where folder is still "deleting"
+            let attempts = 0;
+            while (true) {
+                try {
+                    await executeSMBCommand(client, () => client.mkdir(smbPath));
+                    break;
+                } catch (err) {
+                    if ((err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.code === 'STATUS_DELETE_PENDING') && attempts < 5) {
+                        console.log(`[Mkdir SMB] Collision/Pending detected for ${smbPath}, retrying... (${attempts+1}/5)`);
+                        await new Promise(r => setTimeout(r, 200));
+                        attempts++;
+                    } else {
+                        throw err;
+                    }
+                }
+            }
         } else {
             const client = getWebDAVClient(config);
             await client.createDirectory(reqPath);
