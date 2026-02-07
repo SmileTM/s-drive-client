@@ -963,7 +963,8 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
 
     // Helper to process a list of items
     const processItems = async (itemList) => {
-        const BATCH_SIZE = 10;
+        // Process serially to avoid SMB concurrency/locking issues on some servers
+        const BATCH_SIZE = 1;
         for (let i = 0; i < itemList.length; i += BATCH_SIZE) {
             const chunk = itemList.slice(i, i + BATCH_SIZE);
             await Promise.all(chunk.map(async (item) => {
@@ -1010,10 +1011,12 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                         }
                     }
 
-                    console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
+                    console.error(`[Delete] Failed to delete child ${itemPath} (isDir=${isDir}):`, err.message, err.code);
                 }
             }));
         }
+        // Small delay to let server state settle
+        await new Promise(r => setTimeout(r, 200));
     };
 
     // 2. Process children (Initial Pass)
