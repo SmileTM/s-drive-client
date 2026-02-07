@@ -78,8 +78,12 @@ const getSMBClient = (config, options = {}) => {
 
     const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
 
+    // Extract tag and separate SMB options
+    const { tag = 'default', ...smbOptions } = options;
+
     // Check if dedicated client requested (e.g. for transfer/upload)
-    const isDedicated = options && (options.autoCloseTimeout === 0 || Object.keys(options).length > 0);
+    // Only treat as dedicated if there are actual SMB options passed (like autoCloseTimeout)
+    const isDedicated = Object.keys(smbOptions).length > 0;
 
     const createClient = () => new SMB2({
         share: `\\\\${address}\\${cleanShare}`,
@@ -89,14 +93,14 @@ const getSMBClient = (config, options = {}) => {
         port: port, // Optional port
         packetConcurrency: 5,
         autoCloseTimeout: 0, // Keep cached connections alive to prevent race conditions
-        ...options
+        ...smbOptions
     });
 
     if (isDedicated) {
         return createClient();
     }
 
-    const key = `${address}|${cleanShare}|${config.username}|${config.password}`;
+    const key = `${address}|${cleanShare}|${config.username}|${config.password}|${tag}`;
     if (!smbClients.has(key)) {
         smbClients.set(key, createClient());
     }
@@ -527,7 +531,7 @@ app.get('/api/raw', async (req, res) => {
         if (config.type === 'local') {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
-            const client = getSMBClient(config);
+            const client = getSMBClient(config, { tag: 'preview' });
             const smbPath = toSMBPath(reqPath);
             
             try {
@@ -694,7 +698,7 @@ app.get('/api/preview', async (req, res) => {
              if (!fs.existsSync(absPath)) return res.status(404).send('File not found');
              inputStream = fs.createReadStream(absPath);
         } else if (config.type === 'smb') {
-             const client = getSMBClient(config);
+             const client = getSMBClient(config, { tag: 'preview' });
              const smbPath = toSMBPath(reqPath);
              try {
                  inputStream = await client.createReadStream(smbPath);
@@ -1175,7 +1179,7 @@ app.post('/api/prepare-drag', async (req, res) => {
                     const tempFilePath = path.join(tempDir, fileName);
                     
                     if (config.type === 'smb') {
-                        const client = getSMBClient(config);
+                        const client = getSMBClient(config, { tag: 'preview' });
                         const readStream = await client.createReadStream(toSMBPath(itemPath));
                         const writeStream = fs.createWriteStream(tempFilePath);
                         await pipeline(readStream, writeStream);
