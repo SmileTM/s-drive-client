@@ -107,6 +107,28 @@ const getSMBClient = (config, options = {}) => {
     return smbClients.get(key);
 };
 
+// Helper: Clear SMB Session (Disconnect cached clients to release locks)
+const clearSMBSession = (config) => {
+    let address = config.address;
+    if (typeof address === 'string' && address.includes(':')) {
+        const parts = address.split(':');
+        if (parts.length === 2 && !isNaN(parseInt(parts[1], 10))) {
+            address = parts[0];
+        }
+    }
+    const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
+    // Prefix matches all tags (default, preview, etc.)
+    const prefix = `${address}|${cleanShare}|${config.username}|${config.password}|`;
+    
+    for (const [key, client] of smbClients.entries()) {
+        if (key.startsWith(prefix)) {
+            console.log(`[SMB] Clearing cached session for ${key}`);
+            try { client.disconnect(); } catch (e) {}
+            smbClients.delete(key);
+        }
+    }
+};
+
 // Helper: Ensure SMB Client is connected (Singleton Connection Promise)
 const ensureSMBConnected = async (client) => {
     if (client.connected) return;
@@ -802,6 +824,9 @@ app.post('/api/mkdir', async (req, res) => {
             const absPath = resolveSafePath(reqPath);
             await fs.ensureDir(absPath);
         } else if (config.type === 'smb') {
+            // Clear cached sessions to release any potential locks
+            clearSMBSession(config);
+            
             // Use dedicated client for Write ops to prevent affecting read ops on shared connection
             dedicatedClient = getSMBClient(config, { forceNew: true });
             const client = dedicatedClient;
@@ -814,9 +839,9 @@ app.post('/api/mkdir', async (req, res) => {
                     await executeSMBCommand(client, () => client.mkdir(smbPath));
                     break;
                 } catch (err) {
-                    if ((err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.code === 'STATUS_DELETE_PENDING') && attempts < 5) {
-                        console.log(`[Mkdir SMB] Collision/Pending detected for ${smbPath}, retrying... (${attempts+1}/5)`);
-                        await new Promise(r => setTimeout(r, 200));
+                    if ((err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.code === 'STATUS_DELETE_PENDING') && attempts < 15) {
+                        console.log(`[Mkdir SMB] Collision/Pending detected for ${smbPath}, retrying... (${attempts+1}/15)`);
+                        await new Promise(r => setTimeout(r, 500));
                         attempts++;
                     } else {
                         throw err;
@@ -883,6 +908,7 @@ app.post('/api/delete', async (req, res) => {
                 await fs.remove(absPath);
             }));
         } else if (config.type === 'smb') {
+            clearSMBSession(config);
             dedicatedClient = getSMBClient(config, { forceNew: true });
             const client = dedicatedClient;
             for (const item of items) {
