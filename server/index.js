@@ -959,27 +959,32 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
         throw err;
     }
 
-    // 2. Process children (Parallelized with Batching)
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < items.length; i += BATCH_SIZE) {
-        const chunk = items.slice(i, i + BATCH_SIZE);
-        await Promise.all(chunk.map(async (item) => {
-            const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
-            try {
-                const stats = await executeSMBCommand(client, () => client.stat(itemPath));
-                if (stats.isDirectory()) {
-                    await rmDirRecursiveSMB(client, itemPath); // Recursively delete sub-folders
-                } else {
-                    await executeSMBCommand(client, () => client.unlink(itemPath)); // Delete file
+    // Helper to process a list of items
+    const processItems = async (itemList) => {
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < itemList.length; i += BATCH_SIZE) {
+            const chunk = itemList.slice(i, i + BATCH_SIZE);
+            await Promise.all(chunk.map(async (item) => {
+                const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
+                try {
+                    const stats = await executeSMBCommand(client, () => client.stat(itemPath));
+                    if (stats.isDirectory()) {
+                        await rmDirRecursiveSMB(client, itemPath); // Recursively delete sub-folders
+                    } else {
+                        await executeSMBCommand(client, () => client.unlink(itemPath)); // Delete file
+                    }
+                } catch (err) {
+                    if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
+                    console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
                 }
-            } catch (err) {
-                if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
-                console.warn(`[Delete] Failed to delete child ${itemPath}:`, err.message);
-            }
-        }));
-    }
+            }));
+        }
+    };
 
-    // 3. Delete the directory itself (with simple retry for sync lag)
+    // 2. Process children (Initial Pass)
+    await processItems(items);
+
+    // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
     while (retryCount < 5) {
         try {
@@ -989,10 +994,22 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
             
             if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
-                // If not empty after we just cleared it, it's likely a sync/cache lag.
-                // Wait and retry.
                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/5)`);
-                await new Promise(r => setTimeout(r, 500)); 
+                
+                // If directory is not empty, try to see WHAT is left and delete it
+                if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
+                    try {
+                         const remainingItems = await executeSMBCommand(client, () => client.readdir(dirPath));
+                         if (remainingItems.length > 0) {
+                             console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}, cleaning up...`);
+                             await processItems(remainingItems);
+                         }
+                    } catch (readErr) {
+                        // If readdir fails, maybe it's gone or access denied, just continue to wait/retry
+                    }
+                }
+
+                await new Promise(r => setTimeout(r, 500 + (retryCount * 200))); // Increasing backoff
                 retryCount++;
                 continue;
             }
