@@ -56,14 +56,29 @@ const getWebDAVClient = (config) => {
 };
 
 const getSMBClient = (config) => {
-    // config.address: "192.168.1.100"
+    // config.address: "192.168.1.100" or "192.168.1.100:445"
     // config.share: "Public"
     // config.domain: ""
+    
+    let address = config.address;
+    let port = config.port;
+
+    // Extract port from address if present (e.g. "192.168.1.100:4455")
+    if (!port && typeof address === 'string' && address.includes(':')) {
+        const parts = address.split(':');
+        // Basic check for IPv4:Port format
+        if (parts.length === 2 && !isNaN(parseInt(parts[1], 10))) {
+            address = parts[0];
+            port = parseInt(parts[1], 10);
+        }
+    }
+
     return new SMB2({
-        share: `\\\\${config.address}\\${config.share}`,
+        share: `\\\\${address}\\${config.share}`,
         domain: config.domain || '',
         username: config.username,
         password: config.password,
+        port: port, // Optional port
         autoCloseTimeout: 0 // Keep connection open for a bit if possible, or 0 for default
     });
 };

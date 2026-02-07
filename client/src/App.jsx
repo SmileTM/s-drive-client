@@ -1192,7 +1192,7 @@ function App() {
         <div className="flex flex-col h-full p-4">
           <div className={clsx(
             "flex flex-col items-center gap-3 px-2 py-4 mb-6",
-            isMacDesktop && "pt-10" // Space for traffic lights
+            isMacDesktop && "pt-10 app-drag" // Space for traffic lights
           )}>
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-100">
               <ServerStackIcon className="w-6 h-6" />
@@ -1291,6 +1291,7 @@ function App() {
           className="sticky top-0 z-10 bg-main-bg/80 backdrop-blur-md border-b border-slate-100 transition-all"
           style={{ paddingTop: 'env(safe-area-inset-top)' }}
         >
+          {isMacDesktop && <div className="w-full h-8 app-drag" />}
           {/* Top Row: Sidebar, Back, Search, Actions */}
           <div className="flex items-center gap-2 px-4 sm:px-8 py-3">
             <button onClick={() => setIsSidebarOpen(true)} className="p-2 -ml-2 mr-1 hover:bg-white rounded-full md:hidden text-slate-600"><Bars3Icon className="w-6 h-6" /></button>
