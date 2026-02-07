@@ -973,6 +973,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                 try {
                     const stats = await executeSMBCommand(targetClient, () => targetClient.stat(itemPath));
                     isDir = stats.isDirectory();
+                    console.log(`[Delete Debug] Processing child: ${itemPath} (isDir=${isDir})`);
                     if (isDir) {
                         await rmDirRecursiveSMB(targetClient, itemPath, config); // Recursively delete sub-folders
                     } else {
@@ -1041,7 +1042,17 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
         }
 
         try {
+            console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
             await executeSMBCommand(loopClient, () => loopClient.rmdir(dirPath));
+            
+            // Verify deletion
+            try {
+                await executeSMBCommand(loopClient, () => loopClient.stat(dirPath));
+                console.warn(`[Delete Warning] rmdir succeeded for ${dirPath} but it still exists! (Ghost directory?)`);
+            } catch (e) {
+                // If stat fails, it's likely gone (good)
+            }
+            
             if (tempClient) {
                 try { await tempClient.disconnect(); } catch (e) {}
             }
