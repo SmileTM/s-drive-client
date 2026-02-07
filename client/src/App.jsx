@@ -888,6 +888,7 @@ function App() {
                     title: t.fileAlreadyExists,
                     message: t.confirmOverwriteSingle, // "Target file exists. Overwrite?"
                     type: 'warning',
+                    confirmText: t.overwrite,
                     onConfirm: () => executeMove(true) // Retry with overwrite
                 });
             } else {
@@ -993,6 +994,7 @@ function App() {
                     title: t.fileAlreadyExists,
                     message: t.confirmOverwriteSingle, // Reuse message
                     type: 'warning',
+                    confirmText: t.overwrite,
                     onConfirm: () => executeTransfer(true) // Retry with overwrite
                 });
             } else {
@@ -1022,6 +1024,7 @@ function App() {
                     title: t.fileAlreadyExists,
                     message: t.confirmOverwriteSingle,
                     type: 'warning',
+                    confirmText: t.overwrite,
                     onConfirm: () => performRename(newName, true)
                  });
             } else {
