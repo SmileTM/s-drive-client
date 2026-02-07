@@ -1528,10 +1528,28 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                                 }
 
                                 if (shouldOverwrite && !retry && (err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.message?.includes('STATUS_OBJECT_NAME_COLLISION'))) {
-                                    console.log(`[Upload] Collision detected for ${remotePath}. Deleting and retrying...`);
+                                    console.log(`[Upload] Collision detected for ${remotePath}. Clearing sessions and retrying...`);
                                     try {
+                                        clearSMBSession(config);
                                         const smbPath = toSMBPath(remotePath);
-                                        await executeSMBCommand(client, () => client.unlink(smbPath));
+                                        
+                                        // Retry unlink logic for SHARING_VIOLATION
+                                        let unlinkAttempts = 0;
+                                        while (unlinkAttempts < 3) {
+                                            try {
+                                                await executeSMBCommand(client, () => client.unlink(smbPath));
+                                                break;
+                                            } catch (unlinkErr) {
+                                                if (unlinkErr.code === 'STATUS_SHARING_VIOLATION' && unlinkAttempts < 2) {
+                                                    console.warn(`[Upload] Sharing Violation on Unlink. Retrying in 500ms... (${unlinkAttempts+1}/3)`);
+                                                    await new Promise(r => setTimeout(r, 500));
+                                                    unlinkAttempts++;
+                                                } else {
+                                                    throw unlinkErr;
+                                                }
+                                            }
+                                        }
+
                                         await performUpload(true); // Retry once
                                     } catch (retryErr) {
                                         throw retryErr; 
