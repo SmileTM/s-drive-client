@@ -13,6 +13,37 @@ const WebDavNative = registerPlugin('WebDavNative');
 // --- Global Event Listener System ---
 const uploadCallbacks = {}; // Map: id -> callback(info)
 let globalUploadListener = null;
+const serverProgressCallbacks = {}; // Map: id -> callback(info)
+
+const initServerProgressStream = () => {
+    if (Capacitor.isNativePlatform()) return;
+    
+    console.log('[ServerAPI] Initializing progress stream');
+    const eventSource = new EventSource('/api/progress-stream');
+    
+    eventSource.onmessage = (event) => {
+        try {
+            const info = JSON.parse(event.data);
+            const { id } = info;
+            if (id && serverProgressCallbacks[id]) {
+                serverProgressCallbacks[id](info);
+            }
+        } catch (e) {
+            console.error('[ServerAPI] Progress parse error', e);
+        }
+    };
+    
+    eventSource.onerror = (e) => {
+        console.warn('[ServerAPI] Progress stream error, reconnecting...', e);
+        eventSource.close();
+        setTimeout(initServerProgressStream, 3000); 
+    };
+};
+
+// Initialize progress stream for Web/Electron
+if (!Capacitor.isNativePlatform()) {
+    initServerProgressStream();
+}
 
 const initGlobalUploadListener = async () => {
     if (!Capacitor.isNativePlatform() || globalUploadListener) return;
@@ -535,41 +566,79 @@ const ServerAPI = {
       for (let i = 0; i < items.length; i++) {
           const item = items[i];
           const itemPath = item.path || item;
+          const taskId = item.id || `transfer_${Date.now()}_${i}`;
           const fileName = itemPath.split('/').pop();
           
-          if (onProgress) onProgress(i + 1, items.length, fileName);
+          if (onProgress) {
+              // Register real-time progress callback from SSE
+              serverProgressCallbacks[taskId] = (info) => {
+                  onProgress(i + 1, items.length, fileName, info.speed, info.uploaded, info.total);
+              };
+              // Initial progress call
+              onProgress(i + 1, items.length, fileName, 0, 0, 0);
+          }
           
-          await axios.post('/api/transfer', {
-              items: [itemPath],
-              sourceDrive: sourceDriveId,
-              destDrive: destDriveId,
-              destPath: destPath,
-              move: isMove,
-              overwrite
-          });
+          try {
+              await axios.post('/api/transfer', {
+                  items: [itemPath],
+                  sourceDrive: sourceDriveId,
+                  destDrive: destDriveId,
+                  destPath: destPath,
+                  move: isMove,
+                  overwrite,
+                  taskId
+              });
+          } finally {
+              delete serverProgressCallbacks[taskId];
+          }
 
           if (onItemComplete) onItemComplete(fileName);
       }
   },
   uploadFiles: async (path, files, driveId, onProgress, onItemComplete) => {
-    const formData = new FormData();
-    files.forEach(f => formData.append('files', f));
-    
-    // Axios upload progress is for the WHOLE batch
-    const config = { 
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (progressEvent) => {
-          if (onProgress && progressEvent.total) {
-              // Aggregate progress for the batch
-              onProgress(1, 1, 'Uploading...', 0, progressEvent.loaded, progressEvent.total);
-          }
-      }
-    };
+    // Process files sequentially for granular progress
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const taskId = file.taskId || `upload_${Date.now()}_${i}`;
+        
+        let lastUpdate = Date.now();
+        let lastBytes = 0;
 
-    await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}`, formData, config);
-    
-    if (onItemComplete) {
-        files.forEach(f => onItemComplete(f.name));
+        if (onProgress) {
+            serverProgressCallbacks[taskId] = (info) => {
+                onProgress(i + 1, files.length, file.name, info.speed, info.uploaded, info.total);
+            };
+        }
+        
+        const formData = new FormData();
+        formData.append('files', file);
+        
+        // Use a separate config for each upload
+        const config = { 
+            headers: { 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (progressEvent) => {
+                if (onProgress && progressEvent.total) {
+                    const now = Date.now();
+                    const timeDiff = (now - lastUpdate) / 1000;
+                    let speed = 0;
+                    if (timeDiff > 0) {
+                        speed = (progressEvent.loaded - lastBytes) / timeDiff;
+                    }
+                    lastUpdate = now;
+                    lastBytes = progressEvent.loaded;
+                    
+                    onProgress(i + 1, files.length, file.name, speed, progressEvent.loaded, progressEvent.total);
+                }
+            }
+        };
+
+        try {
+            await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}&taskId=${taskId}`, formData, config);
+        } finally {
+            delete serverProgressCallbacks[taskId];
+        }
+        
+        if (onItemComplete) onItemComplete(file.name);
     }
   },
   getDrives: async () => {

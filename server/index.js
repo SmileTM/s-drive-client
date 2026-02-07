@@ -15,22 +15,78 @@ try {
     console.warn('[WARN] Sharp module not found or failed to load. Image processing disabled.', e.message);
 }
 const { encrypt, decrypt } = require('./utils/crypto');
+const { EventEmitter } = require('events');
+const { Transform } = require('stream');
 
 const app = express();
+const progressEmitter = new EventEmitter();
+
+// --- Progress Tracking Helper ---
+function createProgressStream(taskId, totalSize) {
+    if (!taskId) return new Transform({ transform(c, e, cb) { this.push(c); cb(); } });
+    
+    let uploaded = 0;
+    let lastUpdate = Date.now();
+    let lastUploaded = 0;
+
+    return new Transform({
+        transform(chunk, encoding, callback) {
+            uploaded += chunk.length;
+            const now = Date.now();
+            // Emit progress every 500ms to avoid flooding
+            if (now - lastUpdate >= 500) {
+                const speed = (uploaded - lastUploaded) / ((now - lastUpdate) / 1000);
+                progressEmitter.emit('progress', {
+                    id: taskId,
+                    uploaded,
+                    total: totalSize,
+                    speed
+                });
+                lastUpdate = now;
+                lastUploaded = uploaded;
+            }
+            this.push(chunk);
+            callback();
+        },
+        flush(callback) {
+            progressEmitter.emit('progress', {
+                id: taskId,
+                uploaded,
+                total: totalSize,
+                speed: 0
+            });
+            callback();
+        }
+    });
+}
+
 const PORT = process.env.PORT || 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
 const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
 const CONFIG_FILE = path.join(APP_DATA_DIR, 'drives.json');
 
-// Ensure storage directory exists
-fs.ensureDirSync(STORAGE_DIR);
-fs.ensureDirSync(APP_DATA_DIR);
-if (!fs.existsSync(CONFIG_FILE)) {
-    fs.writeJsonSync(CONFIG_FILE, [{ id: 'local', name: 'Local Storage', type: 'local', path: './storage' }]);
-}
+// ... (existing code) ...
 
 app.use(cors());
 app.use(express.json());
+
+// --- Progress SSE Endpoint ---
+app.get('/api/progress-stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const onProgress = (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    progressEmitter.on('progress', onProgress);
+
+    req.on('close', () => {
+        progressEmitter.off('progress', onProgress);
+    });
+});
 
 // --- Drive Helper: Get Client for Drive ---
 const getDriveConfig = async (driveId) => {
@@ -1095,7 +1151,7 @@ const getFSAdapter = (config) => {
 };
 
 // Recursive Transfer Function
-const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, overwrite = false) => {
+const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, overwrite = false, taskId = null) => {
     const stats = await srcAdapter.stat(srcPath);
     
     if (stats.isDirectory()) {
@@ -1108,7 +1164,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
             if (childName === '.' || childName === '..') continue;
             const childSrc = srcAdapter.join(srcPath, childName);
             const childDst = dstAdapter.join(dstPath, childName);
-            await transferItemRecursive(srcAdapter, dstAdapter, childSrc, childDst, overwrite);
+            await transferItemRecursive(srcAdapter, dstAdapter, childSrc, childDst, overwrite, taskId);
         }
     } else {
         // Check existence if not overwriting
@@ -1127,13 +1183,15 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
 
         // Helper to perform copy with retry on collision
         const performCopy = async (retry = false) => {
-            let readStream, writeStream;
+            let readStream, writeStream, progressStream;
             try {
                 readStream = await srcAdapter.createReadStream(srcPath);
+                progressStream = createProgressStream(taskId, stats.size);
                 writeStream = await dstAdapter.createWriteStream(dstPath);
-                await pipeline(readStream, writeStream);
+                await pipeline(readStream, progressStream, writeStream);
             } catch (err) {
                 if (readStream) readStream.destroy();
+                if (progressStream) progressStream.destroy();
                 if (writeStream) writeStream.destroy();
 
                 // Handle SMB collision if overwriting is enabled
@@ -1164,8 +1222,8 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
 app.post('/api/transfer', async (req, res) => {
     let srcAdapter, dstAdapter;
     try {
-        const { items, sourceDrive, destDrive, destPath, move, overwrite = false } = req.body;
-        console.log(`[DEBUG] POST /api/transfer count=${items?.length} from=${sourceDrive} to=${destDrive} overwrite=${overwrite}`);
+        const { items, sourceDrive, destDrive, destPath, move, overwrite = false, taskId = null } = req.body;
+        console.log(`[DEBUG] POST /api/transfer count=${items?.length} from=${sourceDrive} to=${destDrive} overwrite=${overwrite} taskId=${taskId}`);
         if (!items || !sourceDrive || !destDrive) return res.status(400).json({ error: 'Missing parameters' });
 
         const srcConfig = await getDriveConfig(sourceDrive);
@@ -1179,7 +1237,7 @@ app.post('/api/transfer', async (req, res) => {
             const targetPath = path.posix.join(destPath, fileName);
             
             try {
-                await transferItemRecursive(srcAdapter, dstAdapter, itemPath, targetPath, overwrite);
+                await transferItemRecursive(srcAdapter, dstAdapter, itemPath, targetPath, overwrite, taskId);
                 
                 // If Move, delete source after successful transfer
                 if (move) {
@@ -1367,8 +1425,8 @@ const upload = multer({
 
 app.post('/api/upload', upload.array('files'), async (req, res) => {
     const uploadedFiles = req.files || [];
-    const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
-    console.log(`[Upload] Processing ${uploadedFiles.length} files. Drive: ${driveId}`);
+    const { path: reqPath = '/', drive: driveId = 'local', taskId: queryTaskId = null } = req.query;
+    console.log(`[Upload] Processing ${uploadedFiles.length} files. Drive: ${driveId}. taskId: ${queryTaskId}`);
 
     try {
         const config = await getDriveConfig(driveId);
@@ -1381,6 +1439,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     console.log(`[Upload] Transferring to ${config.type}: ${file.filename}`);
                     
                     const readStream = fs.createReadStream(file.path);
+                    const progressStream = createProgressStream(queryTaskId, file.size);
 
                     if (config.type === 'smb') {
                         // Use autoCloseTimeout: 0 to prevent STATUS_FILE_CLOSED during upload
@@ -1388,7 +1447,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                         try {
                             const smbPath = toSMBPath(remotePath);
                             const writeStream = await client.createWriteStream(smbPath);
-                            await pipeline(readStream, writeStream);
+                            await pipeline(readStream, progressStream, writeStream);
                         } catch (err) {
                             if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
                                 console.warn(`[Upload Warn] Swallowed cleanup error for ${remotePath}:`, err.message);
@@ -1400,7 +1459,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                         }
                     } else {
                          const client = getWebDAVClient(config);
-                         await client.putFileContents(remotePath, readStream);
+                         await client.putFileContents(remotePath, progressStream);
                     }
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
