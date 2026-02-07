@@ -260,7 +260,7 @@ const normalizeFile = (file, driveId, type = 'webdav') => {
             path: file.name, // SMB returns name relative to listed folder usually, parent context needed for full path?
             isDirectory: file.isDirectory(),
             size: file.size,
-            mtime: file.lastWriteTime, // SMB2 uses changeTime/lastWriteTime
+            mtime: file.lastWriteTime || file.changeTime || new Date(0), // SMB2 uses changeTime/lastWriteTime
             type: file.isDirectory() ? 'folder' : mime.lookup(file.name) || 'application/octet-stream'
         };
     }
@@ -540,6 +540,7 @@ app.get('/api/files', async (req, res) => {
                             const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
                             // Wrap stat in executeSMBCommand (concurrently might be heavy, but retry handles dropping)
                             const stats = await executeSMBCommand(client, () => client.stat(itemPath));
+                            console.log(`[DEBUG] SMB Stat for ${name}:`, stats.lastWriteTime, typeof stats.lastWriteTime);
                             
                             // Construct full relative path for frontend
                             const webPath = path.posix.join(reqPath, name);
@@ -549,7 +550,7 @@ app.get('/api/files', async (req, res) => {
                                 path: webPath,
                                 isDirectory: stats.isDirectory(),
                                 size: stats.size,
-                                mtime: stats.lastWriteTime,
+                                mtime: stats.lastWriteTime || stats.changeTime || new Date(0),
                                 type: stats.isDirectory() ? 'folder' : mime.lookup(name) || 'application/octet-stream'
                             };
                         } catch(e) {
@@ -648,6 +649,8 @@ app.get('/api/search', async (req, res) => {
                 name,
                 path: path.posix.join(searchPath, name),
                 isDirectory: false, // Don't know without stat
+                size: 0,
+                mtime: new Date(0),
                 type: mime.lookup(name) || 'application/octet-stream'
             }));
             res.json(results);
