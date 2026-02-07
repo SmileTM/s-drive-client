@@ -1387,9 +1387,9 @@ app.post('/api/rename', async (req, res) => {
                     await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
                     break; // Success
                 } catch (e) {
-                    // Handle Sharing Violation (File in use)
-                    if (e.code === 'STATUS_SHARING_VIOLATION' && renameAttempts < maxRenameAttempts - 1) {
-                         console.warn(`[Rename] Sharing Violation. Retrying... (${renameAttempts + 1}/${maxRenameAttempts})`);
+                    // Handle Sharing Violation or Access Denied (File in use/Locked)
+                    if ((e.code === 'STATUS_SHARING_VIOLATION' || e.code === 'STATUS_ACCESS_DENIED') && renameAttempts < maxRenameAttempts - 1) {
+                         console.warn(`[Rename] Locked (${e.code}). Retrying... (${renameAttempts + 1}/${maxRenameAttempts})`);
                          clearSMBSession(config); // Clear locks
                          await new Promise(r => setTimeout(r, 500));
                          renameAttempts++;
