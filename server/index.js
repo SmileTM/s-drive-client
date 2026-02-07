@@ -107,6 +107,32 @@ const getSMBClient = (config, options = {}) => {
     return smbClients.get(key);
 };
 
+// Helper: Ensure SMB Client is connected (Singleton Connection Promise)
+const ensureSMBConnected = async (client) => {
+    if (client.connected) return;
+    if (client._connectPromise) {
+        await client._connectPromise;
+        return;
+    }
+    
+    client._connectPromise = (async () => {
+        try {
+            // Trigger connection via a lightweight check (root listing)
+            // We ignore errors here because the goal is just to connect.
+            // If the share is invalid, the actual command later will fail anyway.
+            await client.readdir(''); 
+        } catch (e) {
+            // Ignore readdir errors, just check connected state
+        }
+    })();
+
+    try {
+        await client._connectPromise;
+    } finally {
+        client._connectPromise = null;
+    }
+};
+
 // Helper: Normalize file info for frontend
 const normalizeFile = (file, driveId, type = 'webdav') => {
     if (type === 'smb') {
@@ -377,6 +403,7 @@ app.get('/api/files', async (req, res) => {
             res.json({ path: safePath, files: fileList });
         } else if (config.type === 'smb') {
             const client = getSMBClient(config);
+            await ensureSMBConnected(client);
             // Strip leading slashes for SMB
             const smbPath = toSMBPath(reqPath);
             
@@ -495,6 +522,7 @@ app.get('/api/search', async (req, res) => {
         } else if (config.type === 'smb') {
             // SMB Search - Shallow only for now
             const client = getSMBClient(config);
+            await ensureSMBConnected(client);
             const smbPath = toSMBPath(searchPath);
             const names = await client.readdir(smbPath);
             const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
@@ -532,6 +560,7 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const client = getSMBClient(config, { tag: 'preview' });
+            await ensureSMBConnected(client);
             const smbPath = toSMBPath(reqPath);
             
             try {
@@ -699,6 +728,7 @@ app.get('/api/preview', async (req, res) => {
              inputStream = fs.createReadStream(absPath);
         } else if (config.type === 'smb') {
              const client = getSMBClient(config, { tag: 'preview' });
+             await ensureSMBConnected(client);
              const smbPath = toSMBPath(reqPath);
              try {
                  inputStream = await client.createReadStream(smbPath);
@@ -1180,6 +1210,7 @@ app.post('/api/prepare-drag', async (req, res) => {
                     
                     if (config.type === 'smb') {
                         const client = getSMBClient(config, { tag: 'preview' });
+                        await ensureSMBConnected(client);
                         const readStream = await client.createReadStream(toSMBPath(itemPath));
                         const writeStream = fs.createWriteStream(tempFilePath);
                         await pipeline(readStream, writeStream);
