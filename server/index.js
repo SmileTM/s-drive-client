@@ -986,17 +986,30 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                 await new Promise(r => setTimeout(r, 500));
                 retryCount++;
                 
-                // Optional: Re-scan and delete if something appeared? 
-                // For now, let's assume it's a "delete pending" lag for children.
-                if (retryCount === 3) {
-                     // Aggressive retry: try to list and delete children again if stuck
+                // Aggressive retry: Re-scan and delete content if stuck
+                if (retryCount >= 2) {
+                     console.log(`[Delete] Re-scanning content for ${dirPath}...`);
                      try {
                          const lingering = await executeSMBCommand(client, () => client.readdir(dirPath));
                          for (const l of lingering) {
                             const lPath = dirPath === '\\' ? l : `${dirPath}\\${l}`;
-                            try { await executeSMBCommand(client, () => client.unlink(lPath)); } catch(e){}
+                            try {
+                                const lStats = await executeSMBCommand(client, () => client.stat(lPath));
+                                if (lStats.isDirectory()) {
+                                    await rmDirRecursiveSMB(client, lPath);
+                                } else {
+                                    await executeSMBCommand(client, () => client.unlink(lPath));
+                                }
+                            } catch(e) {
+                                // Ignore if already gone or access denied (best effort)
+                                if (e.code !== 'STATUS_OBJECT_NAME_NOT_FOUND' && e.code !== 'STATUS_DELETE_PENDING') {
+                                     console.warn(`[Delete] Failed to clean lingering item ${lPath}:`, e.message);
+                                }
+                            }
                          }
-                     } catch(e) {}
+                     } catch(e) {
+                         // Ignore list error
+                     }
                 }
                 continue;
             }
