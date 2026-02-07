@@ -968,9 +968,11 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
             const chunk = itemList.slice(i, i + BATCH_SIZE);
             await Promise.all(chunk.map(async (item) => {
                 const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
+                let isDir = false;
                 try {
                     const stats = await executeSMBCommand(client, () => client.stat(itemPath));
-                    if (stats.isDirectory()) {
+                    isDir = stats.isDirectory();
+                    if (isDir) {
                         await rmDirRecursiveSMB(client, itemPath); // Recursively delete sub-folders
                     } else {
                         await executeSMBCommand(client, () => client.unlink(itemPath)); // Delete file
@@ -996,7 +998,11 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                                      archive: false
                                  }));
                                  // Retry delete once
-                                 await executeSMBCommand(client, () => client.unlink(itemPath));
+                                 if (isDir) {
+                                     await rmDirRecursiveSMB(client, itemPath);
+                                 } else {
+                                     await executeSMBCommand(client, () => client.unlink(itemPath));
+                                 }
                                  return;
                              }
                         } catch (attrErr) {
@@ -1034,6 +1040,8 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                          if (remainingItems.length > 0) {
                              console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}: [${remainingItems.join(', ')}], cleaning up...`);
                              await processItems(remainingItems);
+                         } else {
+                             console.warn(`[Delete] Directory ${dirPath} is not empty but readdir found 0 items. Possible hidden/system files?`);
                          }
                     } catch (readErr) {
                         // If readdir fails, maybe it's gone or access denied, just continue to wait/retry
@@ -1047,6 +1055,7 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
             throw err;
         }
     }
+    throw new Error(`Failed to delete directory ${dirPath} after ${retryCount} retries.`);
 };
 
 // POST /api/delete
