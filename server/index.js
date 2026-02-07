@@ -491,18 +491,16 @@ app.get('/api/search', async (req, res) => {
         } else if (config.type === 'smb') {
             // SMB Search - Shallow only for now
             const client = getSMBClient(config);
-            try {
-                const smbPath = toSMBPath(searchPath);
-                const names = await client.readdir(smbPath);
-                const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
-                const results = matches.map(name => ({
-                    name,
-                    path: path.posix.join(searchPath, name),
-                    isDirectory: false, // Don't know without stat
-                    type: mime.lookup(name) || 'application/octet-stream'
-                }));
-                res.json(results);
-            }
+            const smbPath = toSMBPath(searchPath);
+            const names = await client.readdir(smbPath);
+            const matches = names.filter(n => n.toLowerCase().includes(query.toLowerCase()));
+            const results = matches.map(name => ({
+                name,
+                path: path.posix.join(searchPath, name),
+                isDirectory: false, // Don't know without stat
+                type: mime.lookup(name) || 'application/octet-stream'
+            }));
+            res.json(results);
 
         } else {
             // WebDAV Search (Naive)
