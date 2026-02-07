@@ -1323,7 +1323,7 @@ const getFSAdapter = (config) => {
             unlink: async (p) => {
                 const smbP = toSMB(p);
                 const stats = await executeSMBCommand(client, () => client.stat(smbP));
-                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbP);
+                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbP, config);
                 else await executeSMBCommand(client, () => client.unlink(smbP));
             },
             join: (base, name) => path.posix.join(base, name),
