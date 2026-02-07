@@ -55,6 +55,9 @@ const getWebDAVClient = (config) => {
     });
 };
 
+// Global SMB Cache
+const smbClients = new Map();
+
 const getSMBClient = (config, options = {}) => {
     // config.address: "192.168.1.100" or "192.168.1.100:445"
     // config.share: "Public"
@@ -75,15 +78,29 @@ const getSMBClient = (config, options = {}) => {
 
     const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
 
-    return new SMB2({
+    // Check if dedicated client requested (e.g. for transfer/upload)
+    const isDedicated = options && (options.autoCloseTimeout === 0 || Object.keys(options).length > 0);
+
+    const createClient = () => new SMB2({
         share: `\\\\${address}\\${cleanShare}`,
         domain: config.domain || '',
         username: config.username,
         password: config.password,
         port: port, // Optional port
         packetConcurrency: 5,
+        autoCloseTimeout: 30000, // Default 30s auto-close for cached clients
         ...options
     });
+
+    if (isDedicated) {
+        return createClient();
+    }
+
+    const key = `${address}|${cleanShare}|${config.username}`;
+    if (!smbClients.has(key)) {
+        smbClients.set(key, createClient());
+    }
+    return smbClients.get(key);
 };
 
 // Helper: Normalize file info for frontend
@@ -399,8 +416,6 @@ app.get('/api/files', async (req, res) => {
             } catch (smbErr) {
                  console.error('SMB List Error:', smbErr);
                  res.status(502).json({ error: `SMB Error: ${smbErr.message}` });
-            } finally {
-                await client.disconnect();
             }
 
         } else {
@@ -487,8 +502,6 @@ app.get('/api/search', async (req, res) => {
                     type: mime.lookup(name) || 'application/octet-stream'
                 }));
                 res.json(results);
-            } finally {
-                await client.disconnect();
             }
 
         } else {
@@ -552,20 +565,12 @@ app.get('/api/raw', async (req, res) => {
 
                 const stream = await client.createReadStream(smbPath, options);
                 
-                const cleanup = async () => {
-                    try { await client.disconnect(); } catch (e) { /* ignore */ }
-                };
-                
-                stream.on('end', cleanup);
                 stream.on('error', (err) => {
                     console.error('SMB Stream Error', err);
-                    cleanup();
                 });
-                res.on('close', cleanup); // Client disconnected
 
                 stream.pipe(res);
             } catch (e) {
-                await client.disconnect();
                 if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
                     return res.status(404).send('File not found');
                 }
@@ -695,17 +700,10 @@ app.get('/api/preview', async (req, res) => {
              const smbPath = toSMBPath(reqPath);
              try {
                  inputStream = await client.createReadStream(smbPath);
-                 const cleanup = async () => {
-                     try { await client.disconnect(); } catch (e) {}
-                 };
-                 inputStream.on('end', cleanup);
                  inputStream.on('error', (err) => {
                      console.error('[Preview Stream Error]', err);
-                     cleanup();
                  });
-                 res.on('close', cleanup);
              } catch(e) {
-                 await client.disconnect();
                  if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
                      return res.status(404).send('File not found');
                  }
