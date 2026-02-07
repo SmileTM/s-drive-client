@@ -19,6 +19,9 @@ const { EventEmitter } = require('events');
 const { Transform } = require('stream');
 
 const app = express();
+app.use(cors());
+app.use(express.json());
+
 const progressEmitter = new EventEmitter();
 
 // --- Progress Tracking Helper ---
@@ -81,11 +84,6 @@ const PORT = process.env.PORT || 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
 const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
 const CONFIG_FILE = path.join(APP_DATA_DIR, 'drives.json');
-
-// ... (existing code) ...
-
-app.use(cors());
-app.use(express.json());
 
 // --- Progress SSE Endpoint ---
 app.get('/api/progress-stream', (req, res) => {
@@ -1238,6 +1236,9 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                         // Benign error during cleanup, silent ignore
                     } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
                         // Stream destroyed (likely via cancel)
+                         console.log(`[Transfer] Cancelled, cleaning up: ${dstPath}`);
+                         try { await dstAdapter.unlink(dstPath); } catch(cleanupErr) { console.warn('[Transfer] Cleanup failed:', cleanupErr.message); }
+
                          const cancelErr = new Error('Transfer Cancelled');
                          cancelErr.code = 'CANCELLED';
                          throw cancelErr;
@@ -1522,7 +1523,17 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
                     if (e.message === 'Upload Cancelled') {
-                        console.log(`[Upload] Cancelled: ${file.filename}`);
+                        console.log(`[Upload] Cancelled, cleaning up: ${remotePath}`);
+                        try {
+                             if (config.type === 'smb') {
+                                 const client = getSMBClient(config);
+                                 const smbPath = toSMBPath(remotePath);
+                                 await executeSMBCommand(client, () => client.unlink(smbPath));
+                             } else {
+                                 const client = getWebDAVClient(config);
+                                 await client.deleteFile(remotePath);
+                             }
+                        } catch(cleanupErr) { console.warn('[Upload] Cleanup failed:', cleanupErr.message); }
                     } else {
                         console.error(`[Upload] Failed to upload ${file.filename}:`, e);
                         throw e; 
