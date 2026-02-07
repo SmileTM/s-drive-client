@@ -948,7 +948,16 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath) =
         const readStream = await srcAdapter.createReadStream(srcPath);
         const writeStream = await dstAdapter.createWriteStream(dstPath);
         
-        await pipeline(readStream, writeStream);
+        try {
+            await pipeline(readStream, writeStream);
+        } catch (err) {
+            // Ignore STATUS_FILE_CLOSED as it likely means the server closed the handle before we could destroy the stream
+            if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                console.warn(`[Transfer Warn] Swallowed cleanup error for ${srcPath}:`, err.message);
+            } else {
+                throw err;
+            }
+        }
     }
 };
 
@@ -1140,6 +1149,12 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                             const smbPath = toSMBPath(remotePath);
                             const writeStream = await client.createWriteStream(smbPath);
                             await pipeline(readStream, writeStream);
+                        } catch (err) {
+                            if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
+                                console.warn(`[Upload Warn] Swallowed cleanup error for ${remotePath}:`, err.message);
+                            } else {
+                                throw err;
+                            }
                         } finally {
                             await client.disconnect();
                         }
