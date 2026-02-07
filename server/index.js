@@ -1024,7 +1024,7 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
 
     // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
-    while (retryCount < 5) {
+    while (retryCount < 10) {
         try {
             await executeSMBCommand(client, () => client.rmdir(dirPath));
             return;
@@ -1032,7 +1032,7 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') return;
             
             if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
-                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/5)`);
+                console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying... (${retryCount + 1}/10)`);
                 
                 // If directory is not empty, try to see WHAT is left and delete it
                 if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
@@ -1051,14 +1051,14 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                     }
                 }
 
-                await new Promise(r => setTimeout(r, 500 + (retryCount * 200))); // Increasing backoff
+                await new Promise(r => setTimeout(r, 1000 + (retryCount * 500))); // Increasing backoff
                 retryCount++;
                 continue;
             }
 
             // Attempt to clear Read-Only/Hidden if deletion failed due to access denied
             if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
-                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes and retry... (${retryCount + 1}/5)`);
+                 console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Attempting to clear attributes and retry... (${retryCount + 1}/10)`);
                  try {
                      if (typeof client.setFileAttributes === 'function') {
                          await executeSMBCommand(client, () => client.setFileAttributes(dirPath, { 
@@ -1071,7 +1071,7 @@ const rmDirRecursiveSMB = async (client, dirPath) => {
                  } catch (attrErr) {
                     console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
                  }
-                 await new Promise(r => setTimeout(r, 200));
+                 await new Promise(r => setTimeout(r, 500));
                  retryCount++;
                  continue;
             }
