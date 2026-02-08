@@ -964,7 +964,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
     // Helper: Wait for item to disappear
     const waitForDeletion = async (targetClient, itemPath) => {
         let retries = 0;
-        while (retries < 10) { // Wait up to 2 seconds
+        while (retries < 50) { // Wait up to 10 seconds (increased from 2s)
             try {
                 await executeSMBCommand(targetClient, () => targetClient.stat(itemPath));
                 // If stat succeeds, it's still there
@@ -1147,8 +1147,8 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
 
     // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
-    // Retry up to 3 times to allow for propagation of child deletions (Delete Pending state)
-    while (retryCount < 3) {
+    // Retry up to 10 times (increased from 3) to allow for propagation of child deletions (Delete Pending state)
+    while (retryCount < 10) {
         try {
             // console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
             await executeSMBCommand(client, () => client.rmdir(dirPath));
@@ -1187,7 +1187,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     }
                 }
 
-                await new Promise(r => setTimeout(r, 500 + (retryCount * 200))); 
+                await new Promise(r => setTimeout(r, 1000 + (retryCount * 500))); 
                 retryCount++;
                 continue;
             }
@@ -1207,7 +1207,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
                  }
                  
-                 await new Promise(r => setTimeout(r, 500));
+                 await new Promise(r => setTimeout(r, 1000));
                  retryCount++;
                  continue;
             }
