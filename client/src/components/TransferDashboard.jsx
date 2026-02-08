@@ -182,12 +182,12 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                     {/* File Type Icon Placeholder */}
                                                     <div className={clsx(
                                                         "w-10 h-10 rounded-xl flex items-center justify-center shrink-0",
-                                                        task.status === 'error' ? "bg-red-50 text-red-500" : "bg-indigo-50 text-indigo-500"
+                                                        task.status === 'error' ? "bg-red-50 text-red-500" : (task.type === 'delete' ? "bg-red-50 text-red-500" : "bg-indigo-50 text-indigo-500")
                                                     )}>
                                                         {task.status === 'error' ? (
                                                             <ExclamationCircleIcon className="w-6 h-6" />
                                                         ) : (
-                                                             <span className="text-xs font-bold uppercase">{task.name.split('.').pop().slice(0,3)}</span>
+                                                            task.type === 'delete' ? <TrashIcon className="w-6 h-6" /> : <span className="text-xs font-bold uppercase">{task.name.split('.').pop().slice(0,3)}</span>
                                                         )}
                                                     </div>
                                                     
@@ -196,13 +196,19 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                             {task.name}
                                                         </p>
                                                         <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono mt-0.5">
-                                                            {task.status === 'active' && (
+                                                            {task.type === 'delete' ? (
+                                                                <span className="text-slate-500">{task.status === 'active' ? (t.deleting || 'Deleting...') : ''}</span>
+                                                            ) : (
                                                                 <>
-                                                                    <span className="text-indigo-500">{formatSpeed(task.speed)}</span>
-                                                                    <span>•</span>
+                                                                    {task.status === 'active' && (
+                                                                        <>
+                                                                            <span className="text-indigo-500">{formatSpeed(task.speed)}</span>
+                                                                            <span>•</span>
+                                                                        </>
+                                                                    )}
+                                                                    <span>{formatSize(task.currentBytes || 0)} / {formatSize(task.totalBytes || 0)}</span>
                                                                 </>
                                                             )}
-                                                            <span>{formatSize(task.currentBytes || 0)} / {formatSize(task.totalBytes || 0)}</span>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -237,10 +243,15 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                             {(task.status === 'active' || task.status === 'pending') && (
                                                 <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-700/50 rounded-full overflow-hidden">
                                                     <motion.div 
-                                                        className={clsx("h-full rounded-full", task.status === 'pending' ? "bg-slate-300 w-full animate-pulse" : "bg-indigo-500")}
+                                                        className={clsx(
+                                                            "h-full rounded-full", 
+                                                            task.status === 'pending' ? "bg-slate-300 w-full animate-pulse" : (
+                                                                task.type === 'delete' ? "bg-red-400 w-full animate-pulse" : "bg-indigo-500"
+                                                            )
+                                                        )}
                                                         initial={{ width: 0 }}
                                                         animate={{ 
-                                                            width: task.status === 'pending' ? '100%' : `${Math.min((task.currentBytes / Math.max(task.totalBytes, 1)) * 100, 100)}%` 
+                                                            width: (task.status === 'pending' || task.type === 'delete') ? '100%' : `${Math.min((task.currentBytes / Math.max(task.totalBytes, 1)) * 100, 100)}%` 
                                                         }}
                                                         transition={{ duration: 0.2 }}
                                                     />

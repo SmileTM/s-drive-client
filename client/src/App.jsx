@@ -840,17 +840,39 @@ function App() {
     const folders = selectedItems.filter(f => f.isDirectory);
 
     const executeDelete = async () => {
-        setIsProcessing(true);
-        setProcessingText(t.deleting || 'Deleting...');
+        // Clear selection immediately
+        const itemsToDelete = Array.from(selectedPaths);
+        const count = itemsToDelete.length;
+        const taskName = count === 1 ? itemsToDelete[0].split('/').pop() : t.items.replace('{count}', count);
+        
+        setSelectedPaths(new Set());
+        
+        // Create Task
+        const taskId = `del_${Date.now()}`;
+        const newTask = {
+            id: taskId,
+            name: taskName,
+            type: 'delete',
+            status: 'active',
+            currentBytes: 0,
+            totalBytes: 0,
+            speed: 0
+        };
+        
+        setTasks(prev => [newTask, ...prev]);
+        setTransferDashboardOpen(true); // Open dashboard to show progress
+
         try { 
-            await api.deleteItems(Array.from(selectedPaths), activeDrive); 
-            await fetchFiles(currentPath); 
-            setSelectedPaths(new Set()); 
+            await api.deleteItems(itemsToDelete, activeDrive); 
+            // Mark Done
+            setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'done' } : t));
+            
+            // Refresh if we are still in the same view
+            fetchFiles(currentPath); 
         } catch (err) { 
+            console.error('Delete failed:', err);
+            setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
             showAlert(t.deleteFailed, t.failed, 'error'); 
-        } finally {
-            setIsProcessing(false);
-            setProcessingText('');
         }
     };
 
