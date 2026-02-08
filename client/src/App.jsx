@@ -360,6 +360,10 @@ function App() {
   const [detailsModal, setDetailsModal] = useState(null);
   const [confirmModal, setConfirmModal] = useState({ isOpen: false, title: '', message: '', type: 'info', onConfirm: () => {} });
   const [alertModal, setAlertModal] = useState({ isOpen: false, title: '', message: '', type: 'error' });
+  
+  // Loading Overlay State
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingText, setProcessingText] = useState('');
 
   // Language State
   const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
@@ -836,11 +840,18 @@ function App() {
     const folders = selectedItems.filter(f => f.isDirectory);
 
     const executeDelete = async () => {
+        setIsProcessing(true);
+        setProcessingText(t.deleting || 'Deleting...');
         try { 
             await api.deleteItems(Array.from(selectedPaths), activeDrive); 
-            fetchFiles(currentPath); 
+            await fetchFiles(currentPath); 
             setSelectedPaths(new Set()); 
-        } catch (err) { showAlert(t.deleteFailed, t.failed, 'error'); }
+        } catch (err) { 
+            showAlert(t.deleteFailed, t.failed, 'error'); 
+        } finally {
+            setIsProcessing(false);
+            setProcessingText('');
+        }
     };
 
     const checkFoldersAndConfirm = async () => {
@@ -1803,6 +1814,23 @@ function App() {
             onClose={() => setAlertModal(prev => ({ ...prev, isOpen: false }))}
             lang={lang}
         />
+
+        {/* Processing Overlay */}
+        <AnimatePresence>
+            {isProcessing && (
+                <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+                >
+                    <div className="bg-white/90 backdrop-blur-md p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4">
+                        <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                        <span className="text-slate-700 font-medium text-lg">{processingText}</span>
+                    </div>
+                </motion.div>
+            )}
+        </AnimatePresence>
 
         <AnimatePresence>{isAddDriveOpen && <div className="fixed inset-0 z-[60]"><AddDriveModal onClose={() => setIsAddDriveOpen(false)} onAdded={(newDrive) => {
           if (newDrive) {
