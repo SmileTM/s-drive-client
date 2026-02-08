@@ -973,7 +973,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
             } catch (e) {
                 // If stat fails with Not Found, it's gone!
                 if (e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.code === 'STATUS_NO_SUCH_FILE') {
-                    return;
+                    return true;
                 }
                 // If still pending or other error, wait
                 await new Promise(r => setTimeout(r, 200));
@@ -981,6 +981,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
             }
         }
         console.warn(`[Delete Warn] Item ${itemPath} still exists after waiting`);
+        return false;
     };
 
     // Helper to process a list of items
@@ -1002,13 +1003,15 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                         await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath)); // Delete file
                     }
                 } catch (err) {
-                    // console.log(`[Delete Debug] Stat/Process failed for ${itemPath}: ${err.code || err.message}`);
+                    console.log(`[Delete Debug] Stat/Process failed for ${itemPath}: ${err.code || err.message}`);
 
                     if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING' || err.code === 'STATUS_NO_SUCH_FILE') {
                         // If it's pending, wait for it to actually go away
                         if (err.code === 'STATUS_DELETE_PENDING') {
-                            await waitForDeletion(targetClient, itemPath);
-                            return;
+                            const gone = await waitForDeletion(targetClient, itemPath);
+                            if (gone) return;
+                            // If still there, fall through to ghost handling or aggressive cleanup
+                            console.warn(`[Delete] Item ${itemPath} stuck in PENDING state. Trying aggressive cleanup.`);
                         }
 
                         // The item appears in readdir but stat fails. It might be a ghost or in a weird state.
@@ -1044,7 +1047,34 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                                      console.warn(`[Delete] Failed to delete ghost file ${itemPath}: ${ulErr.message} (${ulErr.code})`);
                                 }
                             } else if (rmErr.code === 'STATUS_DELETE_PENDING') {
-                                await waitForDeletion(targetClient, itemPath);
+                                const gone = await waitForDeletion(targetClient, itemPath);
+                                if (!gone) {
+                                    // It's still here! Maybe it wasn't empty? Try recursing?
+                                    console.log(`[Delete] Ghost Item ${itemPath} stuck in PENDING. Trying aggressive cleanup.`);
+                                    // Try clearing attributes
+                                    try {
+                                        if (typeof targetClient.setFileAttributes === 'function') {
+                                            await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
+                                                 hidden: false, 
+                                                 readOnly: false, 
+                                                 system: false,
+                                                 archive: false
+                                            }));
+                                        }
+                                    } catch (e) {}
+                                    
+                                    // Try recurse (in case it's a dir)
+                                    try {
+                                        await rmDirRecursiveSMB(targetClient, itemPath, config);
+                                        return;
+                                    } catch (recurseErr) {
+                                         // If that failed, try unlink again
+                                         try {
+                                             await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
+                                             return;
+                                         } catch (ulErr) {}
+                                    }
+                                }
                                 return;
                             } else if (rmErr.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
                                 // It is a directory and it's not empty! Recurse.
