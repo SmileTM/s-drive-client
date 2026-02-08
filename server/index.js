@@ -980,7 +980,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                 retries++;
             }
         }
-        // console.warn(`[Delete Warn] Item ${itemPath} still exists after waiting`);
+        console.warn(`[Delete Warn] Item ${itemPath} still exists after waiting`);
     };
 
     // Helper to process a list of items
@@ -1023,11 +1023,53 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                                 try {
                                     await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
                                     return;
-                                } catch (ulErr) {}
+                                } catch (ulErr) {
+                                     // Handle Read-Only/Hidden for ghost files too
+                                     if (ulErr.code === 'STATUS_CANNOT_DELETE' || ulErr.code === 'STATUS_ACCESS_DENIED') {
+                                         try {
+                                             if (typeof targetClient.setFileAttributes === 'function') {
+                                                 await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
+                                                     hidden: false, 
+                                                     readOnly: false, 
+                                                     system: false,
+                                                     archive: false
+                                                 }));
+                                                 await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
+                                                 return;
+                                             }
+                                         } catch (attrErr) {
+                                             console.warn(`[Delete] Failed to clear attributes for ghost file ${itemPath}:`, attrErr.message);
+                                         }
+                                     }
+                                     console.warn(`[Delete] Failed to delete ghost file ${itemPath}: ${ulErr.message} (${ulErr.code})`);
+                                }
                             } else if (rmErr.code === 'STATUS_DELETE_PENDING') {
                                 await waitForDeletion(targetClient, itemPath);
                                 return;
+                            } else if (rmErr.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
+                                // It is a directory and it's not empty! Recurse.
+                                await rmDirRecursiveSMB(targetClient, itemPath, config);
+                                return;
+                            } else if (rmErr.code === 'STATUS_CANNOT_DELETE' || rmErr.code === 'STATUS_ACCESS_DENIED') {
+                                 // Maybe it was a directory that is read-only?
+                                 // Try to clear attributes
+                                 try {
+                                     if (typeof targetClient.setFileAttributes === 'function') {
+                                         await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
+                                             hidden: false, 
+                                             readOnly: false, 
+                                             system: false,
+                                             archive: false
+                                         }));
+                                         await executeSMBCommand(targetClient, () => targetClient.rmdir(itemPath));
+                                         return;
+                                     }
+                                 } catch (attrErr) {
+                                     console.warn(`[Delete] Failed to clear attributes for ghost dir ${itemPath}:`, attrErr.message);
+                                 }
                             }
+                             // If we are here, we failed to delete the ghost item
+                             console.warn(`[Delete] Failed to delete ghost item ${itemPath}: ${rmErr.message} (${rmErr.code})`);
                         }
                         return;
                     }
