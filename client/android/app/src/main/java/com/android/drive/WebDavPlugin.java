@@ -416,6 +416,7 @@ public class WebDavPlugin extends Plugin {
                 }
 
                 if (f.isDirectory()) {
+                    android.util.Log.d("WebDavNative", "Deleting directory recursive: " + f.getPath());
                     deleteRecursive(f);
                 } else {
                     f.delete();
@@ -429,27 +430,29 @@ public class WebDavPlugin extends Plugin {
     }
 
     private void deleteRecursive(SmbFile file) throws Exception {
-        String url = file.getPath(); // logging
-        // android.util.Log.d("WebDavNative", "Processing delete: " + url);
-
+        String url = file.getPath();
+        
         if (file.isDirectory()) {
             try {
-                SmbFile[] files = file.listFiles();
-                if (files != null) {
-                    for (SmbFile child : files) {
+                // Use list() to get names and construct children manually to ensure correct path
+                String[] children = file.list();
+                if (children != null) {
+                    for (String name : children) {
+                        // Skip . and .. just in case
+                        if (name.equals(".") || name.equals("..")) continue;
+                        
+                        SmbFile child = new SmbFile(file, name);
                         deleteRecursive(child);
                     }
                 }
             } catch (Exception e) {
-                // If we can't list, maybe it's not a dir or access denied. 
-                // Log and try to delete anyway (path might be wrong)
                 android.util.Log.w("WebDavNative", "Failed to list directory: " + url, e);
             }
         }
 
         try {
             file.delete();
-            android.util.Log.d("WebDavNative", "Deleted: " + url);
+            // android.util.Log.d("WebDavNative", "Deleted: " + url);
         } catch (Exception e) {
             String msg = e.getMessage();
             if (msg != null && (msg.contains("cannot find") || msg.contains("No such file"))) {
