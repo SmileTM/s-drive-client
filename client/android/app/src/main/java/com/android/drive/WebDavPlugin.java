@@ -430,24 +430,20 @@ public class WebDavPlugin extends Plugin {
     }
 
     private void deleteRecursive(SmbFile file) throws Exception {
-        String url = file.getPath();
+        // Validation: If it's a directory, ensure URL ends with '/' for correct context resolution
+        SmbFile cleanFile = file;
+        if (file.isDirectory() && !file.getPath().endsWith("/")) {
+            cleanFile = new SmbFile(file.getPath() + "/", file.getContext());
+        }
         
-        if (file.isDirectory()) {
-            try {
-                // Use list() to get names and construct children manually to ensure correct path
-                String[] children = file.list();
-                if (children != null) {
-                    // Ensure parent has trailing slash, otherwise SmbFile(parent, name) concatenates without slash
-                    SmbFile parentDir = file;
-                    if (!file.getPath().endsWith("/")) {
-                        parentDir = new SmbFile(file.getPath() + "/", file.getContext());
-                    }
+        String url = cleanFile.getPath();
 
-                    for (String name : children) {
-                        // Skip . and .. just in case
-                        if (name.equals(".") || name.equals("..")) continue;
-                        
-                        SmbFile child = new SmbFile(parentDir, name);
+        if (cleanFile.isDirectory()) {
+            try {
+                // Now safe to use listFiles() because cleanFile has trailing slash
+                SmbFile[] children = cleanFile.listFiles();
+                if (children != null) {
+                    for (SmbFile child : children) {
                         deleteRecursive(child);
                     }
                 }
@@ -457,7 +453,10 @@ public class WebDavPlugin extends Plugin {
         }
 
         try {
-            file.delete();
+            // Delete the directory/file itself
+            // Note: use the original file object if the slash version has issues deleting? 
+            // Usually slash version is fine for delete().
+            cleanFile.delete(); 
             // android.util.Log.d("WebDavNative", "Deleted: " + url);
         } catch (Exception e) {
             String msg = e.getMessage();
