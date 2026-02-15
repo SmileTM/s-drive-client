@@ -939,7 +939,7 @@ const NativeAPI = {
         }));
     },
 
-    renameItem: async (oldPath, newName, currentPath, driveId) => {
+    renameItem: async (oldPath, newName, currentPath, driveId, overwrite = false) => {
         if (driveId !== 'local') {
             const drives = await NativeAPI.getDrives();
             const config = drives.find(d => d.id === driveId);
@@ -948,15 +948,24 @@ const NativeAPI = {
             // Construct new path
             const pathParts = oldPath.split('/');
             pathParts.pop();
-            const newPath = [...pathParts, newName].join('/'); // Simple join for now
+            const newPath = [...pathParts, newName].join('/');
 
-            await client.moveFile(oldPath, newPath);
+            try {
+                await client.moveFile(oldPath, newPath, overwrite);
+            } catch (e) {
+                // Map "File exists" to 409 for frontend conflict UI
+                if (e.message && e.message.includes("File exists")) {
+                    const err = new Error("File exists");
+                    err.response = { status: 409 };
+                    throw err;
+                }
+                throw e;
+            }
             return;
         }
         // Capacitor 5+ supports rename directly via rename() or move()
-        // We construct the new path manually
         const pathParts = oldPath.split('/');
-        pathParts.pop(); // remove old name
+        pathParts.pop();
         const baseDir = pathParts.join('/');
         const newPath = `${baseDir}/${newName}`;
 
@@ -1037,7 +1046,9 @@ const NativeAPI = {
     },
 
     crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete, overwrite = false) => {
-        console.log(`[CrossDrive] Transferring ${items.length} items from ${sourceDriveId} to ${destDriveId} (Move: ${isMove})`);
+        // Sanitize destPath: strip trailing slashes to prevent double-slash in path construction
+        destPath = destPath.replace(/\/+$/, '') || '/';
+        console.log(`[CrossDrive] Transferring ${items.length} items from ${sourceDriveId} to ${destDriveId} (Move: ${isMove}), dest: ${destPath}`);
 
         const NOTIFY_ID = 9999;
         let transferredBytes = 0;
@@ -1109,38 +1120,48 @@ const NativeAPI = {
                 const itemPath = items[i].path || items[i]; // Handle object or string
                 const itemName = itemPath.split('/').pop();
 
-                // Check if item is directory
-                let isDirectory = false;
-                try {
-                    if (sourceDriveId === 'local') {
-                        const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
-                        isDirectory = stat.type === 'directory';
-                    } else {
-                        const drives = await NativeAPI.getDrives();
-                        const config = drives.find(d => d.id === sourceDriveId);
-                        const client = getWebDAVClient(config);
-                        const stat = await client.stat(itemPath);
-                        isDirectory = stat.type === 'directory';
+                // Check if item is directory (prefer metadata from caller, fallback to stat)
+                let isDirectory = items[i].isDirectory || false;
+                if (!isDirectory) {
+                    try {
+                        if (sourceDriveId === 'local') {
+                            const stat = await Filesystem.stat({ path: itemPath, directory: Directory.ExternalStorage });
+                            isDirectory = stat.type === 'directory';
+                        } else {
+                            const drives = await NativeAPI.getDrives();
+                            const config = drives.find(d => d.id === sourceDriveId);
+                            const client = getWebDAVClient(config);
+                            const stat = await client.stat(itemPath);
+                            isDirectory = stat.type === 'directory';
+                        }
+                    } catch (e) {
+                        console.warn(`[CrossDrive] Failed to stat ${itemPath}, assuming file:`, e);
                     }
-                } catch (e) {
-                    console.warn(`[CrossDrive] Failed to stat ${itemPath}, assuming file:`, e);
                 }
 
                 if (isDirectory) {
                     console.log(`[CrossDrive] Processing directory: ${itemPath}`);
                     // 1. Create destination directory
                     const newDestPath = destPath === '/' ? `/${itemName}` : `${destPath}/${itemName}`;
-                    await NativeAPI.createFolder(newDestPath, destDriveId);
+                    console.log(`[CrossDrive] Creating folder on dest: ${newDestPath} (drive: ${destDriveId})`);
+                    try {
+                        await NativeAPI.createFolder(newDestPath, destDriveId);
+                    } catch (mkdirErr) {
+                        // 405 = already exists (WebDAV), ignore it
+                        // Some servers return 301/400 for already-existing dirs
+                        console.warn(`[CrossDrive] createFolder warning for ${newDestPath}:`, mkdirErr?.message);
+                    }
 
                     // 2. Get children
                     const children = await NativeAPI.getFiles(itemPath, sourceDriveId);
+                    const totalChildren = children.length;
+                    let completedChildren = 0;
 
-                    // 3. Recurse (Keep same task ID logic? Complex. For now, treat children as sub-tasks but maybe we lose granular progress on the folder itself in UI)
-                    // We pass children as objects but without ID to generate new ones, or we could try to map them. 
-                    // Actually, simply calling recursively is safest.
-                    // Note: The UI progress for the *folder* task will effectively be "stuck" or we need to update it.
-                    // Current UI only tracks top-level tasks.
-                    const childItems = children.map(c => ({ path: c.path, id: null })); // Children get new auto-IDs internally
+                    // Report initial folder progress
+                    if (onProgress) onProgress(i + 1, items.length, `${itemName} (0/${totalChildren})`, 0, 0, totalChildren);
+
+                    // 3. Recurse with enhanced progress
+                    const childItems = children.map(c => ({ path: c.path, id: null, isDirectory: c.isDirectory || false }));
 
                     await NativeAPI.crossDriveTransfer(
                         childItems,
@@ -1149,12 +1170,14 @@ const NativeAPI = {
                         destDriveId,
                         false, // Recursive copy children (handling delete later if move)
                         (idx, total, name, speed, cur, tot) => {
-                            // Optional: Bubble up progress? 
-                            // It's hard to map child bytes to parent folder total bytes without pre-calc.
-                            // Just report activity on the parent task?
-                            if (onProgress) onProgress(i + 1, items.length, `${itemName}/${name}`, speed, cur, tot);
+                            // Bubble up sub-file name to parent task
+                            if (onProgress) onProgress(i + 1, items.length, `${itemName}/${name}`, speed, completedChildren, totalChildren);
                         },
-                        null,
+                        (childName) => {
+                            completedChildren++;
+                            // Report folder-level progress based on completed child count
+                            if (onProgress) onProgress(i + 1, items.length, `${itemName} (${completedChildren}/${totalChildren})`, 0, completedChildren, totalChildren);
+                        },
                         overwrite
                     );
 
@@ -1481,7 +1504,7 @@ const NativeAPI = {
                         };
 
                         try {
-                            await dstClient.streamUploadFile(targetPath, localTempPath, uploadId);
+                            await dstClient.streamUploadFile(targetPath, localTempPath, uploadId, overwrite);
                         } finally {
                             delete uploadCallbacks[uploadId];
                             // Cleanup Temp

@@ -968,7 +968,7 @@ function App() {
     const sourceDrive = clipboard.driveId || activeDrive;
     const destDrive = activeDrive;
     const isMove = clipboard.mode === 'move';
-    const targetPath = currentPath; // Capture target path at start
+    const targetPath = currentPath.replace(/\/+$/, '') || '/'; // Sanitize trailing slashes
     const items = clipboard.items;
 
     setClipboard(null);
@@ -985,7 +985,9 @@ function App() {
         currentBytes: 0,
         totalBytes: item.size || 0, // Use pre-known size
         speed: 0,
-        type: isMove ? 'move' : 'copy'
+        type: isMove ? 'move' : 'copy',
+        isDirectory: item.isDirectory || false,
+        subName: null, // Current sub-file being processed (for folders)
       };
     });
     setTasks(prev => [...newTasks, ...prev]);
@@ -1023,7 +1025,8 @@ function App() {
             status: isDone ? 'done' : 'active',
             currentBytes,
             totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
-            speed
+            speed,
+            subName: name || t.subName, // Track current sub-file for folder progress
           };
         }
         return t;
@@ -1047,7 +1050,7 @@ function App() {
       const itemPath = itemObj.path || itemObj;
       const taskId = newTasks[i].id;
       const itemName = itemPath.split('/').pop();
-      const itemsWithId = [{ path: itemPath, id: taskId }];
+      const itemsWithId = [{ path: itemPath, id: taskId, isDirectory: itemObj.isDirectory || false }];
 
       updateTask(taskId, { status: 'active' });
 
@@ -1059,9 +1062,15 @@ function App() {
         continue;
       }
 
-      // Check for same-folder copy collision
+      // Check for same-folder collision
       let finalFileName = itemName;
       const isSameDriveAndDir = (sourceDrive === destDrive) && (itemPath.substring(0, itemPath.lastIndexOf('/')) === targetPath || (targetPath === '/' && itemPath.lastIndexOf('/') === 0));
+
+      // Same-folder MOVE is a no-op — skip entirely
+      if (isMove && isSameDriveAndDir) {
+        updateTask(taskId, { status: 'done', name: itemName + ' (已跳过)' });
+        continue;
+      }
 
       // Only auto-rename if it's a COPY and we are in the same folder
       if (!isMove && isSameDriveAndDir) {
@@ -1072,11 +1081,10 @@ function App() {
           suffix++;
           const extIndex = itemName.lastIndexOf('.');
           if (extIndex > 0) {
-            finalFileName = `${itemName.substring(0, extIndex)} (Copy ${suffix === 1 ? '' : suffix})${itemName.substring(extIndex)}`;
+            finalFileName = `${itemName.substring(0, extIndex)}_副本${suffix}${itemName.substring(extIndex)}`;
           } else {
-            finalFileName = `${itemName} (Copy ${suffix === 1 ? '' : suffix})`;
+            finalFileName = `${itemName}_副本${suffix}`;
           }
-          finalFileName = finalFileName.replace(" (Copy )", " (Copy)");
         }
       }
 
@@ -1102,8 +1110,16 @@ function App() {
       try {
         if (finalFileName !== itemName) {
           await performTransfer(false);
+          // Direct copy/move completed — mark task as done and refresh
+          updateTask(taskId, { status: 'done', name: finalFileName });
+          if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
         } else {
           await performTransfer(shouldOverwrite);
+          // For moveItems (same drive move), also mark done
+          if (isMove && sourceDrive === destDrive) {
+            updateTask(taskId, { status: 'done' });
+            if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+          }
         }
 
       } catch (err) {
@@ -1787,11 +1803,17 @@ function App() {
                             }
                             try {
                               // Ensure clean path construction
-                              const newPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+                              const cleanCurrent = currentPath.replace(/\/+$/, '') || '/';
+                              const newPath = cleanCurrent === '/' ? `/${name}` : `${cleanCurrent}/${name}`;
+                              console.log(`[CreateFolder] Creating: path=${newPath}, drive=${activeDrive}`);
                               await api.createFolder(newPath, activeDrive);
+                              console.log(`[CreateFolder] Success: ${newPath}`);
                               fetchFiles(currentPath);
                               setIsIslandExpanded(false);
-                            } catch (err) { showAlert(t.createFolderFailed, t.failed, 'error'); }
+                            } catch (err) {
+                              console.error(`[CreateFolder] Failed:`, err);
+                              showAlert(t.createFolderFailed, t.failed, 'error');
+                            }
                           }
                         });
                       }}

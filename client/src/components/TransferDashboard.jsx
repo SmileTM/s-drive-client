@@ -15,8 +15,8 @@ const LightningIcon = ({ className, fillPercent = 100 }) => {
                     <stop offset={`${fillPercent}%`} stopColor="transparent" />
                 </linearGradient>
             </defs>
-            <path 
-                d="M15.5 5L11.5 11L15 11L8.5 19L12.5 13L9 13Z" 
+            <path
+                d="M15.5 5L11.5 11L15 11L8.5 19L12.5 13L9 13Z"
                 fill={`url(#${gradId})`}
                 stroke="currentColor"
                 strokeWidth="1.5"
@@ -32,11 +32,11 @@ export const CircularProgress = ({ progress, onClick, activeCount }) => {
 
     // Use total percentage if available, otherwise just spin or show active count
     // If progress is null but activeCount > 0, we can show an indeterminate spinner or just the count.
-    
-    const percentage = progress && progress.total > 0 
+
+    const percentage = progress && progress.total > 0
         ? Math.min(Math.max(Math.round((progress.current / progress.total) * 100), 0), 100)
         : 0; // Simplified global progress
-    
+
     // Better calculation: We will get detailed stats from the manager context in the future.
     // For now, let's just use the props passed from App.jsx if simpler.
     // Actually, the new Dashboard handles its own state, so App.jsx might pass `tasks`.
@@ -45,25 +45,25 @@ export const CircularProgress = ({ progress, onClick, activeCount }) => {
     const fillAmount = isDone ? 100 : percentage;
 
     return (
-        <button 
+        <button
             onClick={onClick}
             className="relative w-7 h-7 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors group"
         >
             <svg className="w-full h-full -rotate-90 p-1" viewBox="0 0 36 36">
                 <path className="text-slate-300" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="3" />
-                <path 
+                <path
                     className="text-slate-500 transition-all duration-300 ease-linear"
-                    strokeDasharray={`${isDone ? 100 : percentage}, 100`} 
-                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" 
-                    fill="none" 
-                    stroke="currentColor" 
-                    strokeWidth="3" 
+                    strokeDasharray={`${isDone ? 100 : percentage}, 100`}
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="3"
                 />
             </svg>
             <div className="absolute inset-0 flex items-center justify-center">
-                <LightningIcon 
-                    className="w-3.5 h-3.5 text-slate-500 transition-colors duration-300" 
-                    fillPercent={fillAmount} 
+                <LightningIcon
+                    className="w-3.5 h-3.5 text-slate-500 transition-colors duration-300"
+                    fillPercent={fillAmount}
                 />
             </div>
         </button>
@@ -109,17 +109,17 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                     className="fixed inset-0 z-[60] flex items-start justify-center pt-20 px-4 pointer-events-none"
                 >
                     {/* Backdrop (Click to close) */}
-                    <motion.div 
+                    <motion.div
                         variants={{
                             closed: { opacity: 0 },
                             open: { opacity: 1, transition: { duration: 0.3 } }
                         }}
-                        className="absolute inset-0 bg-black/10 backdrop-blur-sm pointer-events-auto" 
-                        onClick={onClose} 
+                        className="absolute inset-0 bg-black/10 backdrop-blur-sm pointer-events-auto"
+                        onClick={onClose}
                     />
 
                     {/* Main Card */}
-                    <motion.div 
+                    <motion.div
                         variants={{
                             closed: { opacity: 0, scale: 0.95, y: -20, transition: { duration: 0.2 } },
                             open: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', duration: 0.4 } }
@@ -145,7 +145,7 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                             </div>
                             <div className="flex items-center gap-2">
                                 {tasks.some(t => t.status === 'done' || t.status === 'error') && (
-                                    <button 
+                                    <button
                                         onClick={onClearCompleted}
                                         className="text-xs font-medium text-slate-500 hover:text-red-500 px-2 py-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                     >
@@ -168,12 +168,12 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                             ) : (
                                 <div className="space-y-2">
                                     {sortedTasks.map(task => (
-                                        <div 
-                                            key={task.id} 
+                                        <div
+                                            key={task.id}
                                             className={clsx(
                                                 "group relative p-3 rounded-2xl border transition-all",
-                                                task.status === 'active' 
-                                                    ? "bg-white/60 dark:bg-slate-800/60 border-indigo-200/50 dark:border-indigo-500/30 shadow-sm" 
+                                                task.status === 'active'
+                                                    ? "bg-white/60 dark:bg-slate-800/60 border-indigo-200/50 dark:border-indigo-500/30 shadow-sm"
                                                     : "bg-transparent border-transparent hover:bg-white/40 dark:hover:bg-slate-800/40"
                                             )}
                                         >
@@ -187,26 +187,36 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                         {task.status === 'error' ? (
                                                             <ExclamationCircleIcon className="w-6 h-6" />
                                                         ) : (
-                                                            task.type === 'delete' ? <TrashIcon className="w-6 h-6" /> : <span className="text-xs font-bold uppercase">{task.name.split('.').pop().slice(0,3)}</span>
+                                                            task.type === 'delete' ? <TrashIcon className="w-6 h-6" /> : <span className="text-xs font-bold uppercase">{task.name.split('.').pop().slice(0, 3)}</span>
                                                         )}
                                                     </div>
-                                                    
+
                                                     <div className="min-w-0">
                                                         <p className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate pr-4" title={task.name}>
                                                             {task.name}
                                                         </p>
+                                                        {/* Sub-file name for folder transfers */}
+                                                        {task.subName && task.status === 'active' && (
+                                                            <p className="text-[10px] text-slate-400 dark:text-slate-500 truncate pr-4" title={task.subName}>
+                                                                {task.subName.split('/').pop()}
+                                                            </p>
+                                                        )}
                                                         <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono mt-0.5">
                                                             {task.type === 'delete' ? (
                                                                 <span className="text-slate-500">{task.status === 'active' ? (t.deleting || 'Deleting...') : ''}</span>
                                                             ) : (
                                                                 <>
-                                                                    {task.status === 'active' && (
+                                                                    {task.status === 'active' && task.speed > 0 && (
                                                                         <>
                                                                             <span className="text-indigo-500">{formatSpeed(task.speed)}</span>
                                                                             <span>•</span>
                                                                         </>
                                                                     )}
-                                                                    <span>{formatSize(task.currentBytes || 0)} / {formatSize(task.totalBytes || 0)}</span>
+                                                                    {task.isDirectory && task.totalBytes > 0 ? (
+                                                                        <span>{task.currentBytes}/{task.totalBytes} files</span>
+                                                                    ) : (
+                                                                        <span>{formatSize(task.currentBytes || 0)} / {formatSize(task.totalBytes || 0)}</span>
+                                                                    )}
                                                                 </>
                                                             )}
                                                         </div>
@@ -217,9 +227,9 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                 <div className="shrink-0 flex items-center gap-2">
                                                     {task.status === 'pending' && <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-full">{t.pending}</span>}
                                                     {task.status === 'done' && <CheckCircleIcon className="w-6 h-6 text-emerald-500" />}
-                                                    
+
                                                     {task.status === 'error' && (
-                                                        <button 
+                                                        <button
                                                             onClick={(e) => { e.stopPropagation(); onRetry && onRetry(task); }}
                                                             className="flex items-center gap-1 px-2 py-1 bg-red-50 text-red-500 rounded-lg hover:bg-red-100 transition-colors"
                                                         >
@@ -227,9 +237,9 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                             <span className="text-xs font-medium">{t.retry}</span>
                                                         </button>
                                                     )}
-                                                    
+
                                                     {(task.status === 'active' || task.status === 'pending') && (
-                                                        <button 
+                                                        <button
                                                             onClick={(e) => { e.stopPropagation(); onCancel && onCancel(task.id); }}
                                                             className="p-1 hover:bg-slate-100 rounded-full text-slate-400 hover:text-red-500 transition-colors"
                                                         >
@@ -242,18 +252,20 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                             {/* Progress Bar */}
                                             {(task.status === 'active' || task.status === 'pending') && (
                                                 <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-700/50 rounded-full overflow-hidden">
-                                                    <motion.div 
+                                                    <motion.div
                                                         className={clsx(
-                                                            "h-full rounded-full", 
+                                                            "h-full rounded-full",
                                                             task.status === 'pending' ? "bg-slate-300 w-full animate-pulse" : (
                                                                 task.type === 'delete' ? "bg-red-400 w-full animate-pulse" : "bg-indigo-500"
                                                             )
                                                         )}
                                                         initial={{ width: 0 }}
-                                                        animate={{ 
-                                                            width: (task.status === 'pending' || task.type === 'delete') ? '100%' : `${Math.min((task.currentBytes / Math.max(task.totalBytes, 1)) * 100, 100)}%` 
+                                                        animate={{
+                                                            width: (task.status === 'pending' || task.type === 'delete')
+                                                                ? '100%'
+                                                                : `${Math.min((task.currentBytes / Math.max(task.totalBytes, 1)) * 100, 100)}%`
                                                         }}
-                                                        transition={{ duration: 0.2 }}
+                                                        transition={{ duration: 0.3 }}
                                                     />
                                                 </div>
                                             )}
@@ -262,7 +274,7 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                 </div>
                             )}
                         </div>
-                        
+
                         {/* Footer (Total Stats) */}
                         {activeCount > 0 && (
                             <div className="bg-slate-50/50 dark:bg-slate-800/50 px-6 py-3 text-xs text-slate-500 flex justify-between border-t border-slate-200/50">

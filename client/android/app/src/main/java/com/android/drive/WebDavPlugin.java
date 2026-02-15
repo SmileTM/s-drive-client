@@ -519,11 +519,19 @@ public class WebDavPlugin extends Plugin {
             try {
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String oldUrl = buildSmbUrl(address, share, oldPath);
-                // Rename needs full new URL? Usually yes.
                 String newUrl = buildSmbUrl(address, share, newPath);
                 Boolean overwrite = call.getBoolean("overwrite", false);
                 
                 SmbFile f = new SmbFile(oldUrl, ctx);
+                
+                // For directories, ensure URLs end with /
+                boolean isSourceDir = f.isDirectory();
+                if (isSourceDir) {
+                    if (!oldUrl.endsWith("/")) oldUrl += "/";
+                    if (!newUrl.endsWith("/")) newUrl += "/";
+                    f = new SmbFile(oldUrl, ctx);
+                }
+                
                 SmbFile dest = new SmbFile(newUrl, ctx);
                 
                 if (dest.exists()) {
@@ -531,7 +539,16 @@ public class WebDavPlugin extends Plugin {
                         call.reject("File exists");
                         return;
                     }
-                    dest.delete(); // Delete target so rename can succeed
+                    // For directories, need recursive delete
+                    try {
+                        if (dest.isDirectory()) {
+                            deleteRecursive(dest);
+                        } else {
+                            dest.delete();
+                        }
+                    } catch (Exception delErr) {
+                        android.util.Log.w("WebDavNative", "Failed to delete for overwrite: " + delErr.getMessage());
+                    }
                 }
                 
                 f.renameTo(dest);
@@ -563,10 +580,18 @@ public class WebDavPlugin extends Plugin {
                 String url = buildSmbUrl(address, share, path);
                 String newUrl = buildSmbUrl(address, share, newPath);
                 Boolean overwrite = call.getBoolean("overwrite", false);
+
+                SmbFile f = new SmbFile(url, ctx);
+                
+                // For directories, ensure URLs end with / to avoid "paths overlap" error
+                if (f.isDirectory()) {
+                    if (!url.endsWith("/")) url += "/";
+                    if (!newUrl.endsWith("/")) newUrl += "/";
+                    f = new SmbFile(url, ctx);
+                }
                 
                 android.util.Log.d("WebDavNative", "SMB Copy: " + url + " -> " + newUrl + " (overwrite=" + overwrite + ")");
 
-                SmbFile f = new SmbFile(url, ctx);
                 SmbFile dest = new SmbFile(newUrl, ctx);
 
                 if (dest.exists()) {
@@ -575,9 +600,12 @@ public class WebDavPlugin extends Plugin {
                          return;
                      }
                      try {
-                         dest.delete();
+                         if (dest.isDirectory()) {
+                             deleteRecursive(dest);
+                         } else {
+                             dest.delete();
+                         }
                      } catch (Exception ignore) {
-                         // proceed to try copyTo anyway, or log warning
                          android.util.Log.w("WebDavNative", "Failed to delete existing destination: " + ignore.getMessage());
                      }
                 }
