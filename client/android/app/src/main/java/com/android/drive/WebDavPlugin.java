@@ -398,19 +398,46 @@ public class WebDavPlugin extends Plugin {
                 String url = buildSmbUrl(address, share, path);
                 SmbFile f = new SmbFile(url, ctx);
                 
-                if (f.exists()) {
-                    f.delete(); // Recursively delete? jcifs delete() is usually non-recursive for dirs.
-                    // But standard SmbFile.delete() deletes file or directory. 
-                    // Does it handle non-empty dirs? Usually no.
-                    // Let's implement simple delete for now. 
-                    call.resolve();
-                } else {
-                    call.reject("File not found");
+                // If not found, try appending '/' to treat as directory
+                if (!f.exists()) {
+                    if (!url.endsWith("/")) {
+                        String dirUrl = url + "/";
+                        SmbFile dirF = new SmbFile(dirUrl, ctx);
+                        if (dirF.exists()) {
+                            f = dirF;
+                        } else {
+                            call.reject("SMB Delete Failed: The system cannot find the file specified.");
+                            return;
+                        }
+                    } else {
+                         call.reject("SMB Delete Failed: The system cannot find the file specified.");
+                         return;
+                    }
                 }
+
+                if (f.isDirectory()) {
+                    deleteRecursive(f);
+                } else {
+                    f.delete();
+                }
+                call.resolve();
             } catch (Exception e) {
+                android.util.Log.e("WebDavNative", "SMB Delete Error", e);
                 call.reject("SMB Delete Failed: " + e.getMessage());
             }
         }).start();
+    }
+
+    private void deleteRecursive(SmbFile file) throws Exception {
+        if (file.isDirectory()) {
+            SmbFile[] files = file.listFiles();
+            if (files != null) {
+                for (SmbFile child : files) {
+                    deleteRecursive(child);
+                }
+            }
+        }
+        file.delete();
     }
 
     @PluginMethod
