@@ -108,18 +108,63 @@ public class WebDavPlugin extends Plugin {
         }
     }
 
-    private final OkHttpClient client = new OkHttpClient.Builder()
-            .protocols(Arrays.asList(Protocol.HTTP_1_1))
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(0, TimeUnit.SECONDS) // No write timeout for large uploads
-            .build();
+    private OkHttpClient client;
+
+    private void initClient() {
+        try {
+            // Create a trust manager that does not validate certificate chains
+            final javax.net.ssl.TrustManager[] trustAllCerts = new javax.net.ssl.TrustManager[] {
+                new javax.net.ssl.X509TrustManager() {
+                    @Override
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws java.security.cert.CertificateException {
+                    }
+
+                    @Override
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws java.security.cert.CertificateException {
+                    }
+
+                    @Override
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                        return new java.security.cert.X509Certificate[]{};
+                    }
+                }
+            };
+
+            // Install the all-trusting trust manager
+            final javax.net.ssl.SSLContext sslContext = javax.net.ssl.SSLContext.getInstance("SSL");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+            
+            // Create an ssl socket factory with our all-trusting manager
+            final javax.net.ssl.SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+
+            client = new OkHttpClient.Builder()
+                .sslSocketFactory(sslSocketFactory, (javax.net.ssl.X509TrustManager)trustAllCerts[0])
+                .hostnameVerifier((hostname, session) -> true)
+                .protocols(Arrays.asList(Protocol.HTTP_1_1))
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(0, TimeUnit.SECONDS) // No write timeout for large uploads
+                .retryOnConnectionFailure(true)
+                .build();
+
+        } catch (Exception e) {
+            // Fallback to default if SSL init fails (should generally not happen)
+            android.util.Log.e("WebDavNative", "Failed to init unsafe SSL client", e);
+            client = new OkHttpClient.Builder()
+                .protocols(Arrays.asList(Protocol.HTTP_1_1))
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(0, TimeUnit.SECONDS)
+                .build();
+        }
+    }
 
     private LocalFileServer localServer;
 
     @Override
     public void load() {
         super.load();
+        initClient();
         try {
             // Set some default properties for jcifs-ng if needed
             // Properties prop = new Properties();
@@ -464,14 +509,27 @@ public class WebDavPlugin extends Plugin {
                 }
 
                 File localFile;
-                if (destPath.startsWith("/")) {
+                File root = Environment.getExternalStorageDirectory();
+                if (destPath.startsWith(root.getAbsolutePath())) {
                     localFile = new File(destPath);
+                } else if (destPath.startsWith("/")) {
+                    // Check for known absolute paths
+                    if (destPath.startsWith("/data/") || destPath.startsWith("/storage/") || destPath.startsWith("/sdcard/")) {
+                        localFile = new File(destPath);
+                    } else {
+                        localFile = new File(root, destPath.substring(1));
+                    }
                 } else {
-                    localFile = new File(Environment.getExternalStorageDirectory(), destPath);
+                    localFile = new File(root, destPath);
                 }
                 
+                android.util.Log.d("WebDavNative", "Resolved SMB download target: " + localFile.getAbsolutePath());
+                
                 // Create parent dirs
-                localFile.getParentFile().mkdirs();
+                File parent = localFile.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
 
                 long fileSize = smbFile.length();
                 long downloaded = 0;
@@ -976,7 +1034,19 @@ public class WebDavPlugin extends Plugin {
         }
 
         File root = Environment.getExternalStorageDirectory();
-        File dir = new File(root, path);
+        
+        File dir;
+        if (path.startsWith(root.getAbsolutePath())) {
+             dir = new File(path);
+        } else if (path.startsWith("/")) {
+             if (path.startsWith("/data/") || path.startsWith("/storage/") || path.startsWith("/sdcard/")) {
+                 dir = new File(path);
+             } else {
+                 dir = new File(root, path.substring(1));
+             }
+        } else {
+             dir = new File(root, path);
+        }
 
         if (dir.exists()) {
             call.resolve();
@@ -1161,6 +1231,16 @@ public class WebDavPlugin extends Plugin {
                 }
             }
 
+            // Handle Basic Auth if username/password are provided but no Auth header
+            String username = call.getString("username");
+            String password = call.getString("password");
+            if (username != null && password != null && (headers == null || !headers.has("Authorization"))) {
+                 String credentials = username + ":" + password;
+                 String basic = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(), android.util.Base64.NO_WRAP);
+                 requestBuilder.addHeader("Authorization", basic);
+                 android.util.Log.d("WebDavNative", "Added Basic Auth header for upload");
+            }
+
             final MediaType mediaTypeFinal;
             if (headers != null && headers.has("Content-Type")) {
                 mediaTypeFinal = MediaType.parse(headers.getString("Content-Type"));
@@ -1240,7 +1320,9 @@ public class WebDavPlugin extends Plugin {
                      call.reject("Upload failed: " + response.code() + " " + response.message());
                  }
             } catch (IOException e) {
-                call.reject("Network error: " + e.getMessage());
+                String errorMsg = e.getClass().getSimpleName() + ": " + e.getMessage();
+                android.util.Log.e("WebDavNative", "Upload Network Error: " + errorMsg, e);
+                call.reject(errorMsg);
             }
         } finally {
             if (tempIdForFinally != null) activeCalls.remove(tempIdForFinally);
@@ -1286,6 +1368,24 @@ public class WebDavPlugin extends Plugin {
             }
 
             Request.Builder requestBuilder = new Request.Builder().url(url).get();
+
+            // Handle Basic Auth if username/password are provided but no Auth header
+            String username = call.getString("username");
+            String password = call.getString("password");
+            // Check if headers already has Auth, if so, skip. But headers map iteration happens later.
+            // We can add it now. If headers adds it later, OkHttp supports multiple headers or overwrites?
+            // User headers should probably take precedence, but let's check.
+            // Actually, we can just add it here. The loop below adds from 'headers' object.
+            
+            if (username != null && password != null) {
+                 boolean hasAuthInHeaders = (headers != null && headers.has("Authorization"));
+                 if (!hasAuthInHeaders) {
+                     String credentials = username + ":" + password;
+                     String basic = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(), android.util.Base64.NO_WRAP);
+                     requestBuilder.addHeader("Authorization", basic);
+                     android.util.Log.d("WebDavNative", "Added Basic Auth header for download");
+                 }
+            }
 
             if (headers != null) {
                 for (Iterator<String> it = headers.keys(); it.hasNext(); ) {
@@ -1376,7 +1476,9 @@ public class WebDavPlugin extends Plugin {
                     android.util.Log.d("WebDavNative", "Deleting partial download file: " + file.getAbsolutePath());
                     file.delete();
                 }
-                call.reject("Download error: " + e.getMessage());
+                String errorMsg = e.getClass().getSimpleName() + ": " + e.getMessage();
+                android.util.Log.e("WebDavNative", "Download Error: " + errorMsg, e);
+                call.reject(errorMsg);
             }
         } finally {
             if (idForFinally != null) activeCalls.remove(idForFinally);
