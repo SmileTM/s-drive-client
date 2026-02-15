@@ -23,6 +23,7 @@ app.use(cors());
 app.use(express.json());
 
 const progressEmitter = new EventEmitter();
+const activeSmbStreams = new Map(); // stream -> smbPath
 
 // --- Progress Tracking Helper ---
 function createProgressStream(taskId, totalSize) {
@@ -228,7 +229,18 @@ const ensureSMBConnected = async (client) => {
     }
 };
 
-const RETRY_ERRORS = ['EPIPE', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENOTFOUND', 'STATUS_NETWORK_NAME_DELETED', 'STATUS_USER_SESSION_DELETED', 'STATUS_CONNECTION_DISCONNECTED', 'STATUS_FILE_CLOSED'];
+const RETRY_ERRORS = [
+    'EPIPE',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'EHOSTUNREACH',
+    'ENOTFOUND',
+    'STATUS_NETWORK_NAME_DELETED',
+    'STATUS_USER_SESSION_DELETED',
+    'STATUS_CONNECTION_DISCONNECTED',
+    'STATUS_FILE_CLOSED',
+    'STATUS_SHARING_VIOLATION'
+];
 
 // Helper: Execute SMB Command with Retry
 const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
@@ -272,7 +284,7 @@ const normalizeFile = (file, driveId, type = 'webdav') => {
             path: file.name, // SMB returns name relative to listed folder usually, parent context needed for full path?
             isDirectory: file.isDirectory(),
             size: file.size,
-            mtime: file.lastWriteTime || file.changeTime || new Date(0), // SMB2 uses changeTime/lastWriteTime
+            mtime: file.mtime || file.ctime || file.birthtime || new Date(0),
             type: file.isDirectory() ? 'folder' : mime.lookup(file.name) || 'application/octet-stream'
         };
     }
@@ -290,6 +302,120 @@ const normalizeFile = (file, driveId, type = 'webdav') => {
 const toSMBPath = (p) => {
     return p.replace(/^\/+/, '').replace(/\//g, '\\');
 };
+
+
+const registerSmbStream = (smbPath, stream) => {
+    if (!stream || !smbPath) return;
+    activeSmbStreams.set(stream, smbPath);
+    const cleanup = () => activeSmbStreams.delete(stream);
+    stream.once('close', cleanup);
+    stream.once('end', cleanup);
+    stream.once('error', cleanup);
+};
+
+const closeActiveSmbStreamsForPaths = (items) => {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const targets = items.map(p => toSMBPath(p));
+    for (const [stream, smbPath] of activeSmbStreams.entries()) {
+        const shouldClose = targets.some(target => {
+            if (!target) return false;
+            if (smbPath === target) return true;
+            return smbPath.startsWith(target + '\\');
+        });
+        if (shouldClose) {
+            try { stream.destroy(); } catch (e) {}
+            activeSmbStreams.delete(stream);
+        }
+    }
+};
+
+const isDeletePending = (err) => err && (err.code === 'STATUS_DELETE_PENDING' || err.message?.includes('STATUS_DELETE_PENDING'));
+
+const isNotFound = (err) =>
+    err &&
+    (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' ||
+        err.code === 'STATUS_NO_SUCH_FILE' ||
+        err.message?.includes('STATUS_OBJECT_NAME_NOT_FOUND') ||
+        err.message?.includes('STATUS_NoSuchFile'));
+
+const isNotDir = (err) =>
+    err &&
+    (err.code === 'STATUS_NOT_A_DIRECTORY' ||
+        err.code === 'STATUS_FILE_IS_A_DIRECTORY' ||
+        err.message?.includes('Not a directory'));
+
+const isDirNotEmpty = (err) =>
+    err && (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.message?.includes('STATUS_DIRECTORY_NOT_EMPTY'));
+
+const verifyItemsDeletedSMB = async (config, items) => {
+    const client = getSMBClient(config, { forceNew: true, autoCloseTimeout: 0, packetConcurrency: 1, tag: 'verify' });
+    try {
+        for (const item of items) {
+            const smbPath = toSMBPath(item);
+            try {
+                await executeSMBCommand(client, () => client.stat(smbPath));
+                // If stat succeeds, it still exists
+                return false;
+            } catch (err) {
+                if (isNotFound(err) || isDeletePending(err)) {
+                    continue;
+                }
+                // Unknown error, treat as not verified
+                return false;
+            }
+        }
+        return true;
+    } finally {
+        try { client.disconnect(); } catch (e) {}
+    }
+};
+
+async function deleteDirContentsSMB(client, dirPath) {
+    let items = [];
+    try {
+        items = await executeSMBCommand(client, () => client.readdir(dirPath));
+        items = items.filter(name => name !== '.' && name !== '..');
+    } catch (err) {
+        if (isNotFound(err) || isDeletePending(err)) return;
+        throw err;
+    }
+
+    for (const item of items) {
+        const itemPath = dirPath === '\\' ? item : `${dirPath}\\${item}`;
+        await deletePathSMB(client, itemPath);
+    }
+}
+
+async function deletePathSMB(client, smbPath) {
+    try {
+        await executeSMBCommand(client, () => client.rmdir(smbPath));
+        return;
+    } catch (err) {
+        if (isDeletePending(err) || isNotFound(err)) return;
+        if (isDirNotEmpty(err)) {
+            await deleteDirContentsSMB(client, smbPath);
+            try {
+                await executeSMBCommand(client, () => client.rmdir(smbPath));
+                return;
+            } catch (err2) {
+                if (isDeletePending(err2) || isNotFound(err2)) return;
+            }
+        }
+    }
+
+    try {
+        await executeSMBCommand(client, () => client.unlink(smbPath));
+    } catch (err) {
+        if (isDeletePending(err) || isNotFound(err)) return;
+        if (err.code === 'STATUS_FILE_IS_A_DIRECTORY') {
+            await deleteDirContentsSMB(client, smbPath);
+            await executeSMBCommand(client, () => client.rmdir(smbPath));
+            return;
+        }
+        throw err;
+    }
+}
+
 
 // Helper: Safe path resolution for Local
 const resolveSafePath = (userPath) => {
@@ -537,45 +663,52 @@ app.get('/api/files', async (req, res) => {
             const smbPath = toSMBPath(reqPath);
             
             try {
-                // @marsaud/smb2 readdir returns just names by default.
-                // Wrap readdir in executeSMBCommand with 10s timeout to prevent hanging during heavy uploads
-                const names = await executeSMBCommand(client, () => client.readdir(smbPath), 10000);
-                
-                // Process files in chunks to avoid STATUS_INSUFFICIENT_RESOURCES
-                const results = [];
-                const CHUNK_SIZE = 5;
-                
-                for (let i = 0; i < names.length; i += CHUNK_SIZE) {
-                    const chunk = names.slice(i, i + CHUNK_SIZE);
-                    const chunkResults = await Promise.all(chunk.map(async name => {
+                const listWithClient = async (targetClient) => {
+                    // Use stats=true to avoid per-item stat calls (less load, fewer locks).
+                    const rawItems = await executeSMBCommand(
+                        targetClient,
+                        () => targetClient.readdir(smbPath, { stats: true }),
+                        10000
+                    );
+                    // Hide legacy trash folder from older versions
+                    return rawItems.filter(item => item.name !== '.__webdavclient_trash__');
+                };
+
+                let names;
+                try {
+                    names = await listWithClient(client);
+                } catch (listErr) {
+                    // If the cached client is in a bad state, clear and retry once with a fresh connection
+                    if (listErr.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION' || listErr.message?.includes('Socket closed before the connection was established')) {
+                        clearSMBSession(config);
+                        const freshClient = getSMBClient(config, { forceNew: true, autoCloseTimeout: 0, packetConcurrency: 2, tag: 'list' });
                         try {
-                            const itemPath = smbPath === '\\' || smbPath === '' ? name : `${smbPath}\\${name}`;
-                            // Wrap stat in executeSMBCommand (concurrently might be heavy, but retry handles dropping)
-                            // Use 5s timeout for individual stats
-                            const stats = await executeSMBCommand(client, () => client.stat(itemPath), 5000);
-                            console.log(`[DEBUG] SMB Stat for ${name}:`, stats.lastWriteTime, typeof stats.lastWriteTime);
-                            
-                            // Construct full relative path for frontend
-                            const webPath = path.posix.join(reqPath, name);
-                            
-                            return {
-                                name: name,
-                                path: webPath,
-                                isDirectory: stats.isDirectory(),
-                                size: stats.size,
-                                mtime: stats.lastWriteTime || stats.changeTime || new Date(0),
-                                type: stats.isDirectory() ? 'folder' : mime.lookup(name) || 'application/octet-stream'
-                            };
-                        } catch(e) {
-                            return null; 
+                            names = await listWithClient(freshClient);
+                        } finally {
+                            try { freshClient.disconnect(); } catch (e) {}
                         }
-                    }));
-                    results.push(...chunkResults);
+                    } else {
+                        throw listErr;
+                    }
                 }
+                
+                const results = names.map((item) => {
+                    const name = item.name;
+                    const webPath = path.posix.join(reqPath, name);
+                    const isDir = typeof item.isDirectory === 'function' ? item.isDirectory() : false;
+                    return {
+                        name,
+                        path: webPath,
+                        isDirectory: isDir,
+                        size: item.size || 0,
+                        mtime: item.mtime || item.ctime || item.birthtime || new Date(0),
+                        type: isDir ? 'folder' : mime.lookup(name) || 'application/octet-stream'
+                    };
+                });
                 
                 res.json({
                     path: reqPath,
-                    files: results.filter(f => f !== null)
+                    files: results
                 });
             } catch (smbErr) {
                  console.error('SMB List Error:', smbErr);
@@ -728,6 +861,7 @@ app.get('/api/raw', async (req, res) => {
                 res.setHeader('Content-Type', mimeType);
 
                 const stream = await executeSMBCommand(client, () => client.createReadStream(smbPath, options));
+                registerSmbStream(smbPath, stream);
                 
                 stream.on('error', (err) => {
                     if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
@@ -864,7 +998,8 @@ app.get('/api/preview', async (req, res) => {
              const client = getSMBClient(config, { tag: 'preview' });
              const smbPath = toSMBPath(reqPath);
              try {
-                 inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
+             inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
+             registerSmbStream(smbPath, inputStream);
              } catch(e) {
                  if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
                      return res.status(404).send('File not found');
@@ -950,6 +1085,7 @@ app.post('/api/mkdir', async (req, res) => {
 
 // Helper: Recursive SMB Delete (Parallelized with Batching)
 const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     // 1. List all children first
     let items = [];
     try {
@@ -963,22 +1099,37 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
 
     // Helper: Wait for item to disappear
     const waitForDeletion = async (targetClient, itemPath) => {
-        let retries = 0;
-        while (retries < 50) { // Wait up to 10 seconds (increased from 2s)
+        const deadline = Date.now() + 10000; // Wait up to 10s for delete-pending to resolve
+        let delay = 200;
+        while (Date.now() < deadline) {
             try {
                 await executeSMBCommand(targetClient, () => targetClient.stat(itemPath));
                 // If stat succeeds, it's still there
-                await new Promise(r => setTimeout(r, 200));
-                retries++;
+                await sleep(delay);
             } catch (e) {
                 // If stat fails with Not Found, it's gone!
                 if (e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.code === 'STATUS_NO_SUCH_FILE') {
                     return true;
                 }
                 // If still pending or other error, wait
-                await new Promise(r => setTimeout(r, 200));
-                retries++;
+                await sleep(delay);
             }
+            if (delay < 2000) delay += 200;
+        }
+        // Final sanity check via a fresh SMB session (helps with stale handles)
+        if (config) {
+            try {
+                const freshClient = getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 2, forceNew: true, tag: 'delete' });
+                try {
+                    await executeSMBCommand(freshClient, () => freshClient.stat(itemPath));
+                } catch (freshErr) {
+                    if (freshErr.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || freshErr.code === 'STATUS_NO_SUCH_FILE') {
+                        return true;
+                    }
+                } finally {
+                    try { freshClient.disconnect(); } catch (e) {}
+                }
+            } catch (e) {}
         }
         console.warn(`[Delete Warn] Item ${itemPath} still exists after waiting`);
         return false;
@@ -987,7 +1138,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
     // Helper to process a list of items
     const processItems = async (targetClient, itemList) => {
         // Process with limited concurrency (5) to balance speed and stability
-        const BATCH_SIZE = 5;
+        const BATCH_SIZE = 2;
         for (let i = 0; i < itemList.length; i += BATCH_SIZE) {
             const chunk = itemList.slice(i, i + BATCH_SIZE);
             await Promise.all(chunk.map(async (item) => {
@@ -1147,8 +1298,8 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
 
     // 3. Delete the directory itself (with robust retry for sync lag and leftovers)
     let retryCount = 0;
-    // Retry up to 10 times (increased from 3) to allow for propagation of child deletions (Delete Pending state)
-    while (retryCount < 10) {
+    // Retry up to 12 times to allow for propagation of child deletions (Delete Pending state)
+    while (retryCount < 12) {
         try {
             // console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
             await executeSMBCommand(client, () => client.rmdir(dirPath));
@@ -1187,7 +1338,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     }
                 }
 
-                await new Promise(r => setTimeout(r, 1000 + (retryCount * 500))); 
+                await sleep(1000 + (retryCount * 750)); 
                 retryCount++;
                 continue;
             }
@@ -1207,7 +1358,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                     console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
                  }
                  
-                 await new Promise(r => setTimeout(r, 1000));
+                 await sleep(1000);
                  retryCount++;
                  continue;
             }
@@ -1232,6 +1383,7 @@ app.post('/api/delete', async (req, res) => {
                 await fs.remove(absPath);
             }));
         } else if (config.type === 'smb') {
+            closeActiveSmbStreamsForPaths(items);
             clearSMBSession(config);
             
             let attempts = 0;
@@ -1244,25 +1396,16 @@ app.post('/api/delete', async (req, res) => {
                 const client = dedicatedClient;
 
                 try {
-                    await Promise.all(items.map(async (item) => {
+                    for (const item of items) {
                         const smbPath = toSMBPath(item);
                         try {
-                            const stats = await executeSMBCommand(client, () => client.stat(smbPath));
-                            if (stats.isDirectory()) {
-                                await rmDirRecursiveSMB(client, smbPath, config); 
-                            } else {
-                                await executeSMBCommand(client, () => client.unlink(smbPath));
-                            }
-                        } catch(e) {
-                            // Ignore if not found or pending delete
-                            const isNotFound = e.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || e.message?.includes('STATUS_OBJECT_NAME_NOT_FOUND') || e.message?.includes('STATUS_NoSuchFile');
-                            const isPending = e.code === 'STATUS_DELETE_PENDING' || e.message?.includes('STATUS_DELETE_PENDING');
-                            
-                            if (!isNotFound && !isPending) {
+                            await deletePathSMB(client, smbPath);
+                        } catch (e) {
+                            if (!isNotFound(e) && !isDeletePending(e)) {
                                 throw e;
                             }
                         }
-                    }));
+                    }
                     
                     // Success!
                     break;
@@ -1276,13 +1419,17 @@ app.post('/api/delete', async (req, res) => {
                     }
                     
                     if (attempts < MAX_RETRIES) {
-                        await new Promise(r => setTimeout(r, 1000)); // Wait for locks to release
+                        await new Promise(r => setTimeout(r, 1500)); // Wait for locks to release
                     }
                 }
             }
 
             if (lastError && attempts === MAX_RETRIES) {
-                throw lastError;
+                // If items are already gone, don't surface an error to the UI
+                const verified = await verifyItemsDeletedSMB(config, items);
+                if (!verified) {
+                    throw lastError;
+                }
             }
 
         } else {

@@ -6,3 +6,4 @@ build/
 *.log
 .idea/
 server/.secret.key
+dist-electron/

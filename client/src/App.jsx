@@ -871,6 +871,19 @@ function App() {
             fetchFiles(currentPath); 
         } catch (err) { 
             console.error('Delete failed:', err);
+            // Verify if items are actually gone (SMB may return transient errors)
+            try {
+                const refreshed = await api.getFiles(currentPath, activeDrive);
+                const remaining = new Set(refreshed.map(f => f.path));
+                const allGone = itemsToDelete.every(p => !remaining.has(p));
+                if (allGone) {
+                    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'done' } : t));
+                    fetchFiles(currentPath);
+                    return;
+                }
+            } catch (verifyErr) {
+                // Fall through to error state
+            }
             setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
             showAlert(t.deleteFailed, t.failed, 'error'); 
         }
