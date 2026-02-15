@@ -521,9 +521,18 @@ public class WebDavPlugin extends Plugin {
                 String oldUrl = buildSmbUrl(address, share, oldPath);
                 // Rename needs full new URL? Usually yes.
                 String newUrl = buildSmbUrl(address, share, newPath);
+                Boolean overwrite = call.getBoolean("overwrite", false);
                 
                 SmbFile f = new SmbFile(oldUrl, ctx);
                 SmbFile dest = new SmbFile(newUrl, ctx);
+                
+                if (dest.exists()) {
+                    if (!overwrite) {
+                        call.reject("File exists");
+                        return;
+                    }
+                    dest.delete(); // Delete target so rename can succeed
+                }
                 
                 f.renameTo(dest);
                 call.resolve();
@@ -553,12 +562,26 @@ public class WebDavPlugin extends Plugin {
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, path);
                 String newUrl = buildSmbUrl(address, share, newPath);
+                Boolean overwrite = call.getBoolean("overwrite", false);
                 
-                android.util.Log.d("WebDavNative", "SMB Copy: " + url + " -> " + newUrl);
+                android.util.Log.d("WebDavNative", "SMB Copy: " + url + " -> " + newUrl + " (overwrite=" + overwrite + ")");
 
                 SmbFile f = new SmbFile(url, ctx);
                 SmbFile dest = new SmbFile(newUrl, ctx);
 
+                if (dest.exists()) {
+                     if (!overwrite) {
+                         call.reject("File exists");
+                         return;
+                     }
+                     try {
+                         dest.delete();
+                     } catch (Exception ignore) {
+                         // proceed to try copyTo anyway, or log warning
+                         android.util.Log.w("WebDavNative", "Failed to delete existing destination: " + ignore.getMessage());
+                     }
+                }
+                
                 f.copyTo(dest);
                 call.resolve();
             } catch (Exception e) {
@@ -718,9 +741,15 @@ public class WebDavPlugin extends Plugin {
                     return;
                 }
 
+                Boolean overwrite = call.getBoolean("overwrite", false);
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, remotePath);
                 SmbFile smbFile = new SmbFile(url, ctx);
+
+                if (smbFile.exists() && !overwrite) {
+                    call.reject("File exists");
+                    return;
+                }
 
                 // Ensure parent exists? SmbFile usually needs parent to exist.
                 // jcifs-ng doesn't auto mkdirs on stream open usually.

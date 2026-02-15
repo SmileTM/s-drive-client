@@ -1051,38 +1051,79 @@ function App() {
 
       updateTask(taskId, { status: 'active' });
 
-      try {
-        // First attempt: overwrite = false (unless global policy says overwrite)
-        let shouldOverwrite = (globalConflictPolicy === 'overwrite');
+      // First attempt: overwrite = false (unless global policy says overwrite)
+      let shouldOverwrite = (globalConflictPolicy === 'overwrite');
 
-        if (globalConflictPolicy === 'skip') {
-          updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
-          continue;
+      if (globalConflictPolicy === 'skip') {
+        updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
+        continue;
+      }
+
+      // Check for same-folder copy collision
+      let finalFileName = itemName;
+      const isSameDriveAndDir = (sourceDrive === destDrive) && (itemPath.substring(0, itemPath.lastIndexOf('/')) === targetPath || (targetPath === '/' && itemPath.lastIndexOf('/') === 0));
+
+      // Only auto-rename if it's a COPY and we are in the same folder
+      if (!isMove && isSameDriveAndDir) {
+        let suffix = 0;
+        const checkNameExists = (name) => files.some(f => f.name === name);
+
+        while (checkNameExists(finalFileName)) {
+          suffix++;
+          const extIndex = itemName.lastIndexOf('.');
+          if (extIndex > 0) {
+            finalFileName = `${itemName.substring(0, extIndex)} (Copy ${suffix === 1 ? '' : suffix})${itemName.substring(extIndex)}`;
+          } else {
+            finalFileName = `${itemName} (Copy ${suffix === 1 ? '' : suffix})`;
+          }
+          finalFileName = finalFileName.replace(" (Copy )", " (Copy)");
+        }
+      }
+
+      // Execute Transfer - defined OUTSIDE try so catch can access it
+      const performTransfer = async (overwrite) => {
+        console.log(`[Paste] performTransfer called: item=${itemName}, overwrite=${overwrite}, finalFileName=${finalFileName}, isMove=${isMove}`);
+        if (finalFileName !== itemName) {
+          const fullDest = targetPath === '/' ? `/${finalFileName}` : `${targetPath}/${finalFileName}`;
+          console.log(`[Paste] Using direct API: copyFile/moveFile to ${fullDest}`);
+          return isMove
+            ? api.moveFile(itemPath, fullDest, sourceDrive, overwrite)
+            : api.copyFile(itemPath, fullDest, sourceDrive, overwrite);
         }
 
-        // Execute Transfer
-        const performTransfer = async (overwrite) => {
-          return (sourceDrive === destDrive)
-            ? (isMove
-              ? api.moveItems([itemPath], targetPath, activeDrive, overwrite)
-              : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress(taskId), () => onComplete(taskId), overwrite))
-            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress(taskId), () => onComplete(taskId), overwrite);
-        };
+        console.log(`[Paste] Using crossDriveTransfer: src=${sourceDrive}, dst=${destDrive}, overwrite=${overwrite}`);
+        return (sourceDrive === destDrive)
+          ? (isMove
+            ? api.moveItems([itemPath], targetPath, activeDrive, overwrite)
+            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress(taskId), () => onComplete(taskId), overwrite))
+          : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress(taskId), () => onComplete(taskId), overwrite);
+      };
 
-        await performTransfer(shouldOverwrite);
+      try {
+        if (finalFileName !== itemName) {
+          await performTransfer(false);
+        } else {
+          await performTransfer(shouldOverwrite);
+        }
 
       } catch (err) {
+        console.log(`[Paste] Caught error:`, err?.message, `status=${err?.response?.status}`);
         // Check for Conflict (409)
         if (err.response && err.response.status === 409) {
+          console.log(`[Paste] 409 Conflict detected for ${itemName}, globalPolicy=${globalConflictPolicy}`);
           if (globalConflictPolicy === 'skip') {
             updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
             continue;
           }
 
           if (globalConflictPolicy === 'overwrite') {
+            console.log(`[Paste] Auto-overwriting (global policy)`);
             try {
               await performTransfer(true);
+              console.log(`[Paste] Overwrite succeeded for ${itemName}`);
+              updateTask(taskId, { status: 'done' });
             } catch (retryErr) {
+              console.error(`[Paste] Overwrite retry failed:`, retryErr);
               updateTask(taskId, { status: 'error' });
               showAlert(`${itemName}: ${retryErr.message}`, t.failed, 'error');
             }
@@ -1091,9 +1132,9 @@ function App() {
 
           // Ask User
           const { action, applyToAll } = await resolveConflict(itemName);
+          console.log(`[Paste] User chose: action=${action}, applyToAll=${applyToAll}`);
 
           if (action === 'cancel') {
-            // Cancel remaining
             for (let j = i; j < items.length; j++) {
               updateTask(newTasks[j].id, { status: 'error', name: newTasks[j].name + ' (Cancelled)' });
             }
@@ -1107,9 +1148,13 @@ function App() {
           if (action === 'skip') {
             updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
           } else if (action === 'overwrite') {
+            console.log(`[Paste] Retrying with overwrite=true for ${itemName}`);
             try {
               await performTransfer(true);
+              console.log(`[Paste] Overwrite succeeded for ${itemName}`);
+              updateTask(taskId, { status: 'done' });
             } catch (retryErr) {
+              console.error(`[Paste] Overwrite retry failed:`, retryErr);
               updateTask(taskId, { status: 'error' });
             }
           }

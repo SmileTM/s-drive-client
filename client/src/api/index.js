@@ -264,18 +264,18 @@ class NativeWebDAVClient {
         await this._request('DELETE', path);
     }
 
-    async moveFile(oldPath, newPath) {
+    async moveFile(oldPath, newPath, overwrite = false) {
         // Destination header must be full URL
         const destUrl = this._resolveUrl(newPath);
         await this._request('MOVE', oldPath, {
-            headers: { 'Destination': destUrl, 'Overwrite': 'T' }
+            headers: { 'Destination': destUrl, 'Overwrite': overwrite ? 'T' : 'F' }
         });
     }
 
-    async copyFile(path, newPath) {
+    async copyFile(path, newPath, overwrite = false) {
         const destUrl = this._resolveUrl(newPath);
         await this._request('COPY', path, {
-            headers: { 'Destination': destUrl, 'Overwrite': 'T' }
+            headers: { 'Destination': destUrl, 'Overwrite': overwrite ? 'T' : 'F' }
         });
     }
 
@@ -289,9 +289,10 @@ class NativeWebDAVClient {
         });
     }
 
-    async streamUploadFile(path, sourcePath, id) {
+    async streamUploadFile(path, sourcePath, id, overwrite = false) {
         const fullUrl = this._resolveUrl(path);
         const headers = {
+            'Overwrite': overwrite ? 'T' : 'F',
             'Authorization': this.authHeader,
             'Content-Type': 'application/octet-stream',
             'X-Capacitor-Id': id // Backup ID
@@ -435,41 +436,72 @@ class NativeSMBClient {
         });
     }
 
-    async moveFile(oldPath, newPath) {
-        await WebDavNative.smbRename({
-            address: this.config.address,
-            share: this.config.share,
-            oldPath: oldPath,
-            newPath: newPath,
-            username: this.config.username,
-            password: this.config.password,
-            domain: this.config.domain
-        });
+    async moveFile(oldPath, newPath, overwrite = false) {
+        try {
+            await WebDavNative.smbRename({
+                address: this.config.address,
+                share: this.config.share,
+                oldPath: oldPath,
+                newPath: newPath,
+                username: this.config.username,
+                password: this.config.password,
+                domain: this.config.domain,
+                overwrite: overwrite
+            });
+        } catch (e) {
+            if (e.message && e.message.includes("File exists")) {
+                const err = new Error("File exists");
+                err.response = { status: 409 };
+                throw err;
+            }
+            throw e;
+        }
     }
 
-    async copyFile(path, newPath) {
-        await WebDavNative.smbCopy({
-            address: this.config.address,
-            share: this.config.share,
-            path: path,
-            newPath: newPath,
-            username: this.config.username,
-            password: this.config.password,
-            domain: this.config.domain
-        });
+    async copyFile(path, newPath, overwrite = false) {
+        try {
+            await WebDavNative.smbCopy({
+                address: this.config.address,
+                share: this.config.share,
+                path: path,
+                newPath: newPath,
+                username: this.config.username,
+                password: this.config.password,
+                domain: this.config.domain,
+                overwrite: overwrite
+            });
+        } catch (e) {
+            // Map "File exists" to 409 for frontend conflict UI
+            if (e.message && e.message.includes("File exists")) {
+                const err = new Error("File exists");
+                err.response = { status: 409 };
+                throw err;
+            }
+            throw e;
+        }
     }
 
-    async streamUploadFile(path, sourcePath, id) {
-        await WebDavNative.smbUpload({
-            address: this.config.address,
-            share: this.config.share,
-            path: path,
-            sourcePath: sourcePath,
-            username: this.config.username,
-            password: this.config.password,
-            domain: this.config.domain,
-            id: id
-        });
+    async streamUploadFile(path, sourcePath, id, overwrite = false) {
+        try {
+            await WebDavNative.smbUpload({
+                address: this.config.address,
+                share: this.config.share,
+                path: path,
+                sourcePath: sourcePath,
+                username: this.config.username,
+                password: this.config.password,
+                domain: this.config.domain,
+                overwrite: overwrite,
+                id: id
+            });
+        } catch (e) {
+            if (e.message && e.message.includes("File exists")) {
+                const err = new Error("File exists");
+                err.response = { status: 409 };
+                throw err;
+            }
+            throw e;
+        }
     }
 
     async streamDownloadFile(remotePath, localPath, id) {
@@ -652,7 +684,7 @@ const ServerAPI = {
             };
 
             try {
-                await axios.post(`/api/upload?path=${encodeURIComponent(path)}&drive=${driveId}&taskId=${taskId}&overwrite=${overwrite}`, formData, config);
+                await client.streamUploadFile(path, file.path, taskId, overwrite);
             } finally {
                 delete serverProgressCallbacks[taskId];
             }
@@ -935,7 +967,7 @@ const NativeAPI = {
         });
     },
 
-    moveItems: async (items, destination, driveId) => {
+    moveItems: async (items, destination, driveId, overwrite = false) => {
         if (driveId !== 'local') {
             const drives = await NativeAPI.getDrives();
             const config = drives.find(d => d.id === driveId);
@@ -943,7 +975,7 @@ const NativeAPI = {
 
             await Promise.all(items.map(item => {
                 const destPath = `${destination}/${item.split('/').pop()}`.replace('//', '/');
-                return client.moveFile(item, destPath);
+                return client.moveFile(item, destPath, overwrite);
             }));
             return;
         }
@@ -967,7 +999,44 @@ const NativeAPI = {
         }));
     },
 
-    crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete) => {
+    // Exposed for direct file operations (e.g. auto-rename copy/move)
+    moveFile: async (path, newPath, driveId, overwrite = false) => {
+        if (driveId !== 'local') {
+            const drives = await NativeAPI.getDrives();
+            const config = drives.find(d => d.id === driveId);
+            const client = getWebDAVClient(config);
+            await client.moveFile(path, newPath, overwrite);
+            return;
+        }
+        await Filesystem.rename({
+            from: path,
+            to: newPath,
+            directory: Directory.ExternalStorage,
+            toDirectory: Directory.ExternalStorage
+        });
+    },
+
+    copyFile: async (path, newPath, driveId, overwrite = false) => {
+        if (driveId !== 'local') {
+            const drives = await NativeAPI.getDrives();
+            const config = drives.find(d => d.id === driveId);
+            if (!config) {
+                console.error(`[NativeAPI] Drive not found during copyFile: ${driveId}`, drives);
+                throw new Error(`Drive not found: ${driveId}`);
+            }
+            const client = getWebDAVClient(config);
+            await client.copyFile(path, newPath, overwrite);
+            return;
+        }
+        await Filesystem.copy({
+            from: path,
+            to: newPath,
+            directory: Directory.ExternalStorage,
+            toDirectory: Directory.ExternalStorage
+        });
+    },
+
+    crossDriveTransfer: async (items, sourceDriveId, destPath, destDriveId, isMove = false, onProgress, onItemComplete, overwrite = false) => {
         console.log(`[CrossDrive] Transferring ${items.length} items from ${sourceDriveId} to ${destDriveId} (Move: ${isMove})`);
 
         const NOTIFY_ID = 9999;
@@ -1084,7 +1153,9 @@ const NativeAPI = {
                             // It's hard to map child bytes to parent folder total bytes without pre-calc.
                             // Just report activity on the parent task?
                             if (onProgress) onProgress(i + 1, items.length, `${itemName}/${name}`, speed, cur, tot);
-                        }
+                        },
+                        null,
+                        overwrite
                     );
 
                     // 4. If Move, delete source directory after recursion
@@ -1184,7 +1255,7 @@ const NativeAPI = {
                         };
 
                         try {
-                            await client.streamUploadFile(targetPath, itemPath, transferId);
+                            await client.streamUploadFile(targetPath, itemPath, transferId, overwrite);
                             transferredBytes += fileSize; // Accumulate bytes
                         } finally {
                             delete uploadCallbacks[transferId];
@@ -1201,6 +1272,13 @@ const NativeAPI = {
                         console.log(`[CrossDrive] Optimizing Same-Drive Cloud Copy for ${itemPath}`);
                         const drives = await NativeAPI.getDrives();
                         const config = drives.find(d => d.id === sourceDriveId);
+                        if (!config) {
+                            console.error(`[CrossDrive] Source drive not found: ${sourceDriveId}`, drives);
+                            // Fallback to standard transfer or throw?
+                            // Throwing will trigger catch and maybe standard flow? 
+                            // But standard flow needs source config too.
+                            throw new Error("Source Drive Config not found");
+                        }
                         const client = getWebDAVClient(config);
 
                         const cleanDest = destPath === '/' ? '' : destPath.replace(/\/+$/, '');
@@ -1209,7 +1287,7 @@ const NativeAPI = {
                         // Indeterminate progress or instant?
                         if (onProgress) onProgress(i + 1, items.length, `${itemName} (Server-Side Copy)`, 0, 0, 0);
 
-                        await client.copyFile(itemPath, targetPath);
+                        await client.copyFile(itemPath, targetPath, overwrite);
 
                         // If Move, this block handles COPY. 
                         // Move logic (delete source) is handled by crossDriveTransfer's caller (moveItems) for same drive?
