@@ -429,15 +429,35 @@ public class WebDavPlugin extends Plugin {
     }
 
     private void deleteRecursive(SmbFile file) throws Exception {
+        String url = file.getPath(); // logging
+        // android.util.Log.d("WebDavNative", "Processing delete: " + url);
+
         if (file.isDirectory()) {
-            SmbFile[] files = file.listFiles();
-            if (files != null) {
-                for (SmbFile child : files) {
-                    deleteRecursive(child);
+            try {
+                SmbFile[] files = file.listFiles();
+                if (files != null) {
+                    for (SmbFile child : files) {
+                        deleteRecursive(child);
+                    }
                 }
+            } catch (Exception e) {
+                // If we can't list, maybe it's not a dir or access denied. 
+                // Log and try to delete anyway (path might be wrong)
+                android.util.Log.w("WebDavNative", "Failed to list directory: " + url, e);
             }
         }
-        file.delete();
+
+        try {
+            file.delete();
+            android.util.Log.d("WebDavNative", "Deleted: " + url);
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("cannot find") || msg.contains("No such file"))) {
+                android.util.Log.w("WebDavNative", "File not found during delete (ignoring): " + url);
+            } else {
+                throw e;
+            }
+        }
     }
 
     @PluginMethod
