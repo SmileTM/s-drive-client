@@ -479,6 +479,41 @@ public class WebDavPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void smbCopy(PluginCall call) {
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String path = call.getString("path");
+        String newPath = call.getString("newPath");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null || path == null || newPath == null) {
+            call.reject("Missing parameters");
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                CIFSContext ctx = getCifsContext(username, password, domain);
+                String url = buildSmbUrl(address, share, path);
+                String newUrl = buildSmbUrl(address, share, newPath);
+                
+                android.util.Log.d("WebDavNative", "SMB Copy: " + url + " -> " + newUrl);
+
+                SmbFile f = new SmbFile(url, ctx);
+                SmbFile dest = new SmbFile(newUrl, ctx);
+
+                f.copyTo(dest);
+                call.resolve();
+            } catch (Exception e) {
+                android.util.Log.e("WebDavNative", "SMB Copy Error", e);
+                call.reject("SMB Copy Failed: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    @PluginMethod
     public void smbDownload(PluginCall call) {
         startTransfer();
         final String callbackId = call.getString("id");
