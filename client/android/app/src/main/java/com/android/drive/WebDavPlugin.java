@@ -437,11 +437,17 @@ public class WebDavPlugin extends Plugin {
                 // Use list() to get names and construct children manually to ensure correct path
                 String[] children = file.list();
                 if (children != null) {
+                    // Ensure parent has trailing slash, otherwise SmbFile(parent, name) concatenates without slash
+                    SmbFile parentDir = file;
+                    if (!file.getPath().endsWith("/")) {
+                        parentDir = new SmbFile(file.getPath() + "/", file.getContext());
+                    }
+
                     for (String name : children) {
                         // Skip . and .. just in case
                         if (name.equals(".") || name.equals("..")) continue;
                         
-                        SmbFile child = new SmbFile(file, name);
+                        SmbFile child = new SmbFile(parentDir, name);
                         deleteRecursive(child);
                     }
                 }
