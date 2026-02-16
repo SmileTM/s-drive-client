@@ -37,6 +37,7 @@ import {
 import clsx from 'clsx';
 import PreviewModal from './PreviewModal';
 import AddDriveModal from './AddDriveModal';
+import ShareReceiver from './components/ShareReceiver';
 import InputModal from './InputModal';
 import DetailsModal from './DetailsModal';
 import ConfirmModal from './ConfirmModal';
@@ -302,6 +303,8 @@ function App() {
   // Removed simple uploading/progress state
   const [tasks, setTasks] = useState([]); // { id, name, status, progress, speed, currentBytes, totalBytes }
   const [transferDashboardOpen, setTransferDashboardOpen] = useState(false);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [sharedFiles, setSharedFiles] = useState([]);
   const [conflictModal, setConflictModal] = useState({ isOpen: false, fileName: '', resolve: null });
 
   const [isIslandExpanded, setIsIslandExpanded] = useState(false);
@@ -557,14 +560,14 @@ function App() {
     CapApp.getLaunchUrl().then(data => {
       if (data && data.url && data.url.includes('transfers')) {
         console.log('[DeepLink] Initial Launch URL:', data.url);
-        setIsDashboardOpen(true);
+        setTransferDashboardOpen(true);
       }
     });
 
     // Native Bridge Fallback (Robustness) - Direct Window Event
     const handleDeepLink = () => {
       console.log('[DeepLink] Window Event Fired');
-      setIsDashboardOpen(true);
+      setTransferDashboardOpen(true);
     };
     window.addEventListener('openTransferDeepLink', handleDeepLink);
 
@@ -573,7 +576,7 @@ function App() {
       console.log('[DeepLink] appUrlOpen fired:', JSON.stringify(data));
       if (data.url && data.url.includes('transfers')) {
         console.log('[DeepLink] Opening dashboard...');
-        setIsDashboardOpen(true);
+        setTransferDashboardOpen(true);
       }
     });
 
@@ -584,7 +587,7 @@ function App() {
           console.log('[DeepLink] Resume Launch URL:', JSON.stringify(data));
           if (data && data.url && data.url.includes('transfers')) {
             console.log('[DeepLink] State Change URL Match');
-            setIsDashboardOpen(true);
+            setTransferDashboardOpen(true);
           }
         });
       }
@@ -599,6 +602,87 @@ function App() {
       window.removeEventListener('touchend', handleTouchEnd);
       window.removeEventListener('openTransferDeepLink', handleDeepLink);
     };
+  }, []);
+
+  const handleSharedUpload = (files, driveId, path) => {
+    // 1. Prepare files for API
+    const uploadFiles = files.map(f => ({
+      name: f.name,
+      size: f.size,
+      uri: f.uri,
+      mimeType: f.mimeType,
+      isShared: true,
+      taskId: 'upload_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)
+    }));
+
+    // 2. Add to Dashboard Tasks
+    const newTasks = uploadFiles.map(f => ({
+      id: f.taskId,
+      name: f.name,
+      status: 'pending',
+      progress: 0,
+      speed: 0,
+      currentBytes: 0,
+      totalBytes: f.size
+    }));
+
+    setTasks(prev => [...prev, ...newTasks]);
+    setTransferDashboardOpen(true);
+
+    // 3. Call API
+    api.uploadFiles(path, uploadFiles, driveId, (idx, total, name, speed, uploaded, totalBytes) => {
+      setTasks(prev => prev.map(t => {
+        if (t.name === name && t.status !== 'done' && t.status !== 'error') {
+          return {
+            ...t,
+            status: 'running',
+            speed,
+            currentBytes: uploaded,
+            totalBytes: totalBytes,
+            progress: totalBytes > 0 ? (uploaded / totalBytes) * 100 : 0
+          };
+        }
+        return t;
+      }));
+    }, (name) => {
+      setTasks(prev => prev.map(t => t.name === name ? { ...t, status: 'done', progress: 100 } : t));
+      // Optional: Refresh file list if current folder matches
+      if (driveId === activeDrive && currentPath === path) {
+        fetchFiles(path);
+      }
+    }).catch(err => {
+      console.error("Shared upload failed", err);
+    });
+  };
+
+
+  // --- Share Target Listener ---
+  useEffect(() => {
+    const handleShareIntent = (e) => {
+      console.log('App received appSendIntentReceived:', e.detail);
+      const items = e.detail?.items || [];
+      if (items.length > 0) {
+        // Transform items if necessary, or pass raw
+        // Items from Android: { uri, name, mimeType, size }
+        // We might need to process them before upload? 
+        // handleUpload expects File objects usually, but we modified it to take fileWithId?
+        // Actually handleUpload takes `acceptedFiles` (Array of File).
+        // For shared files, we don't have File objects yet. We have URIs.
+        // We need a way to upload URIs.
+        // The capacitor plugin `upload` method can take a web path or native path.
+        // Our `api.uploadFiles` uses `axios` with `FormData` (browser) or `WebDavPlugin.upload` (if implemented?).
+        // Current `api.js` likely uses pure JS `webdav` library or `fetch`.
+        // If we are in Capacitor, we can't easily upload `content://` URIs via JS `fetch` without reading them first.
+
+        // Strategy: 
+        // Pass these special "File-like" objects to a modified handleUpload or ShareReceiver handles it.
+        // Let's pass them to ShareReceiver, and ShareReceiver calls a SPECIAL upload function or we adapt handleUpload.
+        setSharedFiles(items);
+        setShareModalOpen(true);
+      }
+    };
+    window.addEventListener('appSendIntentReceived', handleShareIntent);
+    return () => window.removeEventListener('appSendIntentReceived', handleShareIntent);
   }, []);
 
   // Filtered files
@@ -1960,6 +2044,21 @@ function App() {
           lang={lang}
         />
       </div>
+      <ShareReceiver
+        isOpen={shareModalOpen}
+        onClose={() => setShareModalOpen(false)}
+        drives={drives}
+        activeDrive={activeDrive}
+        onUpload={(files, driveId, path) => {
+          setShareModalOpen(false);
+          // Special handling for Shared Files (URIs)
+          // We need to convert them to tasks and use native upload if possible, or read them.
+          // Since we are in Capacitor, we can use the plugin to upload directly from URI?
+          // Or we can modify handleUpload to accept these.
+
+          handleSharedUpload(files, driveId, path);
+        }}
+      />
     </div>
   );
 }

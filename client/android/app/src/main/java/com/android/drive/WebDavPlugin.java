@@ -41,6 +41,8 @@ import android.os.Environment;
 import android.util.Base64;
 import android.content.Intent;
 import android.net.Uri;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
 import android.Manifest;
 import android.provider.Settings;
 import android.os.Build;
@@ -755,20 +757,63 @@ public class WebDavPlugin extends Plugin {
                     return;
                 }
 
-                File localFile = new File(sourcePath);
-                if (!localFile.exists()) {
-                    // Try relative
-                    localFile = new File(Environment.getExternalStorageDirectory(), sourcePath);
-                    if (!localFile.exists()) {
-                         localFile = new File(getContext().getExternalCacheDir(), sourcePath);
+                final boolean isContentUri = sourcePath.startsWith("content://");
+                final File localFile;
+                final long fileSize;
+                final String sourceName;
+
+                if (isContentUri) {
+                    localFile = null;
+                    Uri uri = Uri.parse(sourcePath);
+                    long querySize = -1;
+                    String queryName = "Shared File";
+                    try (Cursor cursor = getContext().getContentResolver().query(uri, null, null, null, null)) {
+                        if (cursor != null && cursor.moveToFirst()) {
+                             int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+                             if (sizeIndex != -1) querySize = cursor.getLong(sizeIndex);
+                             int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                             if (nameIndex != -1) queryName = cursor.getString(nameIndex);
+                        }
                     }
-                }
-                
-                if (!localFile.exists()) {
-                    call.reject("Source file not found: " + sourcePath);
-                    return;
+                    if (querySize == -1) {
+                        call.reject("Could not determine size of content URI");
+                        return;
+                    }
+                    fileSize = querySize;
+                    sourceName = queryName;
+                } else {
+                    File temp = new File(sourcePath);
+                    if (!temp.exists()) {
+                        File root = Environment.getExternalStorageDirectory();
+                        if (sourcePath.startsWith("/")) {
+                             // Absolute path check
+                             if (sourcePath.startsWith(root.getAbsolutePath())) {
+                                  // it's absolute
+                             } else {
+                                  // might be relative to root
+                                  File check = new File(root, sourcePath.substring(1));
+                                  if (check.exists()) temp = check;
+                             }
+                        }
+                        // Re-resolve somewhat to ensure we find it if it's relative
+                        if (!temp.exists()) {
+                             temp = new File(root, sourcePath.startsWith("/") ? sourcePath.substring(1) : sourcePath);
+                        }
+                        if (!temp.exists()) {
+                             temp = new File(getContext().getExternalCacheDir(), sourcePath.startsWith("/") ? sourcePath.substring(1) : sourcePath);
+                        }
+                    }
+                    
+                    if (!temp.exists()) {
+                        call.reject("Source file not found: " + sourcePath);
+                        return;
+                    }
+                    localFile = temp;
+                    fileSize = localFile.length();
+                    sourceName = localFile.getName();
                 }
 
+                // Overwrite check (logic remains same for remote dest)
                 Boolean overwrite = call.getBoolean("overwrite", false);
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, remotePath);
@@ -779,11 +824,6 @@ public class WebDavPlugin extends Plugin {
                     return;
                 }
 
-                // Ensure parent exists? SmbFile usually needs parent to exist.
-                // jcifs-ng doesn't auto mkdirs on stream open usually.
-                // We assume basic path exists or we fail. 
-                // Creating parent requires parsing path which is tricky with URL.
-                // Try naive mkdirs if we can?
                 try {
                     String parentUrl = url.substring(0, url.lastIndexOf('/'));
                     if (parentUrl.length() > ("smb://" + address + "/" + share).length()) {
@@ -792,56 +832,66 @@ public class WebDavPlugin extends Plugin {
                     }
                 } catch(Exception e) { /* ignore */ }
 
-                long fileSize = localFile.length();
                 long uploaded = 0;
                 long lastUpdate = 0;
                 long lastBytes = 0;
-
-                try (InputStream in = new java.io.FileInputStream(localFile);
-                     OutputStream out = smbFile.getOutputStream()) {
-                    
-                    byte[] buffer = new byte[262144]; // 256KB buffer
-                    int read;
-                    while ((read = in.read(buffer)) != -1) {
-                        if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
-                            throw new IOException("Cancelled");
+                
+                InputStream in = null;
+                try {
+                     if (isContentUri) {
+                         in = getContext().getContentResolver().openInputStream(Uri.parse(sourcePath));
+                     } else {
+                         in = new java.io.FileInputStream(localFile);
+                     }
+                     
+                     if (in == null) throw new IOException("Failed to open input stream");
+                     
+                     try (OutputStream out = smbFile.getOutputStream()) {
+                        byte[] buffer = new byte[262144]; // 256KB buffer
+                        int read;
+                        while ((read = in.read(buffer)) != -1) {
+                            if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                                throw new IOException("Cancelled");
+                            }
+                            out.write(buffer, 0, read);
+                            uploaded += read;
+    
+                            long now = System.currentTimeMillis();
+                            if (now - lastUpdate > 1000) {
+                                if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
+    
+                                JSObject ret = new JSObject();
+                                ret.put("uploaded", uploaded);
+                                ret.put("total", fileSize);
+                                
+                                long diffBytes = uploaded - lastBytes;
+                                long diffTime = now - lastUpdate;
+                                long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                                
+                                ret.put("speed", speed);
+                                if (callbackId != null) ret.put("id", callbackId);
+                                notifyListeners("uploadProgress", ret);
+    
+                                String speedStr = formatSpeed(speed);
+                                
+                                boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                                String title = isZh ? "正在上传" : "Uploading";
+                                
+                                doUpdateNotification(9999, title, sourceName, (int)(uploaded/1024), (int)(fileSize/1024), speedStr);
+                                
+                                lastUpdate = now;
+                                lastBytes = uploaded;
+                            }
                         }
-                        out.write(buffer, 0, read);
-                        uploaded += read;
-
-                        long now = System.currentTimeMillis();
-                        if (now - lastUpdate > 1000) {
-                            if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
-
-                            JSObject ret = new JSObject();
-                            ret.put("uploaded", uploaded);
-                            ret.put("total", fileSize);
-                            
-                            long diffBytes = uploaded - lastBytes;
-                            long diffTime = now - lastUpdate;
-                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
-                            
-                            ret.put("speed", speed);
-                            if (callbackId != null) ret.put("id", callbackId);
-                            notifyListeners("uploadProgress", ret);
-
-                            String speedStr = formatSpeed(speed);
-                            
-                            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
-                            String title = isZh ? "正在上传" : "Uploading";
-                            
-                            doUpdateNotification(9999, title, localFile.getName(), (int)(uploaded/1024), (int)(fileSize/1024), speedStr);
-                            
-                            lastUpdate = now;
-                            lastBytes = uploaded;
-                        }
-                    }
-                    out.flush();
+                        out.flush();
+                     }
+                } finally {
+                     if (in != null) try { in.close(); } catch (IOException e) {}
                 }
                 call.resolve();
 
             } catch (Exception e) {
-                if (e.getMessage().equals("Cancelled")) {
+                if (e.getMessage() != null && e.getMessage().equals("Cancelled")) {
                     android.util.Log.d("WebDavNative", "SMB Upload Cancelled");
                 } else {
                     android.util.Log.e("WebDavNative", "SMB Upload Error", e);
@@ -1345,28 +1395,53 @@ public class WebDavPlugin extends Plugin {
             android.util.Log.d("WebDavNative", "Upload sourcePath: " + sourcePath);
             android.util.Log.d("WebDavNative", "Upload Input Keys: " + call.getData().keys());
 
-            File file = new File(sourcePath);
-            if (!file.exists()) {
-                // Not a valid absolute path, try relative to External Storage
-                File root = Environment.getExternalStorageDirectory();
-                String relative = sourcePath.startsWith("/") ? sourcePath.substring(1) : sourcePath;
-                file = new File(root, relative);
-                
-                if (!file.exists()) {
-                    // Try Cache Dir
-                    File cache = getContext().getExternalCacheDir();
-                    file = new File(cache, relative);
+            final boolean isContentUri = sourcePath.startsWith("content://");
+            final File fileFinal;
+            final long sourceSize;
+
+            if (isContentUri) {
+                fileFinal = null;
+                Uri uri = Uri.parse(sourcePath);
+                long querySize = -1;
+                try (Cursor cursor = getContext().getContentResolver().query(uri, null, null, null, null)) {
+                    if (cursor != null && cursor.moveToFirst()) {
+                         int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+                         if (sizeIndex != -1) {
+                             querySize = cursor.getLong(sizeIndex);
+                         }
+                    }
                 }
+                if (querySize == -1) {
+                    // Fallback or guess?
+                    call.reject("Could not determine size of content URI");
+                    return;
+                }
+                sourceSize = querySize;
+                android.util.Log.d("WebDavNative", "Resolved content URI size: " + sourceSize);
+
+            } else {
+                File file = new File(sourcePath);
+                if (!file.exists()) {
+                    // Not a valid absolute path, try relative to External Storage
+                    File root = Environment.getExternalStorageDirectory();
+                    String relative = sourcePath.startsWith("/") ? sourcePath.substring(1) : sourcePath;
+                    file = new File(root, relative);
+                    
+                    if (!file.exists()) {
+                        // Try Cache Dir
+                        File cache = getContext().getExternalCacheDir();
+                        file = new File(cache, relative);
+                    }
+                }
+                android.util.Log.d("WebDavNative", "Resolved upload file: " + file.getAbsolutePath() + " (Exists: " + file.exists() + ")");
+
+                if (!file.exists()) {
+                    call.reject("File not found: " + file.getAbsolutePath());
+                    return;
+                }
+                fileFinal = file;
+                sourceSize = file.length();
             }
-
-            android.util.Log.d("WebDavNative", "Resolved upload file: " + file.getAbsolutePath() + " (Exists: " + file.exists() + ")");
-
-            if (!file.exists()) {
-                call.reject("File not found: " + file.getAbsolutePath());
-                return;
-            }
-
-            final File fileFinal = file;
 
             Request.Builder requestBuilder = new Request.Builder().url(url);
 
@@ -1399,14 +1474,22 @@ public class WebDavPlugin extends Plugin {
                 @Override
                 public MediaType contentType() { return mediaTypeFinal; }
                 @Override
-                public long contentLength() { return fileFinal.length(); }
+                public long contentLength() { return sourceSize; }
                 @Override
                 public void writeTo(BufferedSink sink) throws IOException {
-                    long fileLength = fileFinal.length();
                     byte[] buffer = new byte[262144]; // 256KB buffer
                     long uploaded = 0;
+                    InputStream in = null;
+                    
+                    try {
+                        if (isContentUri) {
+                            in = getContext().getContentResolver().openInputStream(Uri.parse(sourcePath));
+                        } else {
+                            in = new java.io.FileInputStream(fileFinal);
+                        }
+                        
+                        if (in == null) throw new IOException("Failed to open input stream");
 
-                    try (InputStream in = new java.io.FileInputStream(fileFinal)) {
                         int read;
                         long lastUpdate = 0;
                         long lastBytes = 0;
@@ -1428,7 +1511,8 @@ public class WebDavPlugin extends Plugin {
 
                                  JSObject ret = new JSObject();
                                  ret.put("uploaded", uploaded);
-                                 ret.put("total", fileLength);
+                                 ret.put("uploaded", uploaded);
+                                 ret.put("total", sourceSize);
                                  
                                  // Calculate Speed
                                  long diffBytes = uploaded - lastBytes;
@@ -1445,17 +1529,21 @@ public class WebDavPlugin extends Plugin {
                                  boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
                                  String title = isZh ? "正在上传" : "Uploading";
                                  
-                                 doUpdateNotification(9999, title, fileFinal.getName(), (int)(uploaded/1024), (int)(fileLength/1024), speedStr);
+                                 String fileName = isContentUri ? "Shared File" : fileFinal.getName();
+                                 doUpdateNotification(9999, title, fileName, (int)(uploaded/1024), (int)(sourceSize/1024), speedStr);
                                  
                                  lastUpdate = now;
                                  lastBytes = uploaded;
                             }
                         }
+                    } finally {
+                        if (in != null) try { in.close(); } catch (IOException e) {}
                     }
                 }
             };
 
             requestBuilder.method(method, requestBody);
+
 
             Call callObj = client.newCall(requestBuilder.build());
             if (callbackId != null) activeCalls.put(callbackId, callObj);

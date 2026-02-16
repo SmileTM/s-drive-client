@@ -1733,8 +1733,16 @@ const NativeAPI = {
                     };
 
                     try {
-                        // Save to temp first
-                        temp = await saveToTemp(file);
+                        // Save to temp first (unless it's a Shared File with direct URI)
+                        if (file.isShared && file.uri) {
+                            temp = {
+                                path: file.uri,
+                                cleanup: async () => { }
+                            };
+                            console.log('[NativeWebDAV] Using shared URI directly:', temp.path);
+                        } else {
+                            temp = await saveToTemp(file);
+                        }
 
                         // Stream Upload
                         const remotePath = `${path}/${file.name}`.replace('//', '/');
