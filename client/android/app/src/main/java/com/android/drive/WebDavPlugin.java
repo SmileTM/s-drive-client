@@ -692,8 +692,7 @@ public class WebDavPlugin extends Plugin {
                     int read;
                     
                     // Initial notification update
-                    boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                    String titleInit = isZhInit ? "正在下载" : "Downloading";
+                    titleInit = isZhInit ? "正在下载" : "Downloading";
                     doUpdateNotification(9999, titleInit, smbFile.getName(), 0, (int)(fileSize/1024), "");
 
                     while ((read = in.read(buffer)) != -1) {
@@ -874,8 +873,8 @@ public class WebDavPlugin extends Plugin {
                         int read;
                         
                         // Initial notification update
-                        boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                        String titleInit = isZhInit ? "正在上传" : "Uploading";
+                        isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        titleInit = isZhInit ? "正在上传" : "Uploading";
                         doUpdateNotification(9999, titleInit, sourceName, 0, (int)(fileSize/1024), "");
 
                         while ((read = in.read(buffer)) != -1) {
@@ -1543,9 +1542,9 @@ public class WebDavPlugin extends Plugin {
                         long lastBytes = 0;
                         
                         // Initial notification update
-                        boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                        String titleInit = isZhInit ? "正在上传" : "Uploading";
-                        String fileNameInit = isContentUri ? "Shared File" : fileFinal.getName();
+                        isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        titleInit = isZhInit ? "正在上传" : "Uploading";
+                        fileNameInit = isContentUri ? "Shared File" : fileFinal.getName();
                         doUpdateNotification(9999, titleInit, fileNameInit, 0, (int)(sourceSize/1024), "");
 
                         while ((read = in.read(buffer)) != -1) {
@@ -1723,8 +1722,8 @@ public class WebDavPlugin extends Plugin {
                     long lastBytes = 0;
 
                     // Initial notification update
-                    boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                    String titleInit = isZhInit ? "正在下载" : "Downloading";
+                    isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    titleInit = isZhInit ? "正在下载" : "Downloading";
                     doUpdateNotification(9999, titleInit, file.getName(), 0, (int)(contentLength/1024), "");
 
                     while ((read = in.read(buffer)) != -1) {
