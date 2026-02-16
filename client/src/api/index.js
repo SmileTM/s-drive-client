@@ -395,25 +395,31 @@ class NativeSMBClient {
     }
 
     async getDirectoryContents(path) {
-        const res = await WebDavNative.smbListDirectory({
-            address: this.config.address,
-            share: this.config.share,
-            path: path,
-            username: this.config.username,
-            password: this.config.password,
-            domain: this.config.domain
-        });
-
-        return res.items.map(item => ({
-            basename: item.name,
-            filename: item.path, // Full relative path from share root
-            type: item.isDirectory ? 'directory' : 'file',
-            size: item.size,
-            lastmod: item.mtime,
-            mime: item.isDirectory ? null : 'application/octet-stream'
-        }));
+        console.log('[SMB] >>> Calling WebDavNative.smbListDirectory');
+        console.log('[SMB] address:', this.config.address, 'share:', this.config.share, 'path:', path);
+        try {
+            const res = await WebDavNative.smbListDirectory({
+                address: this.config.address,
+                share: this.config.share,
+                path: path,
+                username: this.config.username,
+                password: this.config.password,
+                domain: this.config.domain
+            });
+            console.log('[SMB] <<< smbListDirectory returned successfully');
+            return res.items.map(item => ({
+                basename: item.name,
+                filename: item.path,
+                type: item.isDirectory ? 'directory' : 'file',
+                size: item.size,
+                lastmod: item.mtime,
+                mime: item.isDirectory ? null : 'application/octet-stream'
+            }));
+        } catch (e) {
+            console.error('[SMB] <<< smbListDirectory FAILED:', e.code, e.message);
+            throw e;
+        }
     }
-
     async createDirectory(path) {
         await WebDavNative.smbMkdir({
             address: this.config.address,
@@ -564,6 +570,9 @@ class NativeSMBClient {
 // --- Helper: Get WebDAV Client ---
 const getWebDAVClient = (driveConfig) => {
     console.log(`[WebDAV] Creating client for: ${driveConfig.url}`);
+    console.log(`[WebDAV] driveConfig.type = '${driveConfig.type}'`);
+    console.log(`[WebDAV] isNative = ${Capacitor.isNativePlatform()}`);
+    console.log(`[WebDAV] Config keys: ${Object.keys(driveConfig).join(', ')}`);
 
     // Decrypt password (handles both encrypted storage and plain text form input)
     const password = decrypt(driveConfig.password);
@@ -571,8 +580,10 @@ const getWebDAVClient = (driveConfig) => {
     // If on Mobile (Native), use our Custom Native Client
     if (Capacitor.isNativePlatform()) {
         if (driveConfig.type === 'smb') {
+            console.log('[WebDAV] >>> Using NativeSMBClient');
             return new NativeSMBClient({ ...driveConfig, password });
         }
+        console.log('[WebDAV] >>> Using NativeWebDAVClient');
         return new NativeWebDAVClient({ ...driveConfig, password });
     }
 
@@ -1401,7 +1412,7 @@ const NativeAPI = {
 
                         // So we must use a temp folder in ExternalStorage (e.g. .WebDavClientTemp).
                         const tempDir = `.WebDavClientTemp`;
-                        await NativeAPI.createFolder(`/${tempDir}`, 'local');
+                        try { await NativeAPI.createFolder(`/${tempDir}`, 'local'); } catch (e) { /* ignore if exists */ }
                         const localTempPath = `/${tempDir}/${tempFileName}`;
 
                         // Determine Source Client
@@ -1930,21 +1941,32 @@ const NativeAPI = {
             } catch (e) { return ''; }
         }
 
-        // Android Local Video Seeking Fix: Use Custom Local Server
-        if (Capacitor.getPlatform() === 'android') {
+        // Native: Use Custom Local Server for media streaming (supports Range requests for seeking)
+        if (Capacitor.isNativePlatform()) {
             try {
                 if (!cachedServerUrl) {
                     const res = await WebDavNative.getServerUrl();
                     if (res && res.url) cachedServerUrl = res.url;
                 }
                 if (cachedServerUrl) {
-                    // Path must be URL encoded for the server to decode
-                    // Ensure path starts with /
+                    // Ensure path starts with / and no double slash in URL
                     const cleanPath = path.startsWith('/') ? path : '/' + path;
-                    return `${cachedServerUrl}${encodeURI(cleanPath)}`;
+                    const baseUrl = cachedServerUrl.endsWith('/') ? cachedServerUrl.slice(0, -1) : cachedServerUrl;
+                    return `${baseUrl}${encodeURI(cleanPath)}`;
                 }
             } catch (e) {
-                console.warn('[Native] Failed to get local server URL:', e);
+                console.warn('[Native] Failed to get local server URL, falling back:', e);
+            }
+
+            // Fallback: Use Capacitor's built-in file serving
+            try {
+                const { uri } = await Filesystem.getUri({
+                    path: path,
+                    directory: Directory.Documents
+                });
+                return Capacitor.convertFileSrc(uri);
+            } catch (e2) {
+                console.warn('[Native] convertFileSrc fallback also failed:', e2);
             }
         }
 

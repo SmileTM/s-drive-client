@@ -47,3 +47,22 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
 }
+
+// MARK: - Custom Bridge ViewController
+// Capacitor 8 requires local plugins to be explicitly registered.
+// This subclass ensures WebDavPlugin is loaded by the bridge.
+class AppViewController: CAPBridgeViewController {
+
+    override open func capacitorDidLoad() {
+        // registerPluginType() silently returns when autoRegisterPlugins=true (default).
+        // Must use registerPluginInstance() to actually register.
+        let plugin = WebDavPlugin()
+        bridge?.registerPluginInstance(plugin)
+        print("[AppViewController] Registered WebDavPlugin instance with bridge")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        print("[AppViewController] viewDidLoad - custom bridge VC is active")
+    }
+}
