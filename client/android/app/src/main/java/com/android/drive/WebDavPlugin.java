@@ -642,6 +642,12 @@ public class WebDavPlugin extends Plugin {
                     return;
                 }
 
+                // [FIX] Immediate notification to eliminate delay
+                boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
+                String fileNameInit = remotePath.contains("/") ? remotePath.substring(remotePath.lastIndexOf('/') + 1) : remotePath;
+                doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
+
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, remotePath);
                 SmbFile smbFile = new SmbFile(url, ctx);
@@ -767,6 +773,12 @@ public class WebDavPlugin extends Plugin {
                     call.reject("Missing parameters");
                     return;
                 }
+
+                // [FIX] Immediate notification to eliminate delay
+                boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
+                String fileNameInit = sourcePath.contains("/") ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1) : sourcePath;
+                doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
 
                 final boolean isContentUri = sourcePath.startsWith("content://");
                 final File localFile;
@@ -1395,6 +1407,14 @@ public class WebDavPlugin extends Plugin {
             String sourcePath = call.getString("sourcePath");
             String tempId = call.getString("id");
             
+            final boolean isContentUri = sourcePath != null && sourcePath.startsWith("content://");
+
+            // [FIX] Immediate notification to eliminate delay
+            boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+            String titleInit = isZhInit ? "正在准备上传" : "Preparing Upload";
+            String fileNameInit = isContentUri ? "Shared File" : (sourcePath != null ? new java.io.File(sourcePath).getName() : "...");
+            doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
+
             android.util.Log.d("WebDavNative", "Initial ID from call: " + tempId);
             if (headers != null) {
                  android.util.Log.d("WebDavNative", "Headers present. Keys: " + headers.keys());
@@ -1624,6 +1644,12 @@ public class WebDavPlugin extends Plugin {
             }
 
             android.util.Log.d("WebDavNative", "Download destPath: " + destPath);
+
+            // [FIX] Immediate notification to eliminate delay
+            boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+            String titleInit = isZhInit ? "正在准备下载" : "Preparing Download";
+            String fileNameInit = new java.io.File(destPath).getName();
+            doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
 
             File root = Environment.getExternalStorageDirectory();
             
