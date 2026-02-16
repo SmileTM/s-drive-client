@@ -459,7 +459,7 @@ public class WebDavPlugin extends Plugin {
                 android.util.Log.e("WebDavNative", "SMB Delete Error", e);
                 call.reject("SMB Delete Failed: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     private void deleteRecursive(SmbFile file) throws Exception {
@@ -515,7 +515,7 @@ public class WebDavPlugin extends Plugin {
             return;
         }
 
-        new Thread(() -> {
+        smbMetadataExecutor.execute(() -> {
             try {
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, path);
@@ -548,7 +548,7 @@ public class WebDavPlugin extends Plugin {
             return;
         }
 
-        new Thread(() -> {
+        smbMetadataExecutor.execute(() -> {
             try {
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String oldUrl = buildSmbUrl(address, share, oldPath);
