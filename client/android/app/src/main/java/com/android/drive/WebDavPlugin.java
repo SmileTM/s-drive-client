@@ -1406,12 +1406,12 @@ public class WebDavPlugin extends Plugin {
             String sourcePath = call.getString("sourcePath");
             String tempId = call.getString("id");
             
-            final boolean isContentUri = sourcePath != null && sourcePath.startsWith("content://");
+            final boolean isContentUriInit = sourcePath != null && sourcePath.startsWith("content://");
 
             // [FIX] Immediate notification to eliminate delay
             boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
             String titleInit = isZhInit ? "正在准备上传" : "Preparing Upload";
-            String fileNameInit = isContentUri ? "Shared File" : (sourcePath != null ? new java.io.File(sourcePath).getName() : "...");
+            String fileNameInit = isContentUriInit ? "Shared File" : (sourcePath != null ? new java.io.File(sourcePath).getName() : "...");
             doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
 
             android.util.Log.d("WebDavNative", "Initial ID from call: " + tempId);
