@@ -692,8 +692,8 @@ public class WebDavPlugin extends Plugin {
                     int read;
                     
                     // Initial notification update
-                    titleInit = isZhInit ? "正在下载" : "Downloading";
-                    doUpdateNotification(9999, titleInit, smbFile.getName(), 0, (int)(fileSize/1024), "");
+                    String threadTitle = isZhInit ? "正在下载" : "Downloading";
+                    doUpdateNotification(9999, threadTitle, smbFile.getName(), 0, (int)(fileSize/1024), "");
 
                     while ((read = in.read(buffer)) != -1) {
                         if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
@@ -873,9 +873,8 @@ public class WebDavPlugin extends Plugin {
                         int read;
                         
                         // Initial notification update
-                        isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                        titleInit = isZhInit ? "正在上传" : "Uploading";
-                        doUpdateNotification(9999, titleInit, sourceName, 0, (int)(fileSize/1024), "");
+                        String threadTitle = isZhInit ? "正在上传" : "Uploading";
+                        doUpdateNotification(9999, threadTitle, sourceName, 0, (int)(fileSize/1024), "");
 
                         while ((read = in.read(buffer)) != -1) {
                             if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
@@ -1542,10 +1541,9 @@ public class WebDavPlugin extends Plugin {
                         long lastBytes = 0;
                         
                         // Initial notification update
-                        isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                        titleInit = isZhInit ? "正在上传" : "Uploading";
-                        fileNameInit = isContentUri ? "Shared File" : fileFinal.getName();
-                        doUpdateNotification(9999, titleInit, fileNameInit, 0, (int)(sourceSize/1024), "");
+                        String threadTitle = isZhInit ? "正在上传" : "Uploading";
+                        String threadFileName = isContentUri ? "Shared File" : fileFinal.getName();
+                        doUpdateNotification(9999, threadTitle, threadFileName, 0, (int)(sourceSize/1024), "");
 
                         while ((read = in.read(buffer)) != -1) {
                             // Check for cancellation
@@ -1722,9 +1720,8 @@ public class WebDavPlugin extends Plugin {
                     long lastBytes = 0;
 
                     // Initial notification update
-                    isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                    titleInit = isZhInit ? "正在下载" : "Downloading";
-                    doUpdateNotification(9999, titleInit, file.getName(), 0, (int)(contentLength/1024), "");
+                    String threadTitle = isZhInit ? "正在下载" : "Downloading";
+                    doUpdateNotification(9999, threadTitle, file.getName(), 0, (int)(contentLength/1024), "");
 
                     while ((read = in.read(buffer)) != -1) {
                         // Check for cancellation
