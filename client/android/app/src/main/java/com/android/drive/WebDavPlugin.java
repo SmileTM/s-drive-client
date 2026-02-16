@@ -273,8 +273,11 @@ public class WebDavPlugin extends Plugin {
         java.util.Properties prop = new java.util.Properties();
         prop.put("jcifs.smb.client.rcv_buf_size", "1048576"); // 1MB
         prop.put("jcifs.smb.client.snd_buf_size", "1048576"); // 1MB
+        prop.put("jcifs.smb.client.maximumBufferSize", "1048576"); // 1MB
+        prop.put("jcifs.smb.client.transactionSize", "1048576"); // 1MB
         prop.put("jcifs.smb.client.dfs.disabled", "true");
         prop.put("jcifs.resolveOrder", "DNS");
+        prop.put("jcifs.smb.client.useBatching", "true");
         
         CIFSContext base;
         try {
