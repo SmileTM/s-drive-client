@@ -1,14 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { XMarkIcon, DocumentIcon, PhotoIcon, VideoCameraIcon, FolderIcon, ArrowUturnUpIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, DocumentIcon, PhotoIcon, VideoCameraIcon, FolderIcon, ArrowUturnUpIcon, FolderPlusIcon } from '@heroicons/react/24/outline';
 import api from '../api';
+import InputModal from '../InputModal';
 
-const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
+const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive, lang }) => {
     const [sharedFiles, setSharedFiles] = useState([]);
     const [selectedDrive, setSelectedDrive] = useState(activeDrive);
     const [targetPath, setTargetPath] = useState('/');
     const [folders, setFolders] = useState([]);
     const [loadingFolders, setLoadingFolders] = useState(false);
+
+    // New Folder Modal State
+    const [isInputModalOpen, setIsInputModalOpen] = useState(false);
 
     useEffect(() => {
         const handleShare = (e) => {
@@ -21,13 +25,6 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
         window.addEventListener('appSendIntentReceived', handleShare);
         return () => window.removeEventListener('appSendIntentReceived', handleShare);
     }, []);
-
-    const handleConfirm = () => {
-        onUpload(sharedFiles, selectedDrive, targetPath);
-        setSharedFiles([]); // Clear local state, though App.jsx might handle close
-    };
-
-
 
     useEffect(() => {
         // Reset path when drive changes
@@ -43,7 +40,6 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
         if (!selectedDrive) return;
         setLoadingFolders(true);
         try {
-            console.log(`[ShareReceiver] Fetching folders for drive ${selectedDrive} at ${targetPath}`);
             const items = await api.getFiles(targetPath, selectedDrive);
             if (Array.isArray(items)) {
                 setFolders(items.filter(i => i.isDirectory));
@@ -59,7 +55,6 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
     };
 
     const handleNavigate = (folderName) => {
-        // Handle .. or folder name
         if (folderName === '..') {
             if (targetPath === '/') return;
             const parts = targetPath.split('/').filter(p => p);
@@ -72,11 +67,37 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
         }
     };
 
+    const handleCreateFolder = async (folderName) => {
+        if (!folderName.trim()) return;
+
+        try {
+            setLoadingFolders(true);
+            const cleanName = folderName.trim();
+            const newPath = targetPath === '/' ? `/${cleanName}` : `${targetPath}/${cleanName}`;
+
+            await api.createFolder(newPath, selectedDrive);
+            await loadFolders(); // Refresh list
+        } catch (e) {
+            console.error("[ShareReceiver] Failed to create folder", e);
+            alert("Failed to create folder");
+        } finally {
+            setLoadingFolders(false);
+        }
+    };
+
+    const handleConfirm = () => {
+        onUpload(sharedFiles, selectedDrive, targetPath);
+        setSharedFiles([]);
+    };
+
     if (!isOpen) return null;
 
-
-
     const totalSize = sharedFiles.reduce((acc, f) => acc + f.size, 0);
+
+    const folderNamePrompt = {
+        zh: '新建文件夹',
+        en: 'New Folder'
+    }[lang] || 'New Folder';
 
     return (
         <AnimatePresence>
@@ -101,7 +122,7 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
                     </div>
 
                     {/* Content */}
-                    <div className="p-4 overflow-y-auto flex-1">
+                    <div className="p-4 overflow-y-auto flex-1 relative">
                         <div className="mb-4">
                             <p className="text-sm text-slate-500 mb-2">Files to upload ({sharedFiles.length})</p>
                             <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-2 max-h-32 overflow-y-auto space-y-2">
@@ -149,8 +170,8 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
                                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                                     Select Folder: <span className="text-indigo-600 font-mono text-xs ml-1">{targetPath}</span>
                                 </label>
-                                <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden h-40 flex flex-col">
-                                    <div className="bg-slate-50 dark:bg-slate-800 p-2 border-b border-slate-200 dark:border-slate-700 flex gap-2">
+                                <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden h-40 flex flex-col relative">
+                                    <div className="bg-slate-50 dark:bg-slate-800 p-2 border-b border-slate-200 dark:border-slate-700 flex gap-2 items-center">
                                         <button
                                             onClick={() => handleNavigate('..')}
                                             disabled={targetPath === '/'}
@@ -158,9 +179,16 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
                                         >
                                             <ArrowUturnUpIcon className="w-4 h-4 text-slate-600 dark:text-slate-400" />
                                         </button>
-                                        <span className="text-xs text-slate-500 flex items-center">
-                                            Current: {targetPath}
+                                        <span className="text-xs text-slate-500 flex-1 truncate">
+                                            {targetPath}
                                         </span>
+                                        <button
+                                            onClick={() => setIsInputModalOpen(true)}
+                                            className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded transition-colors text-indigo-600 dark:text-indigo-400"
+                                            title="New Folder"
+                                        >
+                                            <FolderPlusIcon className="w-4 h-4" />
+                                        </button>
                                     </div>
                                     <div className="flex-1 overflow-y-auto p-1 bg-white dark:bg-slate-900">
                                         {loadingFolders ? (
@@ -207,6 +235,15 @@ const ShareReceiver = ({ isOpen, onClose, onUpload, drives, activeDrive }) => {
                         </button>
                     </div>
                 </motion.div>
+
+                {/* Re-using the themed InputModal for folder creation */}
+                <InputModal
+                    isOpen={isInputModalOpen}
+                    title={folderNamePrompt}
+                    onConfirm={handleCreateFolder}
+                    onClose={() => setIsInputModalOpen(false)}
+                    lang={lang}
+                />
             </div>
         </AnimatePresence>
     );

@@ -2049,6 +2049,7 @@ function App() {
         onClose={() => setShareModalOpen(false)}
         drives={drives}
         activeDrive={activeDrive}
+        lang={lang}
         onUpload={(files, driveId, path) => {
           setShareModalOpen(false);
           // Special handling for Shared Files (URIs)

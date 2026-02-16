@@ -1774,7 +1774,7 @@ const NativeAPI = {
                     }
                 }
             } else {
-                // Local Upload (Chunked)
+                // Local Upload (Chunked or Direct for Shared)
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
                     await updateNotify(NOTIFY_ID, "Uploading Files", `Saving ${file.name}`, i, files.length);
@@ -1782,58 +1782,71 @@ const NativeAPI = {
                     if (onProgress) onProgress(i + 1, files.length, file.name, 0, 0, file.size);
                     const destPath = (path === '/' ? '' : path) + '/' + file.name;
 
-                    const CHUNK_SIZE = 1024 * 1024 * 1; // 1MB for stability
-                    let offset = 0;
-                    let lastUpdate = Date.now();
-                    let lastBytes = 0;
-
                     try {
-                        while (offset < file.size) {
-                            const chunk = file.slice(offset, offset + CHUNK_SIZE);
-                            const reader = new FileReader();
-                            const base64 = await new Promise((resolve, reject) => {
-                                reader.onload = () => resolve(reader.result.split(',')[1]);
-                                reader.onerror = () => reject(reader.error || new Error('Unknown FileReader Error'));
-                                reader.readAsDataURL(chunk);
+                        if (file.isShared && file.uri) {
+                            // Direct Copy for Shared Intent URIs to Local Folder
+                            console.log('[NativeWebDAV] Copying shared file to local:', file.uri, '->', destPath);
+                            await Filesystem.copy({
+                                from: file.uri,
+                                to: destPath,
+                                toDirectory: Directory.ExternalStorage
                             });
 
-                            if (offset === 0) {
-                                await Filesystem.writeFile({
-                                    path: destPath,
-                                    data: base64,
-                                    directory: Directory.ExternalStorage,
-                                    recursive: true
+                            if (onProgress) onProgress(i + 1, files.length, file.name, 0, file.size, file.size);
+                        } else {
+                            // Standard Chunked Upload for regular files (Web fallback)
+                            const CHUNK_SIZE = 1024 * 1024 * 1; // 1MB for stability
+                            let offset = 0;
+                            let lastUpdate = Date.now();
+                            let lastBytes = 0;
+
+                            while (offset < file.size) {
+                                const chunk = file.slice(offset, offset + CHUNK_SIZE);
+                                const reader = new FileReader();
+                                const base64 = await new Promise((resolve, reject) => {
+                                    reader.onload = () => resolve(reader.result.split(',')[1]);
+                                    reader.onerror = () => reject(reader.error || new Error('Unknown FileReader Error'));
+                                    reader.readAsDataURL(chunk);
                                 });
-                            } else {
-                                await Filesystem.appendFile({
-                                    path: destPath,
-                                    data: base64,
-                                    directory: Directory.ExternalStorage
-                                });
+
+                                if (offset === 0) {
+                                    await Filesystem.writeFile({
+                                        path: destPath,
+                                        data: base64,
+                                        directory: Directory.ExternalStorage,
+                                        recursive: true
+                                    });
+                                } else {
+                                    await Filesystem.appendFile({
+                                        path: destPath,
+                                        data: base64,
+                                        directory: Directory.ExternalStorage
+                                    });
+                                }
+                                offset += CHUNK_SIZE;
+                                await new Promise(resolve => setTimeout(resolve, 10)); // Yield more aggressively (10ms)
+
+                                // Report Progress Locally
+                                const now = Date.now();
+                                const timeDiff = (now - lastUpdate) / 1000;
+                                const currentUploaded = Math.min(offset, file.size);
+
+                                let speed = 0;
+                                if (timeDiff > 0) {
+                                    const bytesDiff = currentUploaded - lastBytes;
+                                    speed = bytesDiff / timeDiff;
+                                }
+                                // Fallback
+                                if (speed === 0 && currentUploaded > 0) {
+                                    const elapsed = (Date.now() - startTime) / 1000;
+                                    speed = (transferredBytes + currentUploaded) / elapsed;
+                                }
+
+                                lastUpdate = now;
+                                lastBytes = currentUploaded;
+
+                                if (onProgress) onProgress(i + 1, files.length, file.name, speed, currentUploaded, file.size);
                             }
-                            offset += CHUNK_SIZE;
-                            await new Promise(resolve => setTimeout(resolve, 10)); // Yield more aggressively (10ms)
-
-                            // Report Progress Locally
-                            const now = Date.now();
-                            const timeDiff = (now - lastUpdate) / 1000;
-                            const currentUploaded = Math.min(offset, file.size);
-
-                            let speed = 0;
-                            if (timeDiff > 0) {
-                                const bytesDiff = currentUploaded - lastBytes;
-                                speed = bytesDiff / timeDiff;
-                            }
-                            // Fallback
-                            if (speed === 0 && currentUploaded > 0) {
-                                const elapsed = (Date.now() - startTime) / 1000;
-                                speed = (transferredBytes + currentUploaded) / elapsed;
-                            }
-
-                            lastUpdate = now;
-                            lastBytes = currentUploaded;
-
-                            if (onProgress) onProgress(i + 1, files.length, file.name, speed, currentUploaded, file.size);
                         }
                         reportFinished(file.size);
                         if (onItemComplete) onItemComplete(file.name); // Notify item complete
