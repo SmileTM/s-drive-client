@@ -62,6 +62,8 @@ import jcifs.context.SingletonContext;
 import jcifs.smb.NtlmPasswordAuthenticator;
 import jcifs.smb.SmbFile;
 import jcifs.smb.SmbException;
+import jcifs.config.PropertyConfiguration;
+import jcifs.context.BaseContext;
 
 @CapacitorPlugin(
     name = "WebDavNative",
@@ -883,7 +885,7 @@ public class WebDavPlugin extends Plugin {
                      if (in == null) throw new IOException("Failed to open input stream");
                      
                      try (OutputStream out = smbFile.getOutputStream()) {
-                        byte[] buffer = new byte[262144]; // 256KB buffer
+                        byte[] buffer = new byte[1048576]; // [PERF] Use 1MB buffer
                         int read;
                         
                         // Initial notification update
