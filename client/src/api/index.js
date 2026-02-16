@@ -1933,6 +1933,20 @@ const NativeAPI = {
             const client = getWebDAVClient(config);
             const items = await client.getDirectoryContents('/');
             console.log(`[WebDAV] Success! Found ${items.length} items in root.`);
+
+            // [IOS] Sync credentials to App Group after successful test
+            if (Capacitor.getPlatform() === 'ios' && config.type !== 'smb') {
+                try {
+                    const password = decrypt(config.password);
+                    await WebDavNative.syncCredentials({
+                        url: config.url,
+                        username: config.username,
+                        password: password
+                    });
+                } catch (e) {
+                    console.error('[WebDAV] Credential sync failed:', e);
+                }
+            }
         } catch (err) {
             console.error('[WebDAV] Test Failed:', err);
             // Log object details for debugging

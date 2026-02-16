@@ -4,6 +4,7 @@ import Capacitor
 class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSessionDownloadDelegate {
     
     private let TAG = "[WebDAVManager]"
+    private let appGroup = "group.com.android.drive.share"
     
     // Track active download tasks
     private var downloadCallbacks = [Int: (call: CAPPluginCall, destURL: URL)]()
@@ -201,8 +202,14 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
         task.resume()
     }
     
-    // MARK: - URLSession Delegates (for future background support)
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        print("\(TAG) Download finished: \(location)")
+    // MARK: - App Group Support
+    func syncToAppGroup(url: String, user: String, pass: String) {
+        if let defaults = UserDefaults(suiteName: appGroup) {
+            defaults.set(url, forKey: "webdav_url")
+            defaults.set(user, forKey: "webdav_username")
+            defaults.set(pass, forKey: "webdav_password")
+            defaults.synchronize()
+            print("\(TAG) Synced credentials to AppGroup")
+        }
     }
 }

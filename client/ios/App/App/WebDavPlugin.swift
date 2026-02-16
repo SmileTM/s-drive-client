@@ -48,6 +48,7 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "smbCopy", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "smbDownload", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "smbUpload", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "syncCredentials", returnType: CAPPluginReturnPromise),
     ]
     
     // MARK: - Managers
@@ -181,4 +182,12 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func smbCopy(_ call: CAPPluginCall) { smb.copy(call) }
     @objc func smbDownload(_ call: CAPPluginCall) { smb.download(call) }
     @objc func smbUpload(_ call: CAPPluginCall) { smb.upload(call) }
+    
+    @objc func syncCredentials(_ call: CAPPluginCall) {
+        let url = call.getString("url") ?? ""
+        let user = call.getString("username") ?? ""
+        let pass = call.getString("password") ?? ""
+        webdav.syncToAppGroup(url: url, user: user, pass: pass)
+        call.resolve()
+    }
 }
