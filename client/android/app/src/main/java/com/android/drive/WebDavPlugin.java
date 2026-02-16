@@ -83,6 +83,14 @@ public class WebDavPlugin extends Plugin {
     // Track SMB cancellations manually since they are blocking IO operations
     private final ConcurrentHashMap<String, Boolean> cancelledSmbTasks = new ConcurrentHashMap<>();
 
+    // [PERF] Shared pool for SMB metadata operations (list, delete, mkdir, etc.)
+    // Limits concurrency to prevent 0xC000009A (Insufficient Resources)
+    private static final ExecutorService smbMetadataExecutor = Executors.newFixedThreadPool(4);
+
+    // [PERF] Cache for the tuned CIFSContext
+    private static CIFSContext tunedContext = null;
+    private static final Object contextLock = new Object();
+
     private void startTransfer() {
         int count = activeTransfers.getAndIncrement();
         android.util.Log.d("WebDavNative", "startTransfer, count before increment: " + count);
@@ -269,32 +277,34 @@ public class WebDavPlugin extends Plugin {
 
     // --- SMB Helpers ---
     private CIFSContext getCifsContext(String username, String password, String domain) {
-        // [PERF] Tune JCIFS settings for better performance
-        java.util.Properties prop = new java.util.Properties();
-        prop.put("jcifs.smb.client.rcv_buf_size", "1048576"); // 1MB
-        prop.put("jcifs.smb.client.snd_buf_size", "1048576"); // 1MB
-        prop.put("jcifs.smb.client.maximumBufferSize", "1048576"); // 1MB
-        prop.put("jcifs.smb.client.transactionSize", "1048576"); // 1MB
-        prop.put("jcifs.smb.client.dfs.disabled", "true");
-        prop.put("jcifs.resolveOrder", "DNS");
-        prop.put("jcifs.smb.client.useBatching", "true");
-        
-        CIFSContext base;
-        try {
-            PropertyConfiguration config = new PropertyConfiguration(prop);
-            base = new BaseContext(config);
-        } catch (Exception e) {
-            android.util.Log.e("WebDavNative", "Failed to load tuned JCIFS properties, using default", e);
-            base = SingletonContext.getInstance();
+        synchronized (contextLock) {
+            if (tunedContext == null) {
+                // [PERF] Tune JCIFS settings for better performance
+                java.util.Properties prop = new java.util.Properties();
+                prop.put("jcifs.smb.client.rcv_buf_size", "1048576"); // 1MB
+                prop.put("jcifs.smb.client.snd_buf_size", "1048576"); // 1MB
+                prop.put("jcifs.smb.client.maximumBufferSize", "1048576"); // 1MB
+                prop.put("jcifs.smb.client.transactionSize", "1048576"); // 1MB
+                prop.put("jcifs.smb.client.dfs.disabled", "true");
+                prop.put("jcifs.resolveOrder", "DNS");
+                prop.put("jcifs.smb.client.useBatching", "true");
+                
+                try {
+                    PropertyConfiguration config = new PropertyConfiguration(prop);
+                    tunedContext = new BaseContext(config);
+                } catch (Exception e) {
+                    android.util.Log.e("WebDavNative", "Failed to load tuned JCIFS properties, using default", e);
+                    tunedContext = SingletonContext.getInstance();
+                }
+            }
         }
 
         if (username != null && !username.isEmpty()) {
             NtlmPasswordAuthenticator auth = new NtlmPasswordAuthenticator(domain, username, password);
-            return base.withCredentials(auth);
+            return tunedContext.withCredentials(auth);
         }
-        return base.withGuestCrendentials();
+        return tunedContext.withGuestCrendentials();
     }
-
     private String buildSmbUrl(String host, String share, String path) {
         StringBuilder sb = new StringBuilder("smb://");
         sb.append(host);
