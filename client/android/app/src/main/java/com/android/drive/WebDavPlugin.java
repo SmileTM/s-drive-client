@@ -684,6 +684,12 @@ public class WebDavPlugin extends Plugin {
                     
                     byte[] buffer = new byte[262144]; // 256KB buffer
                     int read;
+                    
+                    // Initial notification update
+                    boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    String titleInit = isZhInit ? "正在下载" : "Downloading";
+                    doUpdateNotification(9999, titleInit, smbFile.getName(), 0, (int)(fileSize/1024), "");
+
                     while ((read = in.read(buffer)) != -1) {
                         if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
                             throw new IOException("Cancelled");
@@ -719,6 +725,11 @@ public class WebDavPlugin extends Plugin {
                         }
                     }
                     out.flush();
+                    
+                    // Force 100% notification on completion
+                    boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    String titleFinal = isZhFinal ? "下载完成" : "Download Complete";
+                    doUpdateNotification(9999, titleFinal, smbFile.getName(), (int)(fileSize/1024), (int)(fileSize/1024), "");
                 }
                 call.resolve();
 
@@ -849,6 +860,12 @@ public class WebDavPlugin extends Plugin {
                      try (OutputStream out = smbFile.getOutputStream()) {
                         byte[] buffer = new byte[262144]; // 256KB buffer
                         int read;
+                        
+                        // Initial notification update
+                        boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        String titleInit = isZhInit ? "正在上传" : "Uploading";
+                        doUpdateNotification(9999, titleInit, sourceName, 0, (int)(fileSize/1024), "");
+
                         while ((read = in.read(buffer)) != -1) {
                             if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
                                 throw new IOException("Cancelled");
@@ -884,6 +901,11 @@ public class WebDavPlugin extends Plugin {
                             }
                         }
                         out.flush();
+                        
+                        // Force 100% notification on completion
+                        boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        String titleFinal = isZhFinal ? "上传完成" : "Upload Complete";
+                        doUpdateNotification(9999, titleFinal, sourceName, (int)(fileSize/1024), (int)(fileSize/1024), "");
                      }
                 } finally {
                      if (in != null) try { in.close(); } catch (IOException e) {}
@@ -1330,15 +1352,21 @@ public class WebDavPlugin extends Plugin {
         // 4. Icon
         customView.setImageViewResource(com.android.drive.R.id.notification_icon, iconResId);
 
-        // Build Notification
+        // Build Notification using Custom Layout (both Collapsed and Expanded)
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, "file_ops_v2")
-                .setSmallIcon(iconResId) 
+                .setSmallIcon(iconResId)
                 .setCustomContentView(customView)
-                //.setCustomBigContentView(customView) // Optional: Use if layout needs expansion
-                .setStyle(new NotificationCompat.DecoratedCustomViewStyle())
+                .setCustomBigContentView(customView) // Ensure visibility when expanded
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true);
+        
+        // Add standard progress as fallback/extra info for some system catchers
+        if (max > 0) {
+            builder.setProgress(max, progress, false);
+        } else {
+            builder.setProgress(0, 0, true);
+        }
         
         if (pendingIntent != null) {
             builder.setContentIntent(pendingIntent);
@@ -1493,6 +1521,13 @@ public class WebDavPlugin extends Plugin {
                         int read;
                         long lastUpdate = 0;
                         long lastBytes = 0;
+                        
+                        // Initial notification update
+                        boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        String titleInit = isZhInit ? "正在上传" : "Uploading";
+                        String fileNameInit = isContentUri ? "Shared File" : fileFinal.getName();
+                        doUpdateNotification(9999, titleInit, fileNameInit, 0, (int)(sourceSize/1024), "");
+
                         while ((read = in.read(buffer)) != -1) {
                             // Check for cancellation
                             if (callbackId != null && !activeCalls.containsKey(callbackId)) {
@@ -1536,6 +1571,12 @@ public class WebDavPlugin extends Plugin {
                                  lastBytes = uploaded;
                             }
                         }
+                        
+                        // Force 100% notification on completion
+                        boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        String titleFinal = isZhFinal ? "上传完成" : "Upload Complete";
+                        String fileName = isContentUri ? "Shared File" : fileFinal.getName();
+                        doUpdateNotification(9999, titleFinal, fileName, (int)(sourceSize/1024), (int)(sourceSize/1024), "");
                     } finally {
                         if (in != null) try { in.close(); } catch (IOException e) {}
                     }
@@ -1655,6 +1696,11 @@ public class WebDavPlugin extends Plugin {
                     long lastUpdate = 0;
                     long lastBytes = 0;
 
+                    // Initial notification update
+                    boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    String titleInit = isZhInit ? "正在下载" : "Downloading";
+                    doUpdateNotification(9999, titleInit, file.getName(), 0, (int)(contentLength/1024), "");
+
                     while ((read = in.read(buffer)) != -1) {
                         // Check for cancellation
                         if (callbackId != null && !activeCalls.containsKey(callbackId)) {
@@ -1701,6 +1747,11 @@ public class WebDavPlugin extends Plugin {
                         }
                     }
                     out.flush();
+                    
+                    // Force 100% notification on completion
+                    boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    String titleFinal = isZhFinal ? "下载完成" : "Download Complete";
+                    doUpdateNotification(9999, titleFinal, file.getName(), (int)(contentLength/1024), (int)(contentLength/1024), "");
                 }
                 
                 call.resolve();
