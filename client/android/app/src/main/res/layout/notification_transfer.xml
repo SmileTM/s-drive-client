@@ -34,7 +34,7 @@
             android:singleLine="true"
             android:text="Filename"
             android:textAppearance="@style/TextAppearance.Compat.Notification.Title"
-            android:textColor="?android:attr/textColorPrimary"
+            android:textColor="#555555"
             android:textSize="14sp" />
 
         <!-- Progress Bar -->
