@@ -265,8 +265,22 @@ public class WebDavPlugin extends Plugin {
 
     // --- SMB Helpers ---
     private CIFSContext getCifsContext(String username, String password, String domain) {
-        // Use SingletonContext as base
-        CIFSContext base = SingletonContext.getInstance();
+        // [PERF] Tune JCIFS settings for better performance
+        java.util.Properties prop = new java.util.Properties();
+        prop.put("jcifs.smb.client.rcv_buf_size", "1048576"); // 1MB
+        prop.put("jcifs.smb.client.snd_buf_size", "1048576"); // 1MB
+        prop.put("jcifs.smb.client.dfs.disabled", "true");
+        prop.put("jcifs.resolveOrder", "DNS");
+        
+        PropertyConfiguration config;
+        try {
+            config = new PropertyConfiguration(prop);
+        } catch (Exception e) {
+            android.util.Log.e("WebDavNative", "Failed to load JCIFS properties", e);
+            config = new PropertyConfiguration(new java.util.Properties());
+        }
+        
+        CIFSContext base = new BaseContext(config);
         if (username != null && !username.isEmpty()) {
             NtlmPasswordAuthenticator auth = new NtlmPasswordAuthenticator(domain, username, password);
             return base.withCredentials(auth);
@@ -688,7 +702,7 @@ public class WebDavPlugin extends Plugin {
                 try (InputStream in = smbFile.getInputStream();
                      FileOutputStream out = new FileOutputStream(localFile)) {
                     
-                    byte[] buffer = new byte[262144]; // 256KB buffer
+                    byte[] buffer = new byte[1048576]; // [PERF] Use 1MB buffer
                     int read;
                     
                     // Initial notification update
