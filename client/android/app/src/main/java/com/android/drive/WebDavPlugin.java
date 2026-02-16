@@ -1351,9 +1351,6 @@ public class WebDavPlugin extends Plugin {
         
         // 4. Icon
         customView.setImageViewResource(com.android.drive.R.id.notification_icon, iconResId);
-        
-        // 5. Trigger Marquee (Trick: set setSelected via RemoteViews reflection)
-        customView.setBoolean(com.android.drive.R.id.notification_title, "setSelected", true);
 
         // Build Notification using Custom Layout (both Collapsed and Expanded)
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, "file_ops_v2")
