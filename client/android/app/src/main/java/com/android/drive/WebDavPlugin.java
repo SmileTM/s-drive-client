@@ -64,6 +64,8 @@ import jcifs.smb.SmbFile;
 import jcifs.smb.SmbException;
 import jcifs.config.PropertyConfiguration;
 import jcifs.context.BaseContext;
+import jcifs.config.PropertyConfiguration;
+import jcifs.context.BaseContext;
 
 @CapacitorPlugin(
     name = "WebDavNative",
@@ -274,15 +276,15 @@ public class WebDavPlugin extends Plugin {
         prop.put("jcifs.smb.client.dfs.disabled", "true");
         prop.put("jcifs.resolveOrder", "DNS");
         
-        PropertyConfiguration config;
+        CIFSContext base;
         try {
-            config = new PropertyConfiguration(prop);
+            PropertyConfiguration config = new PropertyConfiguration(prop);
+            base = new BaseContext(config);
         } catch (Exception e) {
-            android.util.Log.e("WebDavNative", "Failed to load JCIFS properties", e);
-            config = new PropertyConfiguration(new java.util.Properties());
+            android.util.Log.e("WebDavNative", "Failed to load tuned JCIFS properties, using default", e);
+            base = SingletonContext.getInstance();
         }
-        
-        CIFSContext base = new BaseContext(config);
+
         if (username != null && !username.isEmpty()) {
             NtlmPasswordAuthenticator auth = new NtlmPasswordAuthenticator(domain, username, password);
             return base.withCredentials(auth);
