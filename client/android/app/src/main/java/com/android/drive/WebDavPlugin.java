@@ -425,7 +425,7 @@ public class WebDavPlugin extends Plugin {
             return;
         }
 
-        new Thread(() -> {
+        smbMetadataExecutor.execute(() -> {
             try {
                 CIFSContext ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, path);
