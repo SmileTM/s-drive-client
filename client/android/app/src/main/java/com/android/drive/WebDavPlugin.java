@@ -530,7 +530,7 @@ public class WebDavPlugin extends Plugin {
             } catch (Exception e) {
                 call.reject("SMB Mkdir Failed: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     @PluginMethod
@@ -589,7 +589,7 @@ public class WebDavPlugin extends Plugin {
             } catch (Exception e) {
                 call.reject("SMB Rename Failed: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     @PluginMethod
