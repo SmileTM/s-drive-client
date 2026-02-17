@@ -310,6 +310,7 @@ public class WebDavPlugin extends Plugin {
                 prop.put("jcifs.smb.client.transactionSize", "8388608");
                 prop.put("jcifs.smb.client.useLargeReadWrite", "true");
                 prop.put("jcifs.smb.client.maxMpxCount", "256");
+                prop.put("jcifs.smb.client.maximumCredits", "1024"); // [PERF] Increase Credits
                 prop.put("jcifs.smb.client.signingPreferred", "false");
                 prop.put("jcifs.smb.client.signingEnforced", "false");
                 prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
@@ -763,9 +764,14 @@ public class WebDavPlugin extends Plugin {
                 final java.lang.StringBuilder errorMsg = new java.lang.StringBuilder();
                 final String finalFileName = smbFile.getName();
 
-                // 2 Parallel Threads for files > 10MB
-                int threadCount = (fileSize > 10 * 1024 * 1024) ? 2 : 1;
+                // [PERF] Multi-threaded Parallel Download Accelerator (V5)
+                int threadCount = 1;
+                if (fileSize > 200 * 1024 * 1024) threadCount = 8;
+                else if (fileSize > 50 * 1024 * 1024) threadCount = 4;
+                else if (fileSize > 10 * 1024 * 1024) threadCount = 2;
+                
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
+                android.util.Log.i("WebDavNative", "Starting parallel download with " + threadCount + " threads for " + finalFileName);
 
                 for (int i = 0; i < threadCount; i++) {
                     final int threadIndex = i;
@@ -773,7 +779,8 @@ public class WebDavPlugin extends Plugin {
                     new Thread(() -> {
                         long start = threadIndex * (fileSize / totalThreads);
                         long end = (threadIndex == totalThreads - 1) ? fileSize - 1 : (threadIndex + 1) * (fileSize / totalThreads) - 1;
-                        
+                        if (start > end) { latch.countDown(); return; }
+
                         try (jcifs.smb.SmbFile sf = new jcifs.smb.SmbFile(url, ctx);
                              jcifs.smb.SmbRandomAccessFile sraf = new jcifs.smb.SmbRandomAccessFile(sf, "r");
                              java.io.RandomAccessFile raf = new java.io.RandomAccessFile(localFile, "rw")) {
@@ -781,7 +788,7 @@ public class WebDavPlugin extends Plugin {
                             sraf.seek(start);
                             raf.seek(start);
                             
-                            byte[] buffer = new byte[1048576]; // 1MB buffer
+                            byte[] buffer = new byte[1048576]; // 1MB buffer per thread
                             long pos = start;
                             int firstReads = 0;
                             long loopStart = System.currentTimeMillis();
