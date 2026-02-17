@@ -1342,7 +1342,7 @@ public class WebDavPlugin extends Plugin {
         Context context = getContext();
         
         // Log for debugging
-        android.util.Log.d("WebDavNotification", "Updating notification ID: " + id + " Title: " + title + " Speed: " + speed);
+        android.util.Log.d("WebDavNative", "Updating notification ID: " + id + " Title: " + title + " Speed: " + speed);
 
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
@@ -1473,6 +1473,7 @@ public class WebDavPlugin extends Plugin {
 
             if (url == null || sourcePath == null) {
                 call.reject("URL and sourcePath are required");
+                endTransfer();
                 return;
             }
 
@@ -1675,6 +1676,7 @@ public class WebDavPlugin extends Plugin {
 
             if (url == null || destPath == null) {
                 call.reject("URL and destPath are required");
+                endTransfer();
                 return;
             }
 
