@@ -280,15 +280,18 @@ public class WebDavPlugin extends Plugin {
     private CIFSContext getCifsContext(String username, String password, String domain) {
         synchronized (contextLock) {
             if (tunedContext == null) {
-                // [PERF] Tune JCIFS settings for better performance
-                java.util.Properties prop = new java.util.Properties();
-                prop.put("jcifs.smb.client.rcv_buf_size", "1048576"); // 1MB
-                prop.put("jcifs.smb.client.snd_buf_size", "1048576"); // 1MB
-                prop.put("jcifs.smb.client.maximumBufferSize", "1048576"); // 1MB
-                prop.put("jcifs.smb.client.transactionSize", "1048576"); // 1MB
-                prop.put("jcifs.smb.client.dfs.disabled", "true");
-                prop.put("jcifs.resolveOrder", "DNS");
-                prop.put("jcifs.smb.client.useBatching", "true");
+                // [PERF] Deeply tune JCIFS settings for maximum throughput (30MB/s+ target)
+            java.util.Properties prop = new java.util.Properties();
+            prop.put("jcifs.smb.client.rcv_buf_size", "8388608"); // 8MB
+            prop.put("jcifs.smb.client.snd_buf_size", "8388608"); // 8MB
+            prop.put("jcifs.smb.client.maximumBufferSize", "8388608"); // 8MB
+            prop.put("jcifs.smb.client.transactionSize", "8388608"); // 8MB
+            prop.put("jcifs.smb.client.useLargeReadWrite", "true");
+            prop.put("jcifs.smb.client.maxMpxCount", "128"); // High concurrency
+            prop.put("jcifs.smb.client.useSessKeepalive", "true");
+            prop.put("jcifs.smb.client.dfs.disabled", "true");
+            prop.put("jcifs.resolveOrder", "DNS");
+            prop.put("jcifs.smb.client.useBatching", "true");
                 
                 try {
                     PropertyConfiguration config = new PropertyConfiguration(prop);
@@ -719,7 +722,7 @@ public class WebDavPlugin extends Plugin {
                 long lastBytes = 0;
 
                 try (InputStream in = smbFile.getInputStream();
-                     FileOutputStream out = new FileOutputStream(localFile)) {
+                     java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(new java.io.FileOutputStream(localFile), 1048576)) {
                     
                     byte[] buffer = new byte[1048576]; // [PERF] Use 1MB buffer
                     int read;
@@ -903,7 +906,7 @@ public class WebDavPlugin extends Plugin {
                      
                      if (in == null) throw new IOException("Failed to open input stream");
                      
-                     try (OutputStream out = smbFile.getOutputStream()) {
+                     try (java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(smbFile.getOutputStream(), 1048576)) {
                         byte[] buffer = new byte[1048576]; // [PERF] Use 1MB buffer
                         int read;
                         
