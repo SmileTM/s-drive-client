@@ -302,22 +302,22 @@ public class WebDavPlugin extends Plugin {
                 java.util.Properties prop = new java.util.Properties();
                 prop.put("jcifs.smb.client.minVersion", "SMB202");
                 prop.put("jcifs.smb.client.maxVersion", "SMB311");
-                prop.put("jcifs.smb.client.readSize", "8388608"); // 8MB Read Size
-                prop.put("jcifs.smb.client.writeSize", "8388608"); // 8MB Write Size
-                prop.put("jcifs.smb.client.rcv_buf_size", "8388608"); 
-                prop.put("jcifs.smb.client.snd_buf_size", "8388608");
-                prop.put("jcifs.smb.client.maximumBufferSize", "8388608");
-                prop.put("jcifs.smb.client.transactionSize", "8388608");
+                prop.put("jcifs.smb.client.readSize", "4194304"); // [V6] 4MB Read
+                prop.put("jcifs.smb.client.writeSize", "4194304"); // [V6] 4MB Write
+                prop.put("jcifs.smb.client.rcv_buf_size", "16777216"); // [V6] 16MB
+                prop.put("jcifs.smb.client.snd_buf_size", "16777216");
+                prop.put("jcifs.smb.client.maximumBufferSize", "16777216");
+                prop.put("jcifs.smb.client.transactionSize", "16777216");
                 prop.put("jcifs.smb.client.useLargeReadWrite", "true");
-                prop.put("jcifs.smb.client.maxMpxCount", "256");
-                prop.put("jcifs.smb.client.maximumCredits", "1024"); // [PERF] Increase Credits
+                prop.put("jcifs.smb.client.maxMpxCount", "512"); // Even higher
+                prop.put("jcifs.smb.client.maximumCredits", "2048"); // [V6] Hyper Credits
                 prop.put("jcifs.smb.client.signingPreferred", "false");
                 prop.put("jcifs.smb.client.signingEnforced", "false");
                 prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
                 prop.put("jcifs.smb.client.tcpNoDelay", "true");
                 prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
                 prop.put("jcifs.smb.client.disableSpnegoSgn", "true"); // Extra speed
-                prop.put("jcifs.smb.client.socketReceiveBufferSize", "8388608"); // 8MB Socket Buffer
+                prop.put("jcifs.smb.client.socketReceiveBufferSize", "16777216"); // [V6] 16MB TCP Window
                 prop.put("jcifs.smb.client.socketSendBufferSize", "8388608");
                 prop.put("jcifs.smb.client.encryptionPreferred", "false");
                 prop.put("jcifs.smb.client.useSessKeepalive", "true");
@@ -764,14 +764,14 @@ public class WebDavPlugin extends Plugin {
                 final java.lang.StringBuilder errorMsg = new java.lang.StringBuilder();
                 final String finalFileName = smbFile.getName();
 
-                // [PERF] Multi-threaded Parallel Download Accelerator (V5)
+                // [PERF] Heavy-Duty Multi-threaded Accelerator (V6 Hyper-Turbo)
                 int threadCount = 1;
-                if (fileSize > 200 * 1024 * 1024) threadCount = 8;
+                if (fileSize > 200 * 1024 * 1024) threadCount = 6; // Optimized to 6 strong threads
                 else if (fileSize > 50 * 1024 * 1024) threadCount = 4;
                 else if (fileSize > 10 * 1024 * 1024) threadCount = 2;
                 
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
-                android.util.Log.i("WebDavNative", "Starting parallel download with " + threadCount + " threads for " + finalFileName);
+                android.util.Log.i("WebDavNative", "Starting V6 Hyper-Turbo: " + threadCount + " threads, 4MB buffers");
 
                 for (int i = 0; i < threadCount; i++) {
                     final int threadIndex = i;
@@ -788,10 +788,8 @@ public class WebDavPlugin extends Plugin {
                             sraf.seek(start);
                             raf.seek(start);
                             
-                            byte[] buffer = new byte[1048576]; // 1MB buffer per thread
+                            byte[] buffer = new byte[4194304]; // [V6] 4MB massive buffer per thread
                             long pos = start;
-                            int firstReads = 0;
-                            long loopStart = System.currentTimeMillis();
 
                             while (pos <= end && !hasError.get()) {
                                 if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
@@ -799,55 +797,50 @@ public class WebDavPlugin extends Plugin {
                                 }
                                 
                                 int toRead = (int) Math.min(buffer.length, end - pos + 1);
-                                if (toRead <= 0) break; // No more bytes to read in this segment
+                                if (toRead <= 0) break;
                                 
                                 int read = sraf.read(buffer, 0, toRead);
-                                if (read == -1) break; // End of stream
+                                if (read == -1) break;
                                 
                                 raf.write(buffer, 0, read);
                                 pos += read;
                                 downloaded.addAndGet(read);
-
-                                if (threadIndex == 0 && firstReads < 5) { // Log first few reads for thread 0
-                                    long readEnd = System.currentTimeMillis();
-                                    android.util.Log.i("WebDavNative", "PERF-T" + threadIndex + ": Read size=" + read + " duration=" + (readEnd - loopStart) + "ms");
-                                    firstReads++;
-                                    loopStart = System.currentTimeMillis();
-                                }
                             }
                         } catch (Exception e) {
                             hasError.set(true);
                             errorMsg.append(e.getMessage());
-                            android.util.Log.e("WebDavNative", "SMB Download Thread " + threadIndex + " Error", e);
                         } finally {
                             latch.countDown();
                         }
                     }).start();
                 }
 
-                // Progress loop
+                // Progress loop with Speed Smoothing
                 long lastUpdate = 0;
                 long lastBytes = 0;
-                // Initial notification update
-                String threadTitle = isZhInit ? "正在下载" : "Downloading";
-                doUpdateNotification(9999, threadTitle, finalFileName, 0, (int)(fileSize/1024), "");
-
+                long smoothedSpeed = 0;
+                
                 while (latch.getCount() > 0 && !hasError.get()) {
+筋
                     long now = System.currentTimeMillis();
                     if (now - lastUpdate > 1000) {
                         long currentTotal = downloaded.get();
                         long diffBytes = currentTotal - lastBytes;
                         long diffTime = now - lastUpdate;
-                        long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                        long instantSpeed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                        
+                        // [V6] Simple Smoothing: 70% last smoothed + 30% instant
+                        if (smoothedSpeed == 0) smoothedSpeed = instantSpeed;
+                        else smoothedSpeed = (long) (smoothedSpeed * 0.7 + instantSpeed * 0.3);
 
                         JSObject ret = new JSObject();
                         ret.put("downloaded", currentTotal);
                         ret.put("total", fileSize);
-                        ret.put("speed", speed);
+                        ret.put("speed", smoothedSpeed);
                         if (callbackId != null) ret.put("id", callbackId);
                         notifyListeners("downloadProgress", ret);
 
-                        String speedStr = formatSpeed(speed);
+                        String speedStr = formatSpeed(smoothedSpeed);
                         boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
                         String title = isZh ? "正在下载" : "Downloading";
                         doUpdateNotification(9999, title, finalFileName, (int)(currentTotal/1024), (int)(fileSize/1024), speedStr);
