@@ -772,8 +772,9 @@ public class WebDavPlugin extends Plugin {
                 call.resolve();
 
             } catch (Exception e) {
-                if (e.getMessage().equals("Cancelled")) {
+                if (e.getMessage() != null && e.getMessage().equals("Cancelled")) {
                     android.util.Log.d("WebDavNative", "SMB Download Cancelled");
+                    call.reject("Cancelled");
                 } else {
                     android.util.Log.e("WebDavNative", "SMB Download Error", e);
                     call.reject("SMB Download Error: " + e.getMessage());
@@ -959,6 +960,7 @@ public class WebDavPlugin extends Plugin {
             } catch (Exception e) {
                 if (e.getMessage() != null && e.getMessage().equals("Cancelled")) {
                     android.util.Log.d("WebDavNative", "SMB Upload Cancelled");
+                    call.reject("Cancelled");
                 } else {
                     android.util.Log.e("WebDavNative", "SMB Upload Error", e);
                     call.reject("SMB Upload Error: " + e.getMessage());
