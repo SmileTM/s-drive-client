@@ -226,11 +226,12 @@ public class WebDavPlugin extends Plugin {
     public void cancel(PluginCall call) {
         String id = call.getString("id");
         if (id != null) {
-            // Immediate UI feedback
-            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
-            String title = isZh ? "正在取消..." : "Cancelling...";
-            doUpdateNotification(9999, title, "", 0, 0, "");
-
+            // Immediate UI feedback, only if tasks are actually running
+            if (activeTransfers.get() > 0) {
+                boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                String title = isZh ? "正在取消..." : "Cancelling...";
+                doUpdateNotification(9999, title, "", 0, 0, "");
+            }
             // Cancel WebDAV
             Call c = activeCalls.get(id);
             if (c != null) {
@@ -1334,6 +1335,10 @@ public class WebDavPlugin extends Plugin {
     }
     
     private void doUpdateNotification(int id, String title, String description, int progress, int max, String speed) {
+        if (activeTransfers.get() <= 0) {
+            // No transfers running, don't update/re-post notification
+            return;
+        }
         Context context = getContext();
         
         // Log for debugging
