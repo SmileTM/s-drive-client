@@ -58,8 +58,8 @@ function createProgressStream(taskId, totalSize) {
                 }
 
                 const mbps = (instantSpeed / (1024 * 1024)).toFixed(2);
-                const avgMbps = (avgSpeed / (1024 * 1024)).toFixed(2);
-                console.log(`[PERF][${taskId}] Chunk #${chunkCount} | Instant: ${mbps} MB/s | 全程均速 (AVG): ${avgMbps} MB/s | Total: ${(uploaded / (1024 * 1024)).toFixed(1)} MB`);
+                const avgMbps = (uploaded / (1024 * 1024) / totalDt).toFixed(2);
+                // Chunk progress log removed for cleaner console
 
                 progressEmitter.emit('progress', {
                     id: taskId,
@@ -143,7 +143,7 @@ class TurboSMBReadStream extends Readable {
             if (this.fileHandles.length === 0 && !this.opening) {
                 this.opening = true;
                 const pathTail = this.smbPath.split(/[\\\/]/).pop();
-                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][V9.20] Katana-Drive Active (Precision ACC) for: ...${pathTail}`);
+                // Lane ignition log silenced
 
                 const results = [];
                 for (let i = 0; i < this.clients.length; i++) {
@@ -151,14 +151,9 @@ class TurboSMBReadStream extends Readable {
                     let attempt = 0;
                     let handle = null;
                     while (attempt < 2 && !handle) {
-                        try {
-                            console.log(`[${new Date().toLocaleTimeString()}] [TURBO][LANE] Firing up Lane #${i + 1} (Attempt ${attempt + 1})...`);
-                            handle = await executeSMBCommand(this.clients[i], () => this.clients[i].openP(this.smbPath, 'r'), 20000);
-                        } catch (e) {
-                            console.warn(`[${new Date().toLocaleTimeString()}] [TURBO][WARN] Lane ${i + 1} attempt ${attempt + 1} failed:`, e.message);
-                            attempt++;
-                            if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
-                        }
+                        // Lane ignition log silenced
+                        handle = await executeSMBCommand(this.clients[i], () => this.clients[i].openP(this.smbPath, 'r'), 20000);
+                        if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
                     }
                     results.push(handle);
                     if (i < this.clients.length - 1) {
@@ -172,7 +167,7 @@ class TurboSMBReadStream extends Readable {
 
                 this.opening = false;
                 if (this.clients.length === 0) throw new Error('All SMB lanes failed to ignite after retries');
-                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][V9.20] Katana-Pulse Active. Lanes: ${this.clients.length}/${results.length} | Cap: ${this.concurrency * this.chunkSize / (1024 * 1024)}MB`);
+                // Lane ignition log silenced
             }
             // Fill pipeline
             let started = 0;
@@ -192,10 +187,7 @@ class TurboSMBReadStream extends Readable {
                 this._fetchChunk(pos, size, dispatchTime);
             }
             if (started > 0) {
-                // Log only initial burst or batch status
-                if (this.currentReadPos < this.chunkSize * 10 || started > 4) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][QUEUE] Dispatched ${started} chunks. Flying: ${this.activeRequests} | Next: ${Math.floor(this.currentReadPos / (1024 * 1024))}MB`);
-                }
+                // Queue dispatch log silenced
             }
         } catch (err) {
             console.error(`[${new Date().toLocaleTimeString()}][TURBO][ERR-FATAL] _pump fail:`, err);
@@ -302,7 +294,7 @@ class TurboSMBReadStream extends Readable {
             if (this.nextPushPos > this.endOffset) {
                 this.finished = true;
                 this.push(null);
-                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][FINISH] Stream reached EOF.`);
+                // EOF reached silently
                 break;
             }
 
@@ -475,7 +467,7 @@ const clearSMBSession = (config) => {
 
     for (const [key, client] of smbClients.entries()) {
         if (key.startsWith(prefix)) {
-            console.log(`[SMB] Clearing cached session for ${key}`);
+            // Session clearing silenced
             try { client.disconnect(); } catch (e) { }
             smbClients.delete(key);
         }
@@ -492,15 +484,15 @@ const ensureSMBConnected = async (client) => {
 
     client._connectPromise = (async () => {
         try {
-            console.log(`[SMB][PROBE] Start connection probe...`);
+            // Probe logs silenced
             await client.statP('');
             client.connected = true;
-            console.log(`[SMB][PROBE] Success.`);
+            // Probe logs silenced
         } catch (e) {
             // If server responds with STATUS_ error, it's alive and authenticated.
             const isAlive = e.code === 'EISCONN' || (e.code && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
             if (isAlive) {
-                console.log(`[SMB][PROBE] Success (Server acknowledged via status: ${e.code})`);
+                // Probe logs silenced
                 client.connected = true;
                 return;
             }
@@ -762,8 +754,7 @@ app.get('/api/drives', async (req, res) => {
             return { ...publicDrive, quota: null };
         }));
 
-        // Log without sensitive data
-        console.log('[DEBUG] Drives Quota:', JSON.stringify(drivesWithQuota.map(d => ({ id: d.id, quota: d.quota })), null, 2));
+        // Log without sensitive
         res.json(drivesWithQuota);
     } catch (err) {
         // Fallback: strip passwords even on error
@@ -783,7 +774,6 @@ app.post('/api/drives', async (req, res) => {
         const newDrive = req.body;
         // Don't log password!
         const logSafeDrive = { ...newDrive, password: '***' };
-        console.log('[DEBUG] POST /api/drives payload:', logSafeDrive);
 
         let drives = [];
         try {
@@ -824,7 +814,6 @@ app.post('/api/drives', async (req, res) => {
 
         drives.push(newDrive);
         await fs.writeJson(CONFIG_FILE, drives, { spaces: 2 });
-        console.log('[DEBUG] Write success. New count:', drives.length);
 
         // Return safe object (no password or masked)
         const safeResponse = { ...newDrive };
@@ -892,9 +881,7 @@ app.patch('/api/drives/:id', async (req, res) => {
         }
 
         drives[driveIndex].name = name;
-        // Password remains untouched (encrypted)
-
-        console.log('[DEBUG] Renaming drive:', id, 'to', name, '. Total drives:', drives.length);
+        // Password remains
         await fs.writeJson(CONFIG_FILE, drives, { spaces: 2 });
         res.json({ success: true });
     } catch (err) {
@@ -906,8 +893,6 @@ app.patch('/api/drives/:id', async (req, res) => {
 app.get('/api/files', async (req, res) => {
     try {
         const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
-        console.log(`[DEBUG] GET /api/files path="${reqPath}" drive="${driveId}"`);
-
         const config = await getDriveConfig(driveId);
         if (!config) return res.status(404).json({ error: 'Drive config not found' });
 
@@ -1028,8 +1013,6 @@ app.get('/api/search', async (req, res) => {
         const { query, drive: driveId = 'local', path: searchPath = '/' } = req.query;
         if (!query) return res.json([]);
 
-        console.log(`[DEBUG] GET /api/search query="${query}" drive="${driveId}"`);
-
         const config = await getDriveConfig(driveId);
         if (!config) return res.status(404).json({ error: 'Drive config not found' });
 
@@ -1112,13 +1095,17 @@ app.get('/api/raw', async (req, res) => {
         if (config.type === 'local') {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
-            // For raw streaming, we still use a single client for simplicity and to avoid
-            // opening multiple file handles for a single stream, which might be problematic
-            // for some SMB servers or increase resource usage unnecessarily for a direct pipe.
-            const client = getSMBClient(config, { tag: 'preview' });
             const smbPath = toSMBPath(reqPath);
+            // V9.21 Streaming Hyper-Drive (Multi-Lanes for seekable streams)
+            const lanes = [];
+            for (let i = 1; i <= 3; i++) {
+                lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `stream_lane${i}` }));
+            }
+            const primaryClient = lanes[0];
 
             try {
+                const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
+                const fileSize = stats.size;
                 const range = req.headers.range;
                 let options = {};
 
@@ -1128,29 +1115,23 @@ app.get('/api/raw', async (req, res) => {
                     const end = parts[1] ? parseInt(parts[1], 10) : undefined;
                     options.start = start;
                     if (end) options.end = end;
-                    res.status(206);
-
-                    // We need file size for Content-Range header
-                    const stats = await executeSMBCommand(client, () => client.stat(smbPath));
-                    const fileSize = stats.size;
                     const finalEnd = end || (fileSize - 1);
                     const chunksize = (finalEnd - start) + 1;
 
+                    res.status(206);
                     res.setHeader('Content-Range', `bytes ${start}-${finalEnd}/${fileSize}`);
                     res.setHeader('Content-Length', chunksize);
-                    res.setHeader('Accept-Ranges', 'bytes');
                 } else {
-                    const stats = await executeSMBCommand(client, () => client.stat(smbPath));
-                    res.setHeader('Content-Length', stats.size);
-                    res.setHeader('Accept-Ranges', 'bytes');
+                    res.setHeader('Content-Length', fileSize);
                 }
 
+                res.setHeader('Accept-Ranges', 'bytes');
                 const fileName = path.basename(reqPath);
                 const mimeType = mime.lookup(fileName) || 'application/octet-stream';
                 res.setHeader('Content-Type', mimeType);
 
-                // Use TurboSMBReadStream for high performance
-                const stream = new TurboSMBReadStream(client, smbPath, fileSize, options);
+                // Use TurboSMBReadStream for high performance (Inject 3 Lanes)
+                const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, options);
                 registerSmbStream(smbPath, stream);
 
                 let backpressureCount = 0;
@@ -1337,7 +1318,6 @@ app.post('/api/mkdir', async (req, res) => {
     let dedicatedClient = null;
     try {
         const { path: reqPath, drive: driveId = 'local' } = req.body;
-        console.log(`[DEBUG] POST /api/mkdir path="${reqPath}" drive="${driveId}"`);
         const config = await getDriveConfig(driveId);
 
         if (config.type === 'local') {
@@ -1672,7 +1652,6 @@ app.post('/api/delete', async (req, res) => {
     let dedicatedClient = null;
     try {
         const { items, drive: driveId = 'local' } = req.body;
-        console.log(`[DEBUG] POST /api/delete count=${items?.length} drive="${driveId}"`);
         const config = await getDriveConfig(driveId);
 
         if (config.type === 'local') {
@@ -1770,7 +1749,6 @@ app.post('/api/move', async (req, res) => {
                 }
             }));
         } else if (config.type === 'smb') {
-            const client = getSMBClient(config);
             for (const item of items) {
                 const smbOld = toSMBPath(item);
                 const fileName = path.basename(item);
@@ -2001,7 +1979,6 @@ app.post('/api/transfer', async (req, res) => {
     let srcAdapter, dstAdapter;
     try {
         const { items, sourceDrive, destDrive, destPath, move, overwrite = false, taskId = null } = req.body;
-        console.log(`[DEBUG] POST /api/transfer count=${items?.length} from=${sourceDrive} to=${destDrive} overwrite=${overwrite} taskId=${taskId}`);
         if (!items || !sourceDrive || !destDrive) return res.status(400).json({ error: 'Missing parameters' });
 
         const srcConfig = await getDriveConfig(sourceDrive);
@@ -2057,7 +2034,6 @@ app.post('/api/transfer', async (req, res) => {
 app.post('/api/rename', async (req, res) => {
     try {
         const { oldPath, newName, path: currentPath, drive: driveId = 'local', overwrite = false } = req.body;
-        console.log(`[DEBUG] POST /api/rename old="${oldPath}" new="${newName}" drive="${driveId}" overwrite=${overwrite}`);
         if (!oldPath || !newName) return res.status(400).json({ error: 'Missing parameters' });
 
         const config = await getDriveConfig(driveId);
@@ -2401,7 +2377,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                 }
             }
         } else {
-            console.log('[Upload] Local files saved directly via Multer.');
+            // Multer info silenced
         }
         res.json({ success: true });
     } catch (err) {
@@ -2432,10 +2408,7 @@ app.use(webdavServer.extensions.express('/webdav', server));
 
 // Serve static files from React app (for production/electron)
 const CLIENT_BUILD_PATH = path.join(__dirname, '../client/dist');
-console.log(`[Server] Checking Client Build Path: ${CLIENT_BUILD_PATH}`);
-
 if (fs.existsSync(CLIENT_BUILD_PATH)) {
-    console.log('[Server] Client Build found. Serving static files.');
     app.use(express.static(CLIENT_BUILD_PATH));
 
     // Handle SPA routing: return index.html for any unknown non-API routes
