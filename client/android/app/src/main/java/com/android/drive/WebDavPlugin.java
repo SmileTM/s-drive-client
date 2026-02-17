@@ -310,15 +310,15 @@ public class WebDavPlugin extends Plugin {
                 prop.put("jcifs.smb.client.transactionSize", "16777216");
                 prop.put("jcifs.smb.client.useLargeReadWrite", "true");
                 prop.put("jcifs.smb.client.maxMpxCount", "512"); // Even higher
-                prop.put("jcifs.smb.client.maximumCredits", "2048"); // [V6] Hyper Credits
+                prop.put("jcifs.smb.client.maximumCredits", "4096"); // [V6.1] Hyper Credits
+                prop.put("jcifs.smb.client.socketReceiveBufferSize", "16777216");
+                prop.put("jcifs.smb.client.socketSendBufferSize", "16777216");
                 prop.put("jcifs.smb.client.signingPreferred", "false");
                 prop.put("jcifs.smb.client.signingEnforced", "false");
                 prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
                 prop.put("jcifs.smb.client.tcpNoDelay", "true");
                 prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
                 prop.put("jcifs.smb.client.disableSpnegoSgn", "true"); // Extra speed
-                prop.put("jcifs.smb.client.socketReceiveBufferSize", "16777216"); // [V6] 16MB TCP Window
-                prop.put("jcifs.smb.client.socketSendBufferSize", "8388608");
                 prop.put("jcifs.smb.client.encryptionPreferred", "false");
                 prop.put("jcifs.smb.client.useSessKeepalive", "true");
                 prop.put("jcifs.smb.client.dfs.disabled", "true");
@@ -764,14 +764,14 @@ public class WebDavPlugin extends Plugin {
                 final java.lang.StringBuilder errorMsg = new java.lang.StringBuilder();
                 final String finalFileName = smbFile.getName();
 
-                // [PERF] Heavy-Duty Multi-threaded Accelerator (V6 Hyper-Turbo)
+                // [PERF] Heavy-Duty Multi-threaded Accelerator (V6.1 Hyper-Turbo)
                 int threadCount = 1;
-                if (fileSize > 200 * 1024 * 1024) threadCount = 6; // Optimized to 6 strong threads
+                if (fileSize > 200 * 1024 * 1024) threadCount = 6;
                 else if (fileSize > 50 * 1024 * 1024) threadCount = 4;
                 else if (fileSize > 10 * 1024 * 1024) threadCount = 2;
                 
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
-                android.util.Log.i("WebDavNative", "Starting V6 Hyper-Turbo: " + threadCount + " threads, 4MB buffers");
+                android.util.Log.i("WebDavNative", "Starting V6.1 Hyper-Turbo: " + threadCount + " threads, 4MB buffers");
 
                 for (int i = 0; i < threadCount; i++) {
                     final int threadIndex = i;
@@ -790,6 +790,7 @@ public class WebDavPlugin extends Plugin {
                             
                             byte[] buffer = new byte[4194304]; // [V6] 4MB massive buffer per thread
                             long pos = start;
+                            int totalReads = 0;
 
                             while (pos <= end && !hasError.get()) {
                                 if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
@@ -799,16 +800,27 @@ public class WebDavPlugin extends Plugin {
                                 int toRead = (int) Math.min(buffer.length, end - pos + 1);
                                 if (toRead <= 0) break;
                                 
+                                long readStartTime = System.currentTimeMillis();
                                 int read = sraf.read(buffer, 0, toRead);
                                 if (read == -1) break;
+                                long readEndTime = System.currentTimeMillis();
                                 
+                                long writeStartTime = System.currentTimeMillis();
                                 raf.write(buffer, 0, read);
+                                long writeEndTime = System.currentTimeMillis();
+                                
                                 pos += read;
                                 downloaded.addAndGet(read);
+                                totalReads++;
+
+                                if (totalReads % 5 == 0 && threadIndex == 0) { // Log every 5 blocks for lead thread
+                                    android.util.Log.i("WebDavNative", "PERF-T" + threadIndex + ": Read=" + (readEndTime - readStartTime) + "ms, Write=" + (writeEndTime - writeStartTime) + "ms [4MB Block]");
+                                }
                             }
                         } catch (Exception e) {
                             hasError.set(true);
                             errorMsg.append(e.getMessage());
+                            android.util.Log.e("WebDavNative", "SMB T" + threadIndex + " Error: " + e.getMessage());
                         } finally {
                             latch.countDown();
                         }
@@ -821,7 +833,6 @@ public class WebDavPlugin extends Plugin {
                 long smoothedSpeed = 0;
                 
                 while (latch.getCount() > 0 && !hasError.get()) {
-筋
                     long now = System.currentTimeMillis();
                     if (now - lastUpdate > 1000) {
                         long currentTotal = downloaded.get();
