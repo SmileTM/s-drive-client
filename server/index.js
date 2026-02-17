@@ -124,6 +124,7 @@ class TurboSMBReadStream extends Readable {
         this.lastLogTime = Date.now();
         this.lastTotalFetched = 0;
         this.totalFetched = 0;
+        this.chunkCount = 0;
     }
 
     async _read() {
@@ -240,6 +241,7 @@ class TurboSMBReadStream extends Readable {
             this.bufferMap.set(pos, (safeBytesRead === size) ? buf : buf.subarray(0, safeBytesRead));
             this.activeRequests--;
             this.totalFetched += safeBytesRead;
+            this.chunkCount++;
 
             // V9.20 Katana ACC Engine (High Precision Feedback)
             const rtt = Date.now() - startTime;
@@ -262,7 +264,9 @@ class TurboSMBReadStream extends Readable {
                 const sessionAvg = (this.totalFetched / (1024 * 1024) / sessionDt).toFixed(2);
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.20] S: ${instantSpeed}MB/s (落地均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                if (this.chunkCount % 15 === 0) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.21] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                }
 
                 this.lastLogTime = now;
                 this.lastTotalFetched = this.totalFetched;
@@ -271,6 +275,13 @@ class TurboSMBReadStream extends Readable {
             this._tryPush();
             this._pump();
         } catch (err) {
+            // Silenced closing errors
+            if (this.destroyed_flag && (
+                err.code === 'STATUS_FILE_CLOSED' ||
+                err.message?.includes('STATUS_FILE_CLOSED') ||
+                err.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION'
+            )) return;
+
             console.error(`[${new Date().toLocaleTimeString()}][TURBO][IO-ERR] Offset ${pos} (Exec: ${Date.now() - startTime}ms):`, err.message);
             this.activeRequests--;
             if (!this.destroyed_flag) this.destroy(err);
@@ -468,6 +479,16 @@ const clearSMBSession = (config) => {
     for (const [key, client] of smbClients.entries()) {
         if (key.startsWith(prefix)) {
             // Session clearing silenced
+            try { client.disconnect(); } catch (e) { }
+            smbClients.delete(key);
+        }
+    }
+};
+
+// Helper: Clear SMB by Tag (for isolated streaming lanes)
+const clearSMBByTag = (tagPart) => {
+    for (const [key, client] of smbClients.entries()) {
+        if (key.includes(`|${tagPart}_lane`)) {
             try { client.disconnect(); } catch (e) { }
             smbClients.delete(key);
         }
@@ -1096,16 +1117,18 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.21 Streaming Hyper-Drive (Multi-Lanes for seekable streams)
+            // V9.21 Streaming Hyper-Drive (Isolated Lanes to prevent seek-collisions)
+            const streamId = 'str_' + Date.now().toString(36).slice(-5);
             const lanes = [];
             for (let i = 1; i <= 3; i++) {
-                lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `stream_lane${i}` }));
+                lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `${streamId}_lane${i}` }));
             }
             const primaryClient = lanes[0];
 
             try {
                 const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                 const fileSize = stats.size;
+                const lastModified = stats.mtime;
                 const range = req.headers.range;
                 let options = {};
 
@@ -1126,6 +1149,8 @@ app.get('/api/raw', async (req, res) => {
                 }
 
                 res.setHeader('Accept-Ranges', 'bytes');
+                if (lastModified) res.setHeader('Last-Modified', new Date(lastModified).toUTCString());
+
                 const fileName = path.basename(reqPath);
                 const mimeType = mime.lookup(fileName) || 'application/octet-stream';
                 res.setHeader('Content-Type', mimeType);
@@ -1148,6 +1173,13 @@ app.get('/api/raw', async (req, res) => {
                 // Attach diagnostic monitor
                 const diagStream = createProgressStream('DIAG_RAW_' + Date.now(), fileSize);
                 stream.pipe(diagStream).pipe(res);
+
+                res.on('close', () => {
+                    if (!stream.finished) {
+                        stream.destroy(); // Instant cleanup
+                        clearSMBByTag(streamId); // Purge isolated lanes
+                    }
+                });
             } catch (e) {
                 if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
                     return res.status(404).send('File not found');
