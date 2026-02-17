@@ -733,7 +733,7 @@ public class WebDavPlugin extends Plugin {
                 try (InputStream in = smbFile.getInputStream();
                      java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(new java.io.FileOutputStream(localFile), 2097152)) { // 2MB Buffered IO
                     
-                    byte[] buffer = new byte[1048576]; // [PERF] Use 1MB buffer
+                    byte[] buffer = new byte[8388608]; // [PERF] Use 8MB buffer to align with transactionSize
                     int read;
                     
                     // Initial notification update
