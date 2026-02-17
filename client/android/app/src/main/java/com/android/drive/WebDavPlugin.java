@@ -658,21 +658,22 @@ public class WebDavPlugin extends Plugin {
         final String callbackId = call.getString("id");
         if (callbackId != null) cancelledSmbTasks.put(callbackId, false);
 
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String remotePath = call.getString("path");
+        String destPath = call.getString("destPath");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null || remotePath == null || destPath == null) {
+            call.reject("Missing parameters");
+            endTransfer(); // Ensure endTransfer is called on early exit
+            return;
+        }
+
         new Thread(() -> {
             try {
-                String address = call.getString("address");
-                String share = call.getString("share");
-                String remotePath = call.getString("path");
-                String destPath = call.getString("destPath");
-                String username = call.getString("username");
-                String password = call.getString("password");
-                String domain = call.getString("domain");
-
-                if (address == null || share == null || remotePath == null || destPath == null) {
-                    call.reject("Missing parameters");
-                    return;
-                }
-
                 // [FIX] Immediate notification to eliminate delay
                 boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
                 String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
@@ -789,21 +790,22 @@ public class WebDavPlugin extends Plugin {
         final String callbackId = call.getString("id");
         if (callbackId != null) cancelledSmbTasks.put(callbackId, false);
 
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String remotePath = call.getString("path");
+        String sourcePath = call.getString("sourcePath");
+        String username = call.getString("username");
+        String password = call.getString("password");
+        String domain = call.getString("domain");
+
+        if (address == null || share == null || remotePath == null || sourcePath == null) {
+            call.reject("Missing parameters");
+            endTransfer(); // Ensure endTransfer is called on early exit
+            return;
+        }
+
         new Thread(() -> {
             try {
-                String address = call.getString("address");
-                String share = call.getString("share");
-                String remotePath = call.getString("path");
-                String sourcePath = call.getString("sourcePath");
-                String username = call.getString("username");
-                String password = call.getString("password");
-                String domain = call.getString("domain");
-
-                if (address == null || share == null || remotePath == null || sourcePath == null) {
-                    call.reject("Missing parameters");
-                    return;
-                }
-
                 // [FIX] Immediate notification to eliminate delay
                 boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
                 String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
