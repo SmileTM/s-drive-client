@@ -65,6 +65,7 @@ import jcifs.smb.SmbException;
 import jcifs.config.PropertyConfiguration;
 import jcifs.context.BaseContext;
 import jcifs.smb.SmbRandomAccessFile;
+import android.net.wifi.WifiManager;
 
 @CapacitorPlugin(
     name = "WebDavNative",
