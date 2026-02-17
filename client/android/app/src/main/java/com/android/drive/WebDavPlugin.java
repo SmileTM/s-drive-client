@@ -279,35 +279,37 @@ public class WebDavPlugin extends Plugin {
     // --- SMB Helpers ---
     private CIFSContext getCifsContext(String username, String password, String domain) {
         synchronized (contextLock) {
+            // [DEBUG] Force re-initialization to ensure logs show up and new properties are applied
+            tunedContext = null; 
             if (tunedContext == null) {
-            // [PERF] Extreme performance tuning (V3) - Protocol Level
-        java.util.Properties prop = new java.util.Properties();
-        prop.put("jcifs.smb.client.minVersion", "SMB202");
-        prop.put("jcifs.smb.client.maxVersion", "SMB311");
-        prop.put("jcifs.smb.client.readSize", "1048576"); // 1MB Read Size
-        prop.put("jcifs.smb.client.writeSize", "1048576"); // 1MB Write Size
-        prop.put("jcifs.smb.client.rcv_buf_size", "8388608"); // 8MB
-        prop.put("jcifs.smb.client.snd_buf_size", "8388608"); // 8MB
-        prop.put("jcifs.smb.client.maximumBufferSize", "8388608"); // 8MB
-        prop.put("jcifs.smb.client.transactionSize", "8388608"); // 8MB
-        prop.put("jcifs.smb.client.useLargeReadWrite", "true");
-        prop.put("jcifs.smb.client.maxMpxCount", "256");
-        prop.put("jcifs.smb.client.signingPreferred", "false");
-        prop.put("jcifs.smb.client.signingEnforced", "false");
-        prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
-        prop.put("jcifs.smb.client.tcpNoDelay", "true");
-        prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
-        prop.put("jcifs.smb.client.useSessKeepalive", "true");
-        prop.put("jcifs.smb.client.dfs.disabled", "true");
-        prop.put("jcifs.smb.client.useBatching", "true");
-        prop.put("jcifs.resolveOrder", "DNS");
+                // [PERF] Extreme performance tuning (V3.1)
+                java.util.Properties prop = new java.util.Properties();
+                prop.put("jcifs.smb.client.minVersion", "SMB202");
+                prop.put("jcifs.smb.client.maxVersion", "SMB311");
+                prop.put("jcifs.smb.client.readSize", "8388608"); // 8MB Read Size
+                prop.put("jcifs.smb.client.writeSize", "8388608"); // 8MB Write Size
+                prop.put("jcifs.smb.client.rcv_buf_size", "8388608"); 
+                prop.put("jcifs.smb.client.snd_buf_size", "8388608");
+                prop.put("jcifs.smb.client.maximumBufferSize", "8388608");
+                prop.put("jcifs.smb.client.transactionSize", "8388608");
+                prop.put("jcifs.smb.client.useLargeReadWrite", "true");
+                prop.put("jcifs.smb.client.maxMpxCount", "256");
+                prop.put("jcifs.smb.client.signingPreferred", "false");
+                prop.put("jcifs.smb.client.signingEnforced", "false");
+                prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
+                prop.put("jcifs.smb.client.tcpNoDelay", "true");
+                prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
+                prop.put("jcifs.smb.client.disableSpnegoSgn", "true"); // Extra speed
+                prop.put("jcifs.smb.client.useSessKeepalive", "true");
+                prop.put("jcifs.smb.client.dfs.disabled", "true");
+                prop.put("jcifs.smb.client.useBatching", "true");
+                prop.put("jcifs.resolveOrder", "DNS");
                 
                 try {
                     PropertyConfiguration config = new PropertyConfiguration(prop);
-                    // Log the effective properties to verify they are loaded
-                    android.util.Log.d("WebDavNative", "JCIFS Properties Applied:");
+                    android.util.Log.i("WebDavNative", "PERF: JCIFS Properties Applied (FORCE RESET)");
                     for (Object key : prop.keySet()) {
-                        android.util.Log.d("WebDavNative", "  " + key + " = " + prop.get(key));
+                        android.util.Log.i("WebDavNative", "  " + key + " = " + prop.get(key));
                     }
                     tunedContext = new BaseContext(config);
                 } catch (Exception e) {
