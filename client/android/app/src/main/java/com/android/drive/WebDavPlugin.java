@@ -297,8 +297,6 @@ public class WebDavPlugin extends Plugin {
     // --- SMB Helpers ---
     private CIFSContext getCifsContext(String username, String password, String domain) {
         synchronized (contextLock) {
-            // [DEBUG] Force re-initialization to ensure logs show up and new properties are applied
-            tunedContext = null; 
             if (tunedContext == null) {
                 // [PERF] Extreme performance tuning (V3.1)
                 java.util.Properties prop = new java.util.Properties();
