@@ -152,9 +152,22 @@ class TurboSMBReadStream extends Readable {
                     let attempt = 0;
                     let handle = null;
                     while (attempt < 2 && !handle) {
-                        // Lane ignition log silenced
-                        handle = await executeSMBCommand(this.clients[i], () => this.clients[i].openP(this.smbPath, 'r'), 20000);
+                        try {
+                            // Lane ignition log silenced
+                            handle = await executeSMBCommand(this.clients[i], () => this.clients[i].openP(this.smbPath, 'r'), 20000);
+                        } catch (igniteErr) {
+                            if (this.destroyed_flag) {
+                                break; // Silent exit on destroy
+                            }
+                            // Retry on specific connection errors
+                            if (igniteErr.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION' || igniteErr.code === 'STATUS_FILE_CLOSED') {
+                                console.warn(`[${new Date().toLocaleTimeString()}][TURBO] Lane ignition retry ${attempt + 1}: ${igniteErr.code}`);
+                            } else {
+                                throw igniteErr;
+                            }
+                        }
                         if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+                        attempt++;
                     }
                     results.push(handle);
                     if (i < this.clients.length - 1) {
@@ -265,7 +278,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.21] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.22] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -1117,12 +1130,12 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.21 Streaming Hyper-Drive (Isolated Lanes to prevent seek-collisions)
+            // V9.22 Streaming Hyper-Drive (Single Lane Safe-Mode to prevent connection storm)
             const streamId = 'str_' + Date.now().toString(36).slice(-5);
             const lanes = [];
-            for (let i = 1; i <= 3; i++) {
-                lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `${streamId}_lane${i}` }));
-            }
+            // Reduced to 1 lane for maximum stability during seek
+            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `${streamId}_lane1` }));
+
             const primaryClient = lanes[0];
 
             try {
