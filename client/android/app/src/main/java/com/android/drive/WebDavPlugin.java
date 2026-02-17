@@ -304,6 +304,11 @@ public class WebDavPlugin extends Plugin {
                 
                 try {
                     PropertyConfiguration config = new PropertyConfiguration(prop);
+                    // Log the effective properties to verify they are loaded
+                    android.util.Log.d("WebDavNative", "JCIFS Properties Applied:");
+                    for (Object key : prop.keySet()) {
+                        android.util.Log.d("WebDavNative", "  " + key + " = " + prop.get(key));
+                    }
                     tunedContext = new BaseContext(config);
                 } catch (Exception e) {
                     android.util.Log.e("WebDavNative", "Failed to load tuned JCIFS properties, using default", e);
@@ -733,8 +738,18 @@ public class WebDavPlugin extends Plugin {
                 try (InputStream in = smbFile.getInputStream();
                      java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(new java.io.FileOutputStream(localFile), 2097152)) { // 2MB Buffered IO
                     
+                    // [DEBUG] Check Protocol Dialect
+                    try {
+                        // Attempt to reflectively check negotiated dialect
+                        // SmbFile -> getSession() (protected) -> getTransport() -> getDialect()
+                        // Since jcifs-ng is complex, we might just check if it's SMB1 or SMB2 via SmbFile properties
+                        android.util.Log.d("WebDavNative", "SMB File Type/Attributes: " + smbFile.getType() + " / " + smbFile.getAttributes());
+                    } catch (Exception diagErr) { /* ignore */ }
+
                     byte[] buffer = new byte[8388608]; // [PERF] Use 8MB buffer to align with transactionSize
                     int read;
+                    long loopStart = System.currentTimeMillis();
+                    int firstReads = 0;
                     
                     // Initial notification update
                     String threadTitle = isZhInit ? "正在下载" : "Downloading";
