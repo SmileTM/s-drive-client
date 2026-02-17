@@ -758,6 +758,12 @@ public class WebDavPlugin extends Plugin {
                     doUpdateNotification(9999, threadTitle, smbFile.getName(), 0, (int)(fileSize/1024), "");
 
                     while ((read = in.read(buffer)) != -1) {
+                        if (firstReads < 15) {
+                            long readEnd = System.currentTimeMillis();
+                            android.util.Log.i("WebDavNative", "PERF: Single read size=" + read + " duration=" + (readEnd - loopStart) + "ms");
+                            firstReads++;
+                            loopStart = System.currentTimeMillis();
+                        }
                         if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
                             throw new IOException("Cancelled");
                         }
