@@ -64,8 +64,7 @@ import jcifs.smb.SmbFile;
 import jcifs.smb.SmbException;
 import jcifs.config.PropertyConfiguration;
 import jcifs.context.BaseContext;
-import jcifs.config.PropertyConfiguration;
-import jcifs.context.BaseContext;
+import jcifs.smb.SmbRandomAccessFile;
 
 @CapacitorPlugin(
     name = "WebDavNative",
@@ -90,6 +89,7 @@ public class WebDavPlugin extends Plugin {
     // [PERF] Cache for the tuned CIFSContext
     private static CIFSContext tunedContext = null;
     private static final Object contextLock = new Object();
+    private WifiManager.WifiLock wifiLock = null;
 
     private void startTransfer() {
         int count = activeTransfers.getAndIncrement();
@@ -102,6 +102,16 @@ public class WebDavPlugin extends Plugin {
                 context.startForegroundService(intent);
             } else {
                 context.startService(intent);
+            }
+        }
+        
+        // [PERF] Acquire WiFi Lock for stable high throughput
+        if (wifiLock == null) {
+            WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "WebDavSMBTransferLock");
+                wifiLock.acquire();
+                android.util.Log.d("WebDavNative", "WiFi High-Perf Lock Acquired");
             }
         }
     }
@@ -119,6 +129,13 @@ public class WebDavPlugin extends Plugin {
             // Force cancel notification ID 9999
             NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             manager.cancel(9999);
+
+            // [PERF] Release WiFi Lock
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+                wifiLock = null;
+                android.util.Log.d("WebDavNative", "WiFi High-Perf Lock Released");
+            }
         }
     }
 
@@ -300,6 +317,9 @@ public class WebDavPlugin extends Plugin {
                 prop.put("jcifs.smb.client.tcpNoDelay", "true");
                 prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
                 prop.put("jcifs.smb.client.disableSpnegoSgn", "true"); // Extra speed
+                prop.put("jcifs.smb.client.socketReceiveBufferSize", "8388608"); // 8MB Socket Buffer
+                prop.put("jcifs.smb.client.socketSendBufferSize", "8388608");
+                prop.put("jcifs.smb.client.encryptionPreferred", "false");
                 prop.put("jcifs.smb.client.useSessKeepalive", "true");
                 prop.put("jcifs.smb.client.dfs.disabled", "true");
                 prop.put("jcifs.smb.client.useBatching", "true");
@@ -732,78 +752,121 @@ public class WebDavPlugin extends Plugin {
                     parent.mkdirs();
                 }
 
-                long fileSize = smbFile.length();
-                long downloaded = 0;
+                final long fileSize = smbFile.length();
+                if (fileSize <= 0) {
+                    localFile.createNewFile(); // Create an empty file
+                    call.resolve();
+                    return;
+                }
+
+                final java.util.concurrent.atomic.AtomicLong downloaded = new java.util.concurrent.atomic.AtomicLong(0);
+                final java.util.concurrent.atomic.AtomicBoolean hasError = new java.util.concurrent.atomic.AtomicBoolean(false);
+                final java.lang.StringBuilder errorMsg = new java.lang.StringBuilder();
+                final String finalFileName = smbFile.getName();
+
+                // 2 Parallel Threads for files > 10MB
+                int threadCount = (fileSize > 10 * 1024 * 1024) ? 2 : 1;
+                final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
+
+                for (int i = 0; i < threadCount; i++) {
+                    final int threadIndex = i;
+                    final int totalThreads = threadCount;
+                    new Thread(() -> {
+                        long start = threadIndex * (fileSize / totalThreads);
+                        long end = (threadIndex == totalThreads - 1) ? fileSize - 1 : (threadIndex + 1) * (fileSize / totalThreads) - 1;
+                        
+                        try (jcifs.smb.SmbRandomAccessFile sraf = new jcifs.smb.SmbRandomAccessFile(url, "r", ctx);
+                             java.io.RandomAccessFile raf = new java.io.RandomAccessFile(localFile, "rw")) {
+                            
+                            sraf.seek(start);
+                            raf.seek(start);
+                            
+                            byte[] buffer = new byte[1048576]; // 1MB buffer
+                            long pos = start;
+                            int firstReads = 0;
+                            long loopStart = System.currentTimeMillis();
+
+                            while (pos <= end && !hasError.get()) {
+                                if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                                    throw new java.io.IOException("Cancelled");
+                                }
+                                
+                                int toRead = (int) Math.min(buffer.length, end - pos + 1);
+                                if (toRead <= 0) break; // No more bytes to read in this segment
+                                
+                                int read = sraf.read(buffer, 0, toRead);
+                                if (read == -1) break; // End of stream
+                                
+                                raf.write(buffer, 0, read);
+                                pos += read;
+                                downloaded.addAndGet(read);
+
+                                if (threadIndex == 0 && firstReads < 5) { // Log first few reads for thread 0
+                                    long readEnd = System.currentTimeMillis();
+                                    android.util.Log.i("WebDavNative", "PERF-T" + threadIndex + ": Read size=" + read + " duration=" + (readEnd - loopStart) + "ms");
+                                    firstReads++;
+                                    loopStart = System.currentTimeMillis();
+                                }
+                            }
+                        } catch (Exception e) {
+                            hasError.set(true);
+                            errorMsg.append(e.getMessage());
+                            android.util.Log.e("WebDavNative", "SMB Download Thread " + threadIndex + " Error", e);
+                        } finally {
+                            latch.countDown();
+                        }
+                    }).start();
+                }
+
+                // Progress loop
                 long lastUpdate = 0;
                 long lastBytes = 0;
+                // Initial notification update
+                String threadTitle = isZhInit ? "正在下载" : "Downloading";
+                doUpdateNotification(9999, threadTitle, finalFileName, 0, (int)(fileSize/1024), "");
 
-                try (InputStream in = smbFile.getInputStream();
-                     java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(new java.io.FileOutputStream(localFile), 2097152)) { // 2MB Buffered IO
-                    
-                    // [DEBUG] Check Protocol Dialect
-                    try {
-                        // Attempt to reflectively check negotiated dialect
-                        // SmbFile -> getSession() (protected) -> getTransport() -> getDialect()
-                        // Since jcifs-ng is complex, we might just check if it's SMB1 or SMB2 via SmbFile properties
-                        android.util.Log.d("WebDavNative", "SMB File Type/Attributes: " + smbFile.getType() + " / " + smbFile.getAttributes());
-                    } catch (Exception diagErr) { /* ignore */ }
+                while (latch.getCount() > 0 && !hasError.get()) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastUpdate > 1000) {
+                        long currentTotal = downloaded.get();
+                        long diffBytes = currentTotal - lastBytes;
+                        long diffTime = now - lastUpdate;
+                        long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
 
-                    byte[] buffer = new byte[8388608]; // [PERF] Use 8MB buffer to align with transactionSize
-                    int read;
-                    long loopStart = System.currentTimeMillis();
-                    int firstReads = 0;
-                    
-                    // Initial notification update
-                    String threadTitle = isZhInit ? "正在下载" : "Downloading";
-                    doUpdateNotification(9999, threadTitle, smbFile.getName(), 0, (int)(fileSize/1024), "");
+                        JSObject ret = new JSObject();
+                        ret.put("downloaded", currentTotal);
+                        ret.put("total", fileSize);
+                        ret.put("speed", speed);
+                        if (callbackId != null) ret.put("id", callbackId);
+                        notifyListeners("downloadProgress", ret);
 
-                    while ((read = in.read(buffer)) != -1) {
-                        if (firstReads < 15) {
-                            long readEnd = System.currentTimeMillis();
-                            android.util.Log.i("WebDavNative", "PERF: Single read size=" + read + " duration=" + (readEnd - loopStart) + "ms");
-                            firstReads++;
-                            loopStart = System.currentTimeMillis();
-                        }
-                        if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
-                            throw new IOException("Cancelled");
-                        }
-                        out.write(buffer, 0, read);
-                        downloaded += read;
-
-                        long now = System.currentTimeMillis();
-                        if (now - lastUpdate > 1000) {
-                            if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
-
-                            JSObject ret = new JSObject();
-                            ret.put("downloaded", downloaded);
-                            ret.put("total", fileSize);
-                            
-                            long diffBytes = downloaded - lastBytes;
-                            long diffTime = now - lastUpdate;
-                            long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
-                            
-                            ret.put("speed", speed);
-                            if (callbackId != null) ret.put("id", callbackId);
-                            notifyListeners("downloadProgress", ret);
-
-                            String speedStr = formatSpeed(speed);
-                            
-                            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
-                            String title = isZh ? "正在下载" : "Downloading";
-                            
-                            doUpdateNotification(9999, title, smbFile.getName(), (int)(downloaded/1024), (int)(fileSize/1024), speedStr);
-                            
-                            lastUpdate = now;
-                            lastBytes = downloaded;
-                        }
+                        String speedStr = formatSpeed(speed);
+                        boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                        String title = isZh ? "正在下载" : "Downloading";
+                        doUpdateNotification(9999, title, finalFileName, (int)(currentTotal/1024), (int)(fileSize/1024), speedStr);
+                        
+                        lastUpdate = now;
+                        lastBytes = currentTotal;
                     }
-                    out.flush();
-                    
-                    // Force 100% notification on completion
-                    boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
-                    String titleFinal = isZhFinal ? "下载完成" : "Download Complete";
-                    doUpdateNotification(9999, titleFinal, smbFile.getName(), (int)(fileSize/1024), (int)(fileSize/1024), "");
+                    try {
+                        Thread.sleep(500); // Update every 0.5 seconds
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        hasError.set(true);
+                        errorMsg.append("Progress loop interrupted");
+                    }
                 }
+                latch.await(); // Ensure all threads have finished
+
+                if (hasError.get()) {
+                    if (errorMsg.toString().contains("Cancelled")) throw new java.io.IOException("Cancelled");
+                    throw new Exception(errorMsg.toString());
+                }
+
+                // Force 100% notification on completion
+                boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
+                String titleFinal = isZhFinal ? "下载完成" : "Download Complete";
+                doUpdateNotification(9999, titleFinal, finalFileName, (int)(fileSize/1024), (int)(fileSize/1024), "");
                 call.resolve();
 
             } catch (Exception e) {
@@ -811,7 +874,7 @@ public class WebDavPlugin extends Plugin {
                     android.util.Log.d("WebDavNative", "SMB Download Cancelled");
                     call.reject("Cancelled");
                 } else {
-                    android.util.Log.e("WebDavNative", "SMB Download Error", e);
+                    android.util.Log.e("WebDavNative", "SMB Download Error: " + e.getMessage(), e);
                     call.reject("SMB Download Error: " + e.getMessage());
                 }
             } finally {
