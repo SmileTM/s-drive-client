@@ -776,7 +776,8 @@ public class WebDavPlugin extends Plugin {
                         long start = threadIndex * (fileSize / totalThreads);
                         long end = (threadIndex == totalThreads - 1) ? fileSize - 1 : (threadIndex + 1) * (fileSize / totalThreads) - 1;
                         
-                        try (jcifs.smb.SmbRandomAccessFile sraf = new jcifs.smb.SmbRandomAccessFile(url, "r", ctx);
+                        try (jcifs.smb.SmbFile sf = new jcifs.smb.SmbFile(url, ctx);
+                             jcifs.smb.SmbRandomAccessFile sraf = new jcifs.smb.SmbRandomAccessFile(sf, "r");
                              java.io.RandomAccessFile raf = new java.io.RandomAccessFile(localFile, "rw")) {
                             
                             sraf.seek(start);
