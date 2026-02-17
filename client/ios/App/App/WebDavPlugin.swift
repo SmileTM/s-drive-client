@@ -58,6 +58,14 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
     
     override public func load() {
         print("[WebDavPlugin] Plugin loaded (Capacitor 8 CAPBridgedPlugin)")
+        
+        // Listen for SMB/WebDAV progress updates from managers
+        NotificationCenter.default.addObserver(self, selector: #selector(handleProgressNotification(_:)), name: NSNotification.Name("WebDavProgress"), object: nil)
+    }
+    
+    @objc private func handleProgressNotification(_ notification: Notification) {
+        guard let userInfo = notification.userInfo else { return }
+        self.notifyListeners("downloadProgress", data: userInfo)
     }
     
     // MARK: - WebDAV Methods

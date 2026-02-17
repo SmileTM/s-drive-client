@@ -295,30 +295,52 @@ public class WebDavPlugin extends Plugin {
     }
 
     // --- SMB Helpers ---
+    private int getCpuCores() {
+        return Runtime.getRuntime().availableProcessors();
+    }
+
+    private long getTotalMemory() {
+        android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+        android.app.ActivityManager activityManager = (android.app.ActivityManager) getContext().getSystemService(Context.ACTIVITY_SERVICE);
+        activityManager.getMemoryInfo(mi);
+        return mi.totalMem;
+    }
+
     private CIFSContext getCifsContext(String username, String password, String domain) {
         synchronized (contextLock) {
             if (tunedContext == null) {
-                // [PERF] Extreme performance tuning (V3.1)
+                int cores = getCpuCores();
+                long totalMem = getTotalMemory();
+                boolean isHighEnd = cores >= 6 && totalMem >= 7L * 1024 * 1024 * 1024; // 6 cores & 7GB+ RAM
+                
+                android.util.Log.i("WebDavNative", "PERF: Hardware Profile - Cores: " + cores + ", RAM: " + (totalMem / (1024*1024)) + "MB, HighEnd: " + isHighEnd);
+
+                // [PERF] Extreme performance tuning (V8 Auto-Scaling)
                 java.util.Properties prop = new java.util.Properties();
                 prop.put("jcifs.smb.client.minVersion", "SMB202");
                 prop.put("jcifs.smb.client.maxVersion", "SMB311");
-                prop.put("jcifs.smb.client.readSize", "4194304"); // [V6] 4MB Read
-                prop.put("jcifs.smb.client.writeSize", "4194304"); // [V6] 4MB Write
-                prop.put("jcifs.smb.client.rcv_buf_size", "16777216"); // [V6] 16MB
-                prop.put("jcifs.smb.client.snd_buf_size", "16777216");
-                prop.put("jcifs.smb.client.maximumBufferSize", "16777216");
-                prop.put("jcifs.smb.client.transactionSize", "16777216");
+                prop.put("jcifs.smb.client.readSize", "8388608"); // 8MB read size for Hyper-Turbo
+                prop.put("jcifs.smb.client.writeSize", "8388608"); 
+                
+                // Dynamic Buffer & Window Sizes
+                String bufSize = isHighEnd ? "67108864" : "33554432"; // 64MB if high-end, else 32MB
+                prop.put("jcifs.smb.client.rcv_buf_size", bufSize);
+                prop.put("jcifs.smb.client.snd_buf_size", bufSize);
+                prop.put("jcifs.smb.client.maximumBufferSize", bufSize);
+                prop.put("jcifs.smb.client.transactionSize", bufSize);
+                prop.put("jcifs.smb.client.socketReceiveBufferSize", bufSize);
+                prop.put("jcifs.smb.client.socketSendBufferSize", bufSize);
+
                 prop.put("jcifs.smb.client.useLargeReadWrite", "true");
-                prop.put("jcifs.smb.client.maxMpxCount", "512"); // Even higher
-                prop.put("jcifs.smb.client.maximumCredits", "4096"); // [V6.1] Hyper Credits
-                prop.put("jcifs.smb.client.socketReceiveBufferSize", "16777216");
-                prop.put("jcifs.smb.client.socketSendBufferSize", "16777216");
+                prop.put("jcifs.smb.client.maxMpxCount", isHighEnd ? "2048" : "1024");
+                prop.put("jcifs.smb.client.maximumCredits", isHighEnd ? "16384" : "8192"); 
+                
                 prop.put("jcifs.smb.client.signingPreferred", "false");
                 prop.put("jcifs.smb.client.signingEnforced", "false");
                 prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
                 prop.put("jcifs.smb.client.tcpNoDelay", "true");
                 prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
-                prop.put("jcifs.smb.client.disableSpnegoSgn", "true"); // Extra speed
+                prop.put("jcifs.smb.client.disableSpnegoSgn", "true");
                 prop.put("jcifs.smb.client.encryptionPreferred", "false");
                 prop.put("jcifs.smb.client.useSessKeepalive", "true");
                 prop.put("jcifs.smb.client.dfs.disabled", "true");
@@ -327,10 +349,7 @@ public class WebDavPlugin extends Plugin {
                 
                 try {
                     PropertyConfiguration config = new PropertyConfiguration(prop);
-                    android.util.Log.i("WebDavNative", "PERF: JCIFS Properties Applied (FORCE RESET)");
-                    for (Object key : prop.keySet()) {
-                        android.util.Log.i("WebDavNative", "  " + key + " = " + prop.get(key));
-                    }
+                    android.util.Log.i("WebDavNative", "PERF: JCIFS V8 (Auto-Scaling) properties applied");
                     tunedContext = new BaseContext(config);
                 } catch (Exception e) {
                     android.util.Log.e("WebDavNative", "Failed to load tuned JCIFS properties, using default", e);
@@ -764,14 +783,29 @@ public class WebDavPlugin extends Plugin {
                 final java.lang.StringBuilder errorMsg = new java.lang.StringBuilder();
                 final String finalFileName = smbFile.getName();
 
-                // [PERF] Heavy-Duty Multi-threaded Accelerator (V6.1 Hyper-Turbo)
-                int threadCount = 1;
-                if (fileSize > 200 * 1024 * 1024) threadCount = 6;
-                else if (fileSize > 50 * 1024 * 1024) threadCount = 4;
-                else if (fileSize > 10 * 1024 * 1024) threadCount = 2;
+                // [PERF] Survivor-Turbo V9.4 (Stabilized)
+                android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                ((android.app.ActivityManager) getContext().getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(mi);
                 
+                int cores = getCpuCores();
+                long availMemMB = mi.availMem / (1024 * 1024);
+                boolean isHighEnd = cores >= 6 && mi.totalMem >= 7L * 1024 * 1024 * 1024;
+                
+                // [PERF] Smooth-Hyper V9.6 (Balanced Concurrency)
+                int threadCount = 1;
+                if (mi.lowMemory) {
+                    threadCount = 4;
+                } else if (fileSize > 100 * 1024 * 1024) {
+                    threadCount = isHighEnd ? 20 : 12; // 20 threads: Optimal for Wi-Fi & CPU switching
+                } else if (fileSize > 50 * 1024 * 1024) {
+                    threadCount = 8;
+                } else {
+                    threadCount = 4;
+                }
+                
+                final int bufferSize = 4194304; // 4MB: Sweet spot for stability + throughput
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
-                android.util.Log.i("WebDavNative", "Starting V6.1 Hyper-Turbo: " + threadCount + " threads, 4MB buffers");
+                android.util.Log.i("WebDavNative", "Starting V9.6 SMOOTH-HYPER: " + threadCount + " threads, Buffer 4MB");
 
                 for (int i = 0; i < threadCount; i++) {
                     final int threadIndex = i;
@@ -788,96 +822,75 @@ public class WebDavPlugin extends Plugin {
                             sraf.seek(start);
                             raf.seek(start);
                             
-                            byte[] buffer = new byte[4194304]; // [V6] 4MB massive buffer per thread
+                            byte[] buffer = new byte[bufferSize]; 
                             long pos = start;
-                            int totalReads = 0;
 
                             while (pos <= end && !hasError.get()) {
                                 if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
                                     throw new java.io.IOException("Cancelled");
                                 }
                                 
-                                int toRead = (int) Math.min(buffer.length, end - pos + 1);
+                                int toRead = (int) Math.min(bufferSize, end - pos + 1);
                                 if (toRead <= 0) break;
-                                
-                                long readStartTime = System.currentTimeMillis();
+
                                 int read = sraf.read(buffer, 0, toRead);
                                 if (read == -1) break;
-                                long readEndTime = System.currentTimeMillis();
                                 
-                                long writeStartTime = System.currentTimeMillis();
                                 raf.write(buffer, 0, read);
-                                long writeEndTime = System.currentTimeMillis();
-                                
-                                pos += read;
                                 downloaded.addAndGet(read);
-                                totalReads++;
-
-                                if (totalReads % 5 == 0 && threadIndex == 0) { // Log every 5 blocks for lead thread
-                                    android.util.Log.i("WebDavNative", "PERF-T" + threadIndex + ": Read=" + (readEndTime - readStartTime) + "ms, Write=" + (writeEndTime - writeStartTime) + "ms [4MB Block]");
-                                }
+                                pos += read;
                             }
                         } catch (Exception e) {
                             hasError.set(true);
                             errorMsg.append(e.getMessage());
-                            android.util.Log.e("WebDavNative", "SMB T" + threadIndex + " Error: " + e.getMessage());
+                            android.util.Log.e("WebDavNative", "T" + threadIndex + " error: " + e.getMessage());
                         } finally {
                             latch.countDown();
                         }
                     }).start();
+                    
+                    try { Thread.sleep(40); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 }
 
-                // Progress loop with Speed Smoothing
-                long lastUpdate = 0;
+                // Smooth Performance Monitor (V9.6 EMA)
+                long lastUpdate = System.currentTimeMillis();
                 long lastBytes = 0;
                 long smoothedSpeed = 0;
-                
+
                 while (latch.getCount() > 0 && !hasError.get()) {
                     long now = System.currentTimeMillis();
-                    if (now - lastUpdate > 1000) {
-                        long currentTotal = downloaded.get();
-                        long diffBytes = currentTotal - lastBytes;
-                        long diffTime = now - lastUpdate;
-                        long instantSpeed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                    long dt = now - lastUpdate;
+                    if (dt >= 1000) {
+                        long current = downloaded.get();
+                        long instantSpeed = (current - lastBytes) * 1000 / dt;
                         
-                        // [V6] Simple Smoothing: 70% last smoothed + 30% instant
+                        // [V9.6] EMA Smoothing: 30% instant + 70% history
+                        // This filters out the "sawtooth" effect of multi-threaded IO spikes
                         if (smoothedSpeed == 0) smoothedSpeed = instantSpeed;
                         else smoothedSpeed = (long) (smoothedSpeed * 0.7 + instantSpeed * 0.3);
 
                         JSObject ret = new JSObject();
-                        ret.put("downloaded", currentTotal);
+                        ret.put("downloaded", current);
                         ret.put("total", fileSize);
                         ret.put("speed", smoothedSpeed);
-                        if (callbackId != null) ret.put("id", callbackId);
+                        ret.put("id", callbackId != null ? callbackId : "smb_smooth_hyper");
                         notifyListeners("downloadProgress", ret);
 
-                        String speedStr = formatSpeed(smoothedSpeed);
-                        boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
-                        String title = isZh ? "正在下载" : "Downloading";
-                        doUpdateNotification(9999, title, finalFileName, (int)(currentTotal/1024), (int)(fileSize/1024), speedStr);
+                        doUpdateNotification(9999, isZhInit ? "正在下载" : "Downloading", finalFileName, (int)(current/1024), (int)(fileSize/1024), formatSpeed(smoothedSpeed));
                         
                         lastUpdate = now;
-                        lastBytes = currentTotal;
+                        lastBytes = current;
                     }
-                    try {
-                        Thread.sleep(500); // Update every 0.5 seconds
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        hasError.set(true);
-                        errorMsg.append("Progress loop interrupted");
-                    }
+                    try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 }
-                latch.await(); // Ensure all threads have finished
+                latch.await();
 
                 if (hasError.get()) {
                     if (errorMsg.toString().contains("Cancelled")) throw new java.io.IOException("Cancelled");
                     throw new Exception(errorMsg.toString());
                 }
 
-                // Force 100% notification on completion
-                boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
-                String titleFinal = isZhFinal ? "下载完成" : "Download Complete";
-                doUpdateNotification(9999, titleFinal, finalFileName, (int)(fileSize/1024), (int)(fileSize/1024), "");
+                doUpdateNotification(9999, isZhInit ? "下载完成" : "Download Complete", finalFileName, (int)(fileSize/1024), (int)(fileSize/1024), "");
                 call.resolve();
 
             } catch (Exception e) {

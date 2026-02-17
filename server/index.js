@@ -8,6 +8,8 @@ const fs = require('fs-extra');
 const os = require('os');
 const mime = require('mime-types');
 const multer = require('multer');
+const util = require('util');
+const { promisify } = util;
 let sharp;
 try {
     sharp = require('sharp');
@@ -16,7 +18,7 @@ try {
 }
 const { encrypt, decrypt } = require('./utils/crypto');
 const { EventEmitter } = require('events');
-const { Transform } = require('stream');
+const { Transform, Readable } = require('stream');
 
 const app = express();
 app.use(cors());
@@ -25,26 +27,45 @@ app.use(express.json());
 const progressEmitter = new EventEmitter();
 const activeSmbStreams = new Map(); // stream -> smbPath
 
-// --- Progress Tracking Helper ---
+// --- Progress Tracking Helper (V9.6 Smooth-Hyper ported to Node.js) ---
 function createProgressStream(taskId, totalSize) {
     if (!taskId) return new Transform({ transform(c, e, cb) { this.push(c); cb(); } });
-    
+
     let uploaded = 0;
     let lastUpdate = Date.now();
     let lastUploaded = 0;
+    let smoothedSpeed = 0;
+    let chunkCount = 0;
 
+    const transferStartTime = Date.now();
     return new Transform({
         transform(chunk, encoding, callback) {
             uploaded += chunk.length;
+            chunkCount++;
             const now = Date.now();
-            // Emit progress every 500ms to avoid flooding
-            if (now - lastUpdate >= 500) {
-                const speed = (uploaded - lastUploaded) / ((now - lastUpdate) / 1000);
+
+            // Smoothing logic for progress stream speed calculation
+            if (now - lastUpdate >= 1000) {
+                const dt = (now - lastUpdate) / 1000;
+                const instantSpeed = (uploaded - lastUploaded) / dt;
+                const totalDt = (now - transferStartTime) / 1000;
+                const avgSpeed = (uploaded / totalDt);
+
+                if (smoothedSpeed === 0) {
+                    smoothedSpeed = instantSpeed;
+                } else {
+                    smoothedSpeed = (smoothedSpeed * 0.7) + (instantSpeed * 0.3);
+                }
+
+                const mbps = (instantSpeed / (1024 * 1024)).toFixed(2);
+                const avgMbps = (avgSpeed / (1024 * 1024)).toFixed(2);
+                console.log(`[PERF][${taskId}] Chunk #${chunkCount} | Instant: ${mbps} MB/s | 全程均速 (AVG): ${avgMbps} MB/s | Total: ${(uploaded / (1024 * 1024)).toFixed(1)} MB`);
+
                 progressEmitter.emit('progress', {
                     id: taskId,
                     uploaded,
                     total: totalSize,
-                    speed
+                    speed: Math.round(smoothedSpeed)
                 });
                 lastUpdate = now;
                 lastUploaded = uploaded;
@@ -53,6 +74,9 @@ function createProgressStream(taskId, totalSize) {
             callback();
         },
         flush(callback) {
+            const totalDt = (Date.now() - transferStartTime) / 1000;
+            const finalAvgSpeed = (uploaded / totalDt);
+            console.log(`[PERF][${taskId}] Completed. 真·全程落地均速: ${Math.round(finalAvgSpeed / (1024 * 1024))} MB/s (耗时: ${Math.round(totalDt)}s)`);
             progressEmitter.emit('progress', {
                 id: taskId,
                 uploaded,
@@ -62,9 +86,258 @@ function createProgressStream(taskId, totalSize) {
             callback();
         }
     });
+
 }
 
 const activeTasks = new Map(); // taskId -> { cancel: Function }
+
+/**
+ * TurboSMBReadStream: A high-performance concurrent reading stream for SMB.
+ * Bypasses the 10MB/s sequential limit by issuing multiple parallel READ requests.
+ */
+class TurboSMBReadStream extends Readable {
+    constructor(clients, smbPath, fileSize, options = {}) {
+        const highWaterMark = 512 * 1024 * 1024; // 512MB Katana Buffer (High Frequency)
+        super({ highWaterMark });
+        this.clients = Array.isArray(clients) ? clients : [clients]; // Multi-Lane Support
+        this.smbPath = smbPath;
+        this.fileSize = fileSize;
+        this.chunkSize = options.chunkSize || 1024 * 1024; // 1MB Accurate Chunks
+        this.concurrency = 128; // Katana Safe Bound
+        this.clientIndex = 0; // Round-robin lane selector
+        this.startOffset = options.start || 0;
+        this.endOffset = (options.end !== undefined) ? options.end : fileSize - 1;
+
+        this.currentReadPos = this.startOffset;
+        this.nextPushPos = this.startOffset;
+        this.activeRequests = 0;
+        this.finished = false;
+        this.bufferMap = new Map(); // pos -> buffer
+        this.destroyed_flag = false;
+        this.fileHandles = []; this.laneInFlight = []; // One handle per client (lane)
+        this.opening = false;
+        this.currentConcurrency = 24; // V9.20 Katana-Start (3 lanes * 8 reqs)
+        this.fetchedInCurrentCycle = 0;
+
+        // Performance metrics (Real-time Delta)
+        this.startTime = Date.now();
+        this.lastLogTime = Date.now();
+        this.lastTotalFetched = 0;
+        this.totalFetched = 0;
+    }
+
+    async _read() {
+        if (this.finished || this.destroyed_flag) return;
+
+        // 1. Try to push any buffered data
+        this._tryPush();
+
+        // 2. Schedule more fetches
+        this._pump();
+    }
+
+    async _pump() {
+        if (this.finished || this.destroyed_flag) return;
+
+        try {
+            if (this.fileHandles.length === 0 && !this.opening) {
+                this.opening = true;
+                const pathTail = this.smbPath.split(/[\\\/]/).pop();
+                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][V9.20] Katana-Drive Active (Precision ACC) for: ...${pathTail}`);
+
+                const results = [];
+                for (let i = 0; i < this.clients.length; i++) {
+                    if (this.destroyed_flag) break;
+                    let attempt = 0;
+                    let handle = null;
+                    while (attempt < 2 && !handle) {
+                        try {
+                            console.log(`[${new Date().toLocaleTimeString()}] [TURBO][LANE] Firing up Lane #${i + 1} (Attempt ${attempt + 1})...`);
+                            handle = await executeSMBCommand(this.clients[i], () => this.clients[i].openP(this.smbPath, 'r'), 20000);
+                        } catch (e) {
+                            console.warn(`[${new Date().toLocaleTimeString()}] [TURBO][WARN] Lane ${i + 1} attempt ${attempt + 1} failed:`, e.message);
+                            attempt++;
+                            if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+                        }
+                    }
+                    results.push(handle);
+                    if (i < this.clients.length - 1) {
+                        const jitter = Math.floor(Math.random() * 500);
+                        await new Promise(r => setTimeout(r, 1000 + jitter));
+                    }
+                }
+
+                this.fileHandles = results.filter(h => h !== null);
+                this.clients = this.clients.filter((_, idx) => results[idx] !== null);
+
+                this.opening = false;
+                if (this.clients.length === 0) throw new Error('All SMB lanes failed to ignite after retries');
+                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][V9.20] Katana-Pulse Active. Lanes: ${this.clients.length}/${results.length} | Cap: ${this.concurrency * this.chunkSize / (1024 * 1024)}MB`);
+            }
+            // Fill pipeline
+            let started = 0;
+            const maxBuffered = this.concurrency * 2;
+            // V9.13: Use currentConcurrency for Ramping
+            while (this.activeRequests < this.currentConcurrency &&
+                this.bufferMap.size < maxBuffered &&
+                this.currentReadPos <= this.endOffset) {
+                const pos = this.currentReadPos;
+                const size = Math.min(this.chunkSize, this.endOffset - pos + 1);
+                this.currentReadPos += size;
+                this.activeRequests++;
+                started++;
+
+                // Track when this was queued for diagnosis
+                const dispatchTime = Date.now();
+                this._fetchChunk(pos, size, dispatchTime);
+            }
+            if (started > 0) {
+                // Log only initial burst or batch status
+                if (this.currentReadPos < this.chunkSize * 10 || started > 4) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][QUEUE] Dispatched ${started} chunks. Flying: ${this.activeRequests} | Next: ${Math.floor(this.currentReadPos / (1024 * 1024))}MB`);
+                }
+            }
+        } catch (err) {
+            console.error(`[${new Date().toLocaleTimeString()}][TURBO][ERR-FATAL] _pump fail:`, err);
+            this.opening = false;
+            this.destroy(err);
+        }
+    }
+
+    async _fetchChunk(pos, size, dispatchTime) {
+        if (this.destroyed_flag) return; // Early exit if stream is destroyed
+
+        const startTime = Date.now();
+        const queueTime = startTime - dispatchTime;
+
+        // Select next lane (client) and its corresponding handle
+        // Ensure clientIndex wraps around and only selects active lanes
+        let laneIdx = -1;
+        let client = null;
+        let handle = null;
+
+        // Find an active lane
+        for (let i = 0; i < this.clients.length; i++) {
+            const potentialIdx = (this.clientIndex + i) % this.clients.length;
+            if (this.fileHandles[potentialIdx]) {
+                laneIdx = potentialIdx;
+                client = this.clients[laneIdx];
+                handle = this.fileHandles[laneIdx];
+                this.clientIndex = (laneIdx + 1) % this.clients.length; // Move to next for round-robin
+                break;
+            }
+        }
+
+        if (!client || !handle) {
+            // All lanes are dead or no handles available, this should not happen if _pump checks this.clients.length
+            // But as a safeguard, destroy the stream.
+            console.error(`[${new Date().toLocaleTimeString()}] [TURBO][ERR] No active SMB lanes available for read at offset ${pos}.`);
+            this.activeRequests--;
+            this.destroy(new Error('No active SMB lanes available.'));
+            return;
+        }
+
+        try {
+            const buf = Buffer.allocUnsafe(size); // Zero-copy optimization
+            // Directly call readP on selected lane with its own handle
+            const bytesRead = await client.readP(handle, buf, 0, size, pos);
+            const execTime = Date.now() - startTime; this.laneInFlight[laneIdx]--;
+            if (this.destroyed_flag) return;
+
+            const safeBytesRead = bytesRead || 0;
+            this.bufferMap.set(pos, (safeBytesRead === size) ? buf : buf.subarray(0, safeBytesRead));
+            this.activeRequests--;
+            this.totalFetched += safeBytesRead;
+
+            // V9.20 Katana ACC Engine (High Precision Feedback)
+            const rtt = Date.now() - startTime;
+            if (rtt > 2500) {
+                // Buffer Bloat Detected: Quick drain
+                this.currentConcurrency = Math.max(24, Math.floor(this.currentConcurrency - 8));
+            } else if (rtt < 1200) {
+                // Below saturation: Incremental probe
+                this.fetchedInCurrentCycle++;
+                if (this.fetchedInCurrentCycle >= 4) {
+                    this.currentConcurrency = Math.min(this.concurrency, this.currentConcurrency + 1);
+                    this.fetchedInCurrentCycle = 0;
+                }
+            }
+
+            // Precise speed and BOTTLENECK diagnosis every 1 second
+            const now = Date.now();
+            if (now - this.lastLogTime >= 1000) {
+                const sessionDt = (now - this.startTime) / 1000;
+                const sessionAvg = (this.totalFetched / (1024 * 1024) / sessionDt).toFixed(2);
+                const dt = (now - this.lastLogTime) / 1000;
+                const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.20] S: ${instantSpeed}MB/s (落地均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+
+                this.lastLogTime = now;
+                this.lastTotalFetched = this.totalFetched;
+            }
+
+            this._tryPush();
+            this._pump();
+        } catch (err) {
+            console.error(`[${new Date().toLocaleTimeString()}][TURBO][IO-ERR] Offset ${pos} (Exec: ${Date.now() - startTime}ms):`, err.message);
+            this.activeRequests--;
+            if (!this.destroyed_flag) this.destroy(err);
+        }
+    }
+
+    _tryPush() {
+        if (this.destroyed_flag) return;
+
+        let pushedCount = 0;
+        while (this.bufferMap.has(this.nextPushPos)) {
+            const buffer = this.bufferMap.get(this.nextPushPos);
+            this.bufferMap.delete(this.nextPushPos);
+
+            const size = buffer.length;
+            this.nextPushPos += size;
+
+            const canContinue = this.push(buffer);
+            pushedCount++;
+
+            if (this.nextPushPos > this.endOffset) {
+                this.finished = true;
+                this.push(null);
+                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][FINISH] Stream reached EOF.`);
+                break;
+            }
+
+            if (!canContinue) {
+                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][BACKPRESSURE] Local consumer buffer full. Pausing push at ${Math.floor(this.nextPushPos / (1024 * 1024))}MB`);
+                break;
+            }
+        }
+
+        // If we are stuck waiting for a specific chunk
+        if (pushedCount === 0 && this.bufferMap.size > 0 && !this.finished) {
+            const available = Array.from(this.bufferMap.keys()).sort((a, b) => a - b);
+            // console.log(`[${new Date().toLocaleTimeString()}] [TURBO][STATUS] Waiting for offset: ${this.nextPushPos}. Buffers ready: ${available.length} | First ready: ${available[0]}`);
+        }
+    }
+
+    _destroy(err, callback) {
+        this.destroyed_flag = true;
+        this.bufferMap.clear();
+
+        // Close all handles across all lanes
+        if (this.fileHandles.length > 0) {
+            this.fileHandles.forEach((handle, idx) => {
+                const client = this.clients[idx];
+                if (client && handle) { // Ensure client and handle are valid for this lane
+                    executeSMBCommand(client, () => client.close(handle))
+                        .catch(e => console.warn(`[SMB Turbo] Failed to close handle on lane ${idx}:`, e.message));
+                }
+            });
+            this.fileHandles = [];
+        }
+
+        super._destroy(err, callback);
+    }
+}
 
 app.post('/api/cancel', (req, res) => {
     const { taskId } = req.body;
@@ -133,15 +406,12 @@ const smbClients = new Map();
 const getSMBClient = (config, options = {}) => {
     // config.address: "192.168.1.100" or "192.168.1.100:445"
     // config.share: "Public"
-    // config.domain: ""
-    
     let address = config.address;
     let port = config.port;
 
     // Extract port from address if present (e.g. "192.168.1.100:4455")
     if (!port && typeof address === 'string' && address.includes(':')) {
         const parts = address.split(':');
-        // Basic check for IPv4:Port format
         if (parts.length === 2 && !isNaN(parseInt(parts[1], 10))) {
             address = parts[0];
             port = parseInt(parts[1], 10);
@@ -149,32 +419,43 @@ const getSMBClient = (config, options = {}) => {
     }
 
     const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
-
-    // Extract tag and separate SMB options
     const { tag = 'default', ...smbOptions } = options;
-
-    // Check if dedicated client requested (e.g. for transfer/upload)
-    // Only treat as dedicated if there are actual SMB options passed (like autoCloseTimeout)
     const isDedicated = Object.keys(smbOptions).length > 0;
 
-    const createClient = () => new SMB2({
-        share: `\\\\${address}\\${cleanShare}`,
-        domain: config.domain || '',
-        username: config.username,
-        password: config.password,
-        port: port, // Optional port
-        packetConcurrency: 5,
-        autoCloseTimeout: 0, // Keep cached connections alive to prevent race conditions
-        ...smbOptions
-    });
+    const createClientInstance = () => {
+        const client = new SMB2({
+            share: `\\\\${address}\\${cleanShare}`,
+            domain: config.domain || '',
+            username: config.username,
+            password: config.password,
+            port: port,
+            packetConcurrency: 4096, // Hyper-Turbo V8.0: Massive 4096 to prevent internal packet queuing
+            autoCloseTimeout: 0,
+            ...smbOptions
+        });
 
-    if (isDedicated) {
-        return createClient();
-    }
+        // Promisify essential methods to ensure await works correctly
+        client.existsP = promisify(client.exists).bind(client);
+        client.statP = promisify(client.stat).bind(client);
+        client.openP = promisify(client.open).bind(client);
+        client.readP = promisify(client.read).bind(client);
+        client.closeP = promisify(client.close).bind(client);
+        client.readdirP = promisify(client.readdir).bind(client);
+        client.unlinkP = promisify(client.unlink).bind(client);
+        client.rmdirP = promisify(client.rmdir).bind(client);
+        client.mkdirP = promisify(client.mkdir).bind(client);
+        client.renameP = promisify(client.rename).bind(client);
+        client.createWriteStreamP = promisify(client.createWriteStream).bind(client);
+        client.createReadStreamP = promisify(client.createReadStream).bind(client);
+
+        return client;
+    };
+
+    if (isDedicated) return createClientInstance();
 
     const key = `${address}|${cleanShare}|${config.username}|${config.password}|${tag}`;
     if (!smbClients.has(key)) {
-        smbClients.set(key, createClient());
+        smbClients.set(key, createClientInstance());
     }
     return smbClients.get(key);
 };
@@ -191,11 +472,11 @@ const clearSMBSession = (config) => {
     const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
     // Prefix matches all tags (default, preview, etc.)
     const prefix = `${address}|${cleanShare}|${config.username}|${config.password}|`;
-    
+
     for (const [key, client] of smbClients.entries()) {
         if (key.startsWith(prefix)) {
             console.log(`[SMB] Clearing cached session for ${key}`);
-            try { client.disconnect(); } catch (e) {}
+            try { client.disconnect(); } catch (e) { }
             smbClients.delete(key);
         }
     }
@@ -208,17 +489,22 @@ const ensureSMBConnected = async (client) => {
         await client._connectPromise;
         return;
     }
-    
+
     client._connectPromise = (async () => {
         try {
-            // Trigger connection via a lightweight check (root listing)
-            // We ignore errors here because the goal is just to connect.
-            // If the share is invalid, the actual command later will fail anyway.
-            await client.readdir(''); 
+            console.log(`[SMB][PROBE] Start connection probe...`);
+            await client.statP('');
+            client.connected = true;
+            console.log(`[SMB][PROBE] Success.`);
         } catch (e) {
-            // Ignore readdir errors, just check connected state
-            // EISCONN means socket already connected (race condition), which is fine.
-            if (e.code === 'EISCONN') return; 
+            // If server responds with STATUS_ error, it's alive and authenticated.
+            const isAlive = e.code === 'EISCONN' || (e.code && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
+            if (isAlive) {
+                console.log(`[SMB][PROBE] Success (Server acknowledged via status: ${e.code})`);
+                client.connected = true;
+                return;
+            }
+            console.warn(`[SMB][PROBE] Warn: ${e.code || e.message}`);
         }
     })();
 
@@ -258,15 +544,15 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
         await ensureSMBConnected(client);
         return await run();
     } catch (err) {
-        const isRetryable = RETRY_ERRORS.some(code => 
-            err.code === code || 
+        const isRetryable = RETRY_ERRORS.some(code =>
+            err.code === code ||
             (err.message && err.message.includes(code))
         );
-        
+
         if (isRetryable || err.message === 'SMB Command Timeout') {
             console.log(`[SMB Retry] Error (${err.code || err.message}), reconnecting...`);
             // Force disconnect/reset state
-            try { client.disconnect(); } catch(e) {} 
+            try { client.disconnect(); } catch (e) { }
             // Retry once
             await ensureSMBConnected(client);
             return await commandFn(); // Retry without timeout wrapper or with? Let's retry raw command to avoid double timeout race if just a hiccup.
@@ -323,7 +609,7 @@ const closeActiveSmbStreamsForPaths = (items) => {
             return smbPath.startsWith(target + '\\');
         });
         if (shouldClose) {
-            try { stream.destroy(); } catch (e) {}
+            try { stream.destroy(); } catch (e) { }
             activeSmbStreams.delete(stream);
         }
     }
@@ -366,7 +652,7 @@ const verifyItemsDeletedSMB = async (config, items) => {
         }
         return true;
     } finally {
-        try { client.disconnect(); } catch (e) {}
+        try { client.disconnect(); } catch (e) { }
     }
 };
 
@@ -457,7 +743,7 @@ app.get('/api/drives', async (req, res) => {
 
                 if (internalDrive.type === 'webdav') {
                     const client = getWebDAVClient(internalDrive);
-                    const quota = await withTimeout(client.getQuota(), 2000); 
+                    const quota = await withTimeout(client.getQuota(), 2000);
                     if (quota && quota.used !== undefined && quota.available !== undefined) {
                         const used = parseInt(quota.used, 10) || 0;
                         const available = parseInt(quota.available, 10) || 0;
@@ -472,12 +758,12 @@ app.get('/api/drives', async (req, res) => {
                     // SMB Quota not easily available via basic client
                     return { ...publicDrive, quota: null };
                 }
-            } catch (e) {}
+            } catch (e) { }
             return { ...publicDrive, quota: null };
         }));
-        
+
         // Log without sensitive data
-        console.log('[DEBUG] Drives Quota:', JSON.stringify(drivesWithQuota.map(d => ({id: d.id, quota: d.quota})), null, 2));
+        console.log('[DEBUG] Drives Quota:', JSON.stringify(drivesWithQuota.map(d => ({ id: d.id, quota: d.quota })), null, 2));
         res.json(drivesWithQuota);
     } catch (err) {
         // Fallback: strip passwords even on error
@@ -498,7 +784,7 @@ app.post('/api/drives', async (req, res) => {
         // Don't log password!
         const logSafeDrive = { ...newDrive, password: '***' };
         console.log('[DEBUG] POST /api/drives payload:', logSafeDrive);
-        
+
         let drives = [];
         try {
             drives = await fs.readJson(CONFIG_FILE);
@@ -535,11 +821,11 @@ app.post('/api/drives', async (req, res) => {
 
         // Assign reliable ID
         newDrive.id = crypto.randomUUID();
-        
+
         drives.push(newDrive);
         await fs.writeJson(CONFIG_FILE, drives, { spaces: 2 });
         console.log('[DEBUG] Write success. New count:', drives.length);
-        
+
         // Return safe object (no password or masked)
         const safeResponse = { ...newDrive };
         delete safeResponse.password;
@@ -553,11 +839,11 @@ app.post('/api/drives', async (req, res) => {
 app.post('/api/drives/test', async (req, res) => {
     try {
         const config = req.body;
-        
+
         if (config.type === 'smb') {
-             const client = getSMBClient(config);
-             const files = await client.readdir(''); // Root
-             res.json({ success: true, count: files.length });
+            const client = getSMBClient(config);
+            const files = await client.readdir(''); // Root
+            res.json({ success: true, count: files.length });
         } else {
             // WebDAV
             const client = createClient(config.url, {
@@ -570,7 +856,7 @@ app.post('/api/drives/test', async (req, res) => {
     } catch (err) {
         console.error('[Drive Test Failed]', err);
         if (err.code === 'STATUS_BAD_NETWORK_NAME') {
-             return res.status(400).json({ error: 'Share Name Not Found', details: `The share '${config.share}' does not exist on this host. Check the name in Finder/Explorer.` });
+            return res.status(400).json({ error: 'Share Name Not Found', details: `The share '${config.share}' does not exist on this host. Check the name in Finder/Explorer.` });
         }
         res.status(400).json({ error: 'Connection failed', details: err.message });
     }
@@ -607,7 +893,7 @@ app.patch('/api/drives/:id', async (req, res) => {
 
         drives[driveIndex].name = name;
         // Password remains untouched (encrypted)
-        
+
         console.log('[DEBUG] Renaming drive:', id, 'to', name, '. Total drives:', drives.length);
         await fs.writeJson(CONFIG_FILE, drives, { spaces: 2 });
         res.json({ success: true });
@@ -628,7 +914,7 @@ app.get('/api/files', async (req, res) => {
         if (config.type === 'local') {
             const absolutePath = resolveSafePath(reqPath);
             const safePath = path.relative(STORAGE_DIR, absolutePath); // Return relative path
-            
+
             const allFiles = await fs.readdir(absolutePath);
             // Filter out hidden files
             const files = allFiles.filter(f => !f.startsWith('.'));
@@ -637,7 +923,7 @@ app.get('/api/files', async (req, res) => {
                 const fullPath = path.join(absolutePath, file);
                 const relPath = path.join('/', safePath, file); // Ensure absolute Web path
                 const stats = await fs.stat(fullPath);
-                
+
                 let itemCount = undefined;
                 if (stats.isDirectory()) {
                     try {
@@ -661,7 +947,7 @@ app.get('/api/files', async (req, res) => {
             const client = getSMBClient(config);
             // Strip leading slashes for SMB
             const smbPath = toSMBPath(reqPath);
-            
+
             try {
                 const listWithClient = async (targetClient) => {
                     // Use stats=true to avoid per-item stat calls (less load, fewer locks).
@@ -685,13 +971,13 @@ app.get('/api/files', async (req, res) => {
                         try {
                             names = await listWithClient(freshClient);
                         } finally {
-                            try { freshClient.disconnect(); } catch (e) {}
+                            try { freshClient.disconnect(); } catch (e) { }
                         }
                     } else {
                         throw listErr;
                     }
                 }
-                
+
                 const results = names.map((item) => {
                     const name = item.name;
                     const webPath = path.posix.join(reqPath, name);
@@ -705,14 +991,14 @@ app.get('/api/files', async (req, res) => {
                         type: isDir ? 'folder' : mime.lookup(name) || 'application/octet-stream'
                     };
                 });
-                
+
                 res.json({
                     path: reqPath,
                     files: results
                 });
             } catch (smbErr) {
-                 console.error('SMB List Error:', smbErr);
-                 res.status(502).json({ error: `SMB Error: ${smbErr.message}` });
+                console.error('SMB List Error:', smbErr);
+                res.status(502).json({ error: `SMB Error: ${smbErr.message}` });
             }
 
         } else {
@@ -750,7 +1036,7 @@ app.get('/api/search', async (req, res) => {
         if (config.type === 'local') {
             const absoluteRoot = resolveSafePath(searchPath);
             const results = [];
-            
+
             // Helper for recursive search
             const walk = async (dir) => {
                 if (results.length >= 100) return; // Limit results
@@ -759,9 +1045,9 @@ app.get('/api/search', async (req, res) => {
                     for (const file of files) {
                         if (file.name.startsWith('.')) continue;
                         if (results.length >= 100) break;
-                        
+
                         const fullPath = path.join(dir, file.name);
-                        
+
                         if (file.name.toLowerCase().includes(query.toLowerCase())) {
                             const relPath = path.relative(STORAGE_DIR, fullPath);
                             results.push({
@@ -773,7 +1059,7 @@ app.get('/api/search', async (req, res) => {
                                 type: file.isDirectory() ? 'folder' : mime.lookup(file.name) || 'application/octet-stream'
                             });
                         }
-                        
+
                         if (file.isDirectory()) {
                             await walk(fullPath);
                         }
@@ -826,13 +1112,16 @@ app.get('/api/raw', async (req, res) => {
         if (config.type === 'local') {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
+            // For raw streaming, we still use a single client for simplicity and to avoid
+            // opening multiple file handles for a single stream, which might be problematic
+            // for some SMB servers or increase resource usage unnecessarily for a direct pipe.
             const client = getSMBClient(config, { tag: 'preview' });
             const smbPath = toSMBPath(reqPath);
-            
+
             try {
                 const range = req.headers.range;
                 let options = {};
-                
+
                 if (range) {
                     const parts = range.replace(/bytes=/, "").split("-");
                     const start = parseInt(parts[0], 10);
@@ -840,7 +1129,7 @@ app.get('/api/raw', async (req, res) => {
                     options.start = start;
                     if (end) options.end = end;
                     res.status(206);
-                    
+
                     // We need file size for Content-Range header
                     const stats = await executeSMBCommand(client, () => client.stat(smbPath));
                     const fileSize = stats.size;
@@ -860,15 +1149,24 @@ app.get('/api/raw', async (req, res) => {
                 const mimeType = mime.lookup(fileName) || 'application/octet-stream';
                 res.setHeader('Content-Type', mimeType);
 
-                const stream = await executeSMBCommand(client, () => client.createReadStream(smbPath, options));
+                // Use TurboSMBReadStream for high performance
+                const stream = new TurboSMBReadStream(client, smbPath, fileSize, options);
                 registerSmbStream(smbPath, stream);
-                
-                stream.on('error', (err) => {
-                    if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
-                    console.error('SMB Stream Error', err);
+
+                let backpressureCount = 0;
+                res.on('drain', () => {
+                    backpressureCount++;
+                    if (backpressureCount % 20 === 0) console.log(`[PERF][SMB-TURBO] Stream Drain (Backpressure) x${backpressureCount}`);
                 });
 
-                stream.pipe(res);
+                stream.on('error', (err) => {
+                    if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
+                    console.error('SMB Turbo Stream Error', err);
+                });
+
+                // Attach diagnostic monitor
+                const diagStream = createProgressStream('DIAG_RAW_' + Date.now(), fileSize);
+                stream.pipe(diagStream).pipe(res);
             } catch (e) {
                 if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
                     return res.status(404).send('File not found');
@@ -878,7 +1176,7 @@ app.get('/api/raw', async (req, res) => {
 
         } else {
             const client = getWebDAVClient(config);
-            
+
             const options = {
                 method: 'GET',
                 headers: {},
@@ -892,7 +1190,7 @@ app.get('/api/raw', async (req, res) => {
 
             try {
                 const response = await client.customRequest(reqPath, options);
-                
+
                 const getHeader = (key) => {
                     if (response.headers && typeof response.headers.get === 'function') {
                         return response.headers.get(key);
@@ -901,7 +1199,7 @@ app.get('/api/raw', async (req, res) => {
                 };
 
                 res.status(response.status);
-                
+
                 const forwardHeaders = [
                     'content-type',
                     'content-length',
@@ -911,7 +1209,7 @@ app.get('/api/raw', async (req, res) => {
                     'etag',
                     'cache-control'
                 ];
-                
+
                 forwardHeaders.forEach(key => {
                     const val = getHeader(key);
                     if (val) {
@@ -960,7 +1258,7 @@ app.get('/api/raw', async (req, res) => {
                     errHeaders.forEach(key => {
                         if (err.response.headers[key]) res.setHeader(key, err.response.headers[key]);
                     });
-                    
+
                     if (err.response.data && typeof err.response.data.pipe === 'function') {
                         err.response.data.pipe(res);
                     } else {
@@ -984,31 +1282,31 @@ app.get('/api/preview', async (req, res) => {
         const { path: reqPath, drive: driveId = 'local' } = req.query;
         if (!reqPath) return res.status(400).send('Path required');
         const config = await getDriveConfig(driveId);
-        
+
         const fileName = path.basename(reqPath);
         const isHeic = /\.(heic|heif)$/i.test(fileName);
-        
+
         // Setup Source Stream
         let inputStream;
         if (config.type === 'local') {
-             const absPath = resolveSafePath(reqPath);
-             if (!fs.existsSync(absPath)) return res.status(404).send('File not found');
-             inputStream = fs.createReadStream(absPath);
+            const absPath = resolveSafePath(reqPath);
+            if (!fs.existsSync(absPath)) return res.status(404).send('File not found');
+            inputStream = fs.createReadStream(absPath);
         } else if (config.type === 'smb') {
-             const client = getSMBClient(config, { tag: 'preview' });
-             const smbPath = toSMBPath(reqPath);
-             try {
-             inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
-             registerSmbStream(smbPath, inputStream);
-             } catch(e) {
-                 if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
-                     return res.status(404).send('File not found');
-                 }
-                 throw e;
-             }
+            const client = getSMBClient(config, { tag: 'preview' });
+            const smbPath = toSMBPath(reqPath);
+            try {
+                inputStream = await executeSMBCommand(client, () => client.createReadStream(smbPath));
+                registerSmbStream(smbPath, inputStream);
+            } catch (e) {
+                if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
+                    return res.status(404).send('File not found');
+                }
+                throw e;
+            }
         } else {
-             const client = getWebDAVClient(config);
-             inputStream = client.createReadStream(reqPath);
+            const client = getWebDAVClient(config);
+            inputStream = client.createReadStream(reqPath);
         }
 
         inputStream.on('error', (err) => {
@@ -1048,12 +1346,12 @@ app.post('/api/mkdir', async (req, res) => {
         } else if (config.type === 'smb') {
             // Clear cached sessions to release any potential locks
             clearSMBSession(config);
-            
+
             // Use dedicated client for Write ops to prevent affecting read ops on shared connection
             dedicatedClient = getSMBClient(config, { forceNew: true });
             const client = dedicatedClient;
             const smbPath = toSMBPath(reqPath);
-            
+
             // Retry loop to handle race condition where folder is still "deleting"
             let attempts = 0;
             while (true) {
@@ -1062,7 +1360,7 @@ app.post('/api/mkdir', async (req, res) => {
                     break;
                 } catch (err) {
                     if ((err.code === 'STATUS_OBJECT_NAME_COLLISION' || err.code === 'STATUS_DELETE_PENDING') && attempts < 15) {
-                        console.log(`[Mkdir SMB] Collision/Pending detected for ${smbPath}, retrying... (${attempts+1}/15)`);
+                        console.log(`[Mkdir SMB] Collision/Pending detected for ${smbPath}, retrying... (${attempts + 1}/15)`);
                         await new Promise(r => setTimeout(r, 500));
                         attempts++;
                     } else {
@@ -1104,7 +1402,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
         while (Date.now() < deadline) {
             try {
                 await executeSMBCommand(targetClient, () => targetClient.stat(itemPath));
-                // If stat succeeds, it's still there
+                // If stat succeeds, it still exists
                 await sleep(delay);
             } catch (e) {
                 // If stat fails with Not Found, it's gone!
@@ -1127,9 +1425,9 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                         return true;
                     }
                 } finally {
-                    try { freshClient.disconnect(); } catch (e) {}
+                    try { freshClient.disconnect(); } catch (e) { }
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
         console.warn(`[Delete Warn] Item ${itemPath} still exists after waiting`);
         return false;
@@ -1178,24 +1476,24 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                                     await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
                                     return;
                                 } catch (ulErr) {
-                                     // Handle Read-Only/Hidden for ghost files too
-                                     if (ulErr.code === 'STATUS_CANNOT_DELETE' || ulErr.code === 'STATUS_ACCESS_DENIED') {
-                                         try {
-                                             if (typeof targetClient.setFileAttributes === 'function') {
-                                                 await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
-                                                     hidden: false, 
-                                                     readOnly: false, 
-                                                     system: false,
-                                                     archive: false
-                                                 }));
-                                                 await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
-                                                 return;
-                                             }
-                                         } catch (attrErr) {
-                                             console.warn(`[Delete] Failed to clear attributes for ghost file ${itemPath}:`, attrErr.message);
-                                         }
-                                     }
-                                     console.warn(`[Delete] Failed to delete ghost file ${itemPath}: ${ulErr.message} (${ulErr.code})`);
+                                    // Handle Read-Only/Hidden for ghost files too
+                                    if (ulErr.code === 'STATUS_CANNOT_DELETE' || ulErr.code === 'STATUS_ACCESS_DENIED') {
+                                        try {
+                                            if (typeof targetClient.setFileAttributes === 'function') {
+                                                await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, {
+                                                    hidden: false,
+                                                    readOnly: false,
+                                                    system: false,
+                                                    archive: false
+                                                }));
+                                                await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
+                                                return;
+                                            }
+                                        } catch (attrErr) {
+                                            console.warn(`[Delete] Failed to clear attributes for ghost file ${itemPath}:`, attrErr.message);
+                                        }
+                                    }
+                                    console.warn(`[Delete] Failed to delete ghost file ${itemPath}: ${ulErr.message} (${ulErr.code})`);
                                 }
                             } else if (rmErr.code === 'STATUS_DELETE_PENDING') {
                                 const gone = await waitForDeletion(targetClient, itemPath);
@@ -1205,25 +1503,25 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                                     // Try clearing attributes
                                     try {
                                         if (typeof targetClient.setFileAttributes === 'function') {
-                                            await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
-                                                 hidden: false, 
-                                                 readOnly: false, 
-                                                 system: false,
-                                                 archive: false
+                                            await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, {
+                                                hidden: false,
+                                                readOnly: false,
+                                                system: false,
+                                                archive: false
                                             }));
                                         }
-                                    } catch (e) {}
-                                    
+                                    } catch (e) { }
+
                                     // Try recurse (in case it's a dir)
                                     try {
                                         await rmDirRecursiveSMB(targetClient, itemPath, config);
                                         return;
                                     } catch (recurseErr) {
-                                         // If that failed, try unlink again
-                                         try {
-                                             await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
-                                             return;
-                                         } catch (ulErr) {}
+                                        // If that failed, try unlink again
+                                        try {
+                                            await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
+                                            return;
+                                        } catch (ulErr) { }
                                     }
                                 }
                                 return;
@@ -1232,54 +1530,54 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
                                 await rmDirRecursiveSMB(targetClient, itemPath, config);
                                 return;
                             } else if (rmErr.code === 'STATUS_CANNOT_DELETE' || rmErr.code === 'STATUS_ACCESS_DENIED') {
-                                 // Maybe it was a directory that is read-only?
-                                 // Try to clear attributes
-                                 try {
-                                     if (typeof targetClient.setFileAttributes === 'function') {
-                                         await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
-                                             hidden: false, 
-                                             readOnly: false, 
-                                             system: false,
-                                             archive: false
-                                         }));
-                                         await executeSMBCommand(targetClient, () => targetClient.rmdir(itemPath));
-                                         return;
-                                     }
-                                 } catch (attrErr) {
-                                     console.warn(`[Delete] Failed to clear attributes for ghost dir ${itemPath}:`, attrErr.message);
-                                 }
+                                // Maybe it was a directory that is read-only?
+                                // Try to clear attributes
+                                try {
+                                    if (typeof targetClient.setFileAttributes === 'function') {
+                                        await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, {
+                                            hidden: false,
+                                            readOnly: false,
+                                            system: false,
+                                            archive: false
+                                        }));
+                                        await executeSMBCommand(targetClient, () => targetClient.rmdir(itemPath));
+                                        return;
+                                    }
+                                } catch (attrErr) {
+                                    console.warn(`[Delete] Failed to clear attributes for ghost dir ${itemPath}:`, attrErr.message);
+                                }
                             }
-                             // If we are here, we failed to delete the ghost item
-                             console.warn(`[Delete] Failed to delete ghost item ${itemPath}: ${rmErr.message} (${rmErr.code})`);
+                            // If we are here, we failed to delete the ghost item
+                            console.warn(`[Delete] Failed to delete ghost item ${itemPath}: ${rmErr.message} (${rmErr.code})`);
                         }
                         return;
                     }
-                    
+
                     // Try to clear Read-Only attribute if deletion failed
                     if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
                         try {
-                             console.log(`[Delete] Attempting to clear Read-Only/Hidden for ${itemPath}`);
-                             // 0x80 = Normal, 0 = Clear all? 
-                             // SMB2 usually exposes setFileAttributes or similar?
-                             // @marsaud/smb2 might not expose it directly on 'client', let's check if it has a way.
-                             // Standard fs doesn't, but SMB protocol does.
-                             // If client has setMetadata or similar?
-                             // If not available, we can't do much but log.
-                             if (typeof targetClient.setFileAttributes === 'function') {
-                                 await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, { 
-                                     hidden: false, 
-                                     readOnly: false, 
-                                     system: false,
-                                     archive: false
-                                 }));
-                                 // Retry delete once
-                                 if (isDir) {
-                                     await rmDirRecursiveSMB(targetClient, itemPath, config);
-                                 } else {
-                                     await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
-                                 }
-                                 return;
-                             }
+                            console.log(`[Delete] Attempting to clear Read-Only/Hidden for ${itemPath}`);
+                            // 0x80 = Normal, 0 = Clear all? 
+                            // SMB2 usually exposes setFileAttributes or similar?
+                            // @marsaud/smb2 might not expose it directly on 'client', let's check if it has a way.
+                            // Standard fs doesn't, but SMB protocol does.
+                            // If client has setMetadata or similar?
+                            // If not available, we can't do much but log.
+                            if (typeof targetClient.setFileAttributes === 'function') {
+                                await executeSMBCommand(targetClient, () => targetClient.setFileAttributes(itemPath, {
+                                    hidden: false,
+                                    readOnly: false,
+                                    system: false,
+                                    archive: false
+                                }));
+                                // Retry delete once
+                                if (isDir) {
+                                    await rmDirRecursiveSMB(targetClient, itemPath, config);
+                                } else {
+                                    await executeSMBCommand(targetClient, () => targetClient.unlink(itemPath));
+                                }
+                                return;
+                            }
                         } catch (attrErr) {
                             console.warn(`[Delete] Failed to clear attributes for ${itemPath}:`, attrErr.message);
                         }
@@ -1303,7 +1601,7 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
         try {
             // console.log(`[Delete Debug] Executing rmdir on: ${dirPath}`);
             await executeSMBCommand(client, () => client.rmdir(dirPath));
-            
+
             // Verify deletion
             try {
                 await executeSMBCommand(client, () => client.stat(dirPath));
@@ -1317,50 +1615,50 @@ const rmDirRecursiveSMB = async (client, dirPath, config = null) => {
             if (err.code === 'STATUS_OBJECT_NAME_NOT_FOUND' || err.code === 'STATUS_DELETE_PENDING') {
                 return;
             }
-            
+
             if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY' || err.code === 'STATUS_SHARING_VIOLATION') {
                 // console.log(`[Delete] rmdir failed for ${dirPath} (${err.code}). Retrying...`);
 
                 // If directory is not empty, try to see WHAT is left and delete it
                 if (err.code === 'STATUS_DIRECTORY_NOT_EMPTY') {
                     try {
-                         let remainingItems = await executeSMBCommand(client, () => client.readdir(dirPath));
-                         remainingItems = remainingItems.filter(name => name !== '.' && name !== '..');
-                         
-                         if (remainingItems.length > 0) {
-                             console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}, cleaning up...`);
-                             await processItems(client, remainingItems);
-                         } else {
-                             // console.warn(`[Delete] Directory ${dirPath} is not empty but readdir found 0 items.`);
-                         }
+                        let remainingItems = await executeSMBCommand(client, () => client.readdir(dirPath));
+                        remainingItems = remainingItems.filter(name => name !== '.' && name !== '..');
+
+                        if (remainingItems.length > 0) {
+                            console.log(`[Delete] Found ${remainingItems.length} stubborn items in ${dirPath}, cleaning up...`);
+                            await processItems(client, remainingItems);
+                        } else {
+                            // console.warn(`[Delete] Directory ${dirPath} is not empty but readdir found 0 items.`);
+                        }
                     } catch (readErr) {
                         // If readdir fails, maybe it's gone or access denied, just continue to wait/retry
                     }
                 }
 
-                await sleep(1000 + (retryCount * 750)); 
+                await sleep(1000 + (retryCount * 750));
                 retryCount++;
                 continue;
             }
 
             // Attempt to clear Read-Only/Hidden if deletion failed due to access denied
             if (err.code === 'STATUS_CANNOT_DELETE' || err.code === 'STATUS_ACCESS_DENIED') {
-                 try {
-                     if (typeof client.setFileAttributes === 'function') {
-                         await executeSMBCommand(client, () => client.setFileAttributes(dirPath, { 
-                             hidden: false, 
-                             readOnly: false, 
-                             system: false,
-                             archive: false
-                         }));
-                     }
-                 } catch (attrErr) {
+                try {
+                    if (typeof client.setFileAttributes === 'function') {
+                        await executeSMBCommand(client, () => client.setFileAttributes(dirPath, {
+                            hidden: false,
+                            readOnly: false,
+                            system: false,
+                            archive: false
+                        }));
+                    }
+                } catch (attrErr) {
                     console.warn(`[Delete] Failed to clear attributes for ${dirPath}:`, attrErr.message);
-                 }
-                 
-                 await sleep(1000);
-                 retryCount++;
-                 continue;
+                }
+
+                await sleep(1000);
+                retryCount++;
+                continue;
             }
 
             throw err;
@@ -1385,7 +1683,7 @@ app.post('/api/delete', async (req, res) => {
         } else if (config.type === 'smb') {
             closeActiveSmbStreamsForPaths(items);
             clearSMBSession(config);
-            
+
             let attempts = 0;
             const MAX_RETRIES = 3;
             let lastError = null;
@@ -1406,18 +1704,18 @@ app.post('/api/delete', async (req, res) => {
                             }
                         }
                     }
-                    
+
                     // Success!
                     break;
                 } catch (err) {
                     lastError = err;
                     console.error(`[Delete] Attempt ${attempts}/${MAX_RETRIES} failed: ${err.message}. Reconnecting...`);
-                    
+
                     if (dedicatedClient) {
-                        try { dedicatedClient.disconnect(); } catch(e) {}
+                        try { dedicatedClient.disconnect(); } catch (e) { }
                         dedicatedClient = null;
                     }
-                    
+
                     if (attempts < MAX_RETRIES) {
                         await new Promise(r => setTimeout(r, 1500)); // Wait for locks to release
                     }
@@ -1457,7 +1755,7 @@ app.post('/api/move', async (req, res) => {
                 // Destination is a FOLDER in move API
                 const absDestDir = resolveSafePath(destination);
                 const absNewPath = path.join(absDestDir, path.basename(absItem));
-                
+
                 if (absItem !== absNewPath) {
                     try {
                         await fs.move(absItem, absNewPath, { overwrite: overwrite });
@@ -1478,7 +1776,7 @@ app.post('/api/move', async (req, res) => {
                 const fileName = path.basename(item);
                 const smbDestDir = toSMBPath(destination);
                 const smbNew = smbDestDir === '\\' || smbDestDir === '' ? fileName : `${smbDestDir}\\${fileName}`;
-                
+
                 try {
                     await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
                 } catch (e) {
@@ -1516,7 +1814,7 @@ app.post('/api/move', async (req, res) => {
     } catch (err) {
         console.error('[Move Error]', err);
         if (err.code === 'EXIST' || err.message.includes('dest already exists') || (err.response && (err.response.status === 412 || err.response.status === 409))) {
-             return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+            return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
         }
         res.status(500).json({ error: err.message });
     }
@@ -1528,7 +1826,7 @@ const { pipeline } = require('stream/promises');
 const getFSAdapter = (config) => {
     if (config.type === 'local') {
         return {
-            stat: async (p) => { 
+            stat: async (p) => {
                 const s = await fs.stat(resolveSafePath(p));
                 return { isDirectory: () => s.isDirectory(), size: s.size };
             },
@@ -1541,28 +1839,43 @@ const getFSAdapter = (config) => {
             createWriteStream: async (p) => fs.createWriteStream(resolveSafePath(p)),
             unlink: async (p) => fs.remove(resolveSafePath(p)), // fs-extra remove handles dirs too
             join: (base, name) => path.posix.join(base, name), // Logic uses posix paths internally for recursion
-            close: async () => {}
+            close: async () => { }
         };
     } else if (config.type === 'smb') {
-        // Disable autoClose for transfer to avoid connection drops
-        // Limit packetConcurrency to avoid STATUS_INSUFFICIENT_RESOURCES
-        // autoCloseTimeout: 0 prevents the client from closing the connection while a stream is still active
-        const client = getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 5 });
+        // For SMB, we need a primary client for non-streaming operations (stat, readdir, mkdir, unlink)
+        // and a set of clients for TurboSMBReadStream.
+        const primaryClient = getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 512, tag: 'primary' });
         const toSMB = toSMBPath;
+
+        const lanes = [];
+        for (let i = 1; i <= 3; i++) { // V9.20: Reversion to 3-Lanes for hardware limit compatibility
+            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `lane${i}` }));
+        }
+
         return {
-            stat: async (p) => executeSMBCommand(client, () => client.stat(toSMB(p))),
-            readdir: async (p) => executeSMBCommand(client, () => client.readdir(toSMB(p))),
-            mkdir: async (p) => executeSMBCommand(client, () => client.mkdir(toSMB(p))),
-            createReadStream: async (p) => executeSMBCommand(client, () => client.createReadStream(toSMB(p))),
-            createWriteStream: async (p) => executeSMBCommand(client, () => client.createWriteStream(toSMB(p))),
+            stat: async (p) => executeSMBCommand(primaryClient, () => primaryClient.stat(toSMB(p))),
+            readdir: async (p) => executeSMBCommand(primaryClient, () => primaryClient.readdir(toSMB(p))),
+            mkdir: async (p) => executeSMBCommand(primaryClient, () => primaryClient.mkdir(toSMB(p))),
+            createReadStream: async (p) => {
+                const smbP = toSMB(p);
+                const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbP));
+                // V9.20 Katana-Drive: 1MB chunks, 3-Lanes, ACC Locked to 1.2s-2.5s RTT
+                return new TurboSMBReadStream(lanes, smbP, stats.size, { chunkSize: 1024 * 1024 });
+            },
+            createWriteStream: async (p) => executeSMBCommand(primaryClient, () => primaryClient.createWriteStreamP(toSMB(p))),
             unlink: async (p) => {
                 const smbP = toSMB(p);
-                const stats = await executeSMBCommand(client, () => client.stat(smbP));
-                if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbP, config);
-                else await executeSMBCommand(client, () => client.unlink(smbP));
+                const stats = await executeSMBCommand(primaryClient, () => primaryClient.stat(smbP));
+                if (stats.isDirectory()) await rmDirRecursiveSMB(primaryClient, smbP, config);
+                else await executeSMBCommand(primaryClient, () => primaryClient.unlink(smbP));
             },
             join: (base, name) => path.posix.join(base, name),
-            close: async () => client.disconnect()
+            close: async () => {
+                try { await primaryClient.disconnect(); } catch (e) { }
+                for (const lane of lanes) {
+                    try { lane.disconnect(); } catch (e) { } // Sync call usually
+                }
+            }
         };
     } else {
         const client = getWebDAVClient(config);
@@ -1591,7 +1904,7 @@ const getFSAdapter = (config) => {
             },
             unlink: async (p) => client.deleteFile(toWebDAV(p)),
             join: (base, name) => path.posix.join(base, name),
-            close: async () => {}
+            close: async () => { }
         };
     }
 };
@@ -1599,11 +1912,11 @@ const getFSAdapter = (config) => {
 // Recursive Transfer Function
 const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, overwrite = false, taskId = null) => {
     const stats = await srcAdapter.stat(srcPath);
-    
+
     if (stats.isDirectory()) {
         // Create Dest Dir
         try { await dstAdapter.mkdir(dstPath); } catch (e) { /* ignore exist error */ }
-        
+
         // List Children
         const children = await srcAdapter.readdir(srcPath);
         for (const childName of children) {
@@ -1645,7 +1958,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                         }
                     });
                 }
-                
+
                 await pipeline(readStream, progressStream, writeStream);
             } catch (err) {
                 if (readStream) readStream.destroy();
@@ -1666,7 +1979,7 @@ const transferItemRecursive = async (srcAdapter, dstAdapter, srcPath, dstPath, o
                 } else if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
                     // Stream destroyed (likely via cancel)
                     console.log(`[Transfer] Cancelled, cleaning up: ${dstPath}`);
-                    try { await dstAdapter.unlink(dstPath); } catch(cleanupErr) { console.warn('[Transfer] Cleanup failed:', cleanupErr.message); }
+                    try { await dstAdapter.unlink(dstPath); } catch (cleanupErr) { console.warn('[Transfer] Cleanup failed:', cleanupErr.message); }
 
                     const cancelErr = new Error('Transfer Cancelled');
                     cancelErr.code = 'CANCELLED';
@@ -1700,18 +2013,18 @@ app.post('/api/transfer', async (req, res) => {
         for (const itemPath of items) {
             const fileName = path.basename(itemPath);
             const targetPath = path.posix.join(destPath, fileName);
-            
+
             try {
                 await transferItemRecursive(srcAdapter, dstAdapter, itemPath, targetPath, overwrite, taskId);
-                
+
                 // If Move, delete source after successful transfer
                 if (move) {
                     await srcAdapter.unlink(itemPath);
                 }
             } catch (e) {
                 if (e.code === 'EXIST') {
-                     console.log(`[Transfer Info] Target exists, returning 409 for: ${targetPath}`);
-                     return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                    console.log(`[Transfer Info] Target exists, returning 409 for: ${targetPath}`);
+                    return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
                 }
                 if (e.code === 'CANCELLED' || e.message === 'Transfer Cancelled') {
                     console.log(`[Transfer Info] Transfer cancelled: ${itemPath} -> ${targetPath}`);
@@ -1719,7 +2032,7 @@ app.post('/api/transfer', async (req, res) => {
                     console.error(`[Transfer Failed] ${itemPath} -> ${targetPath}:`, e);
                 }
                 if (e.response && (e.response.status === 412 || e.response.status === 409)) {
-                     return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                    return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
                 }
                 throw e; // Stop batch on error
             }
@@ -1727,12 +2040,12 @@ app.post('/api/transfer', async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         if (!res.headersSent) {
-             if (err.code === 'EXIST') return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
-             if (err.code === 'CANCELLED' || err.message === 'Transfer Cancelled') {
-                 return res.json({ success: false, error: 'Cancelled' });
-             }
-             console.error('[Transfer Error]', err);
-             res.status(500).json({ error: err.message });
+            if (err.code === 'EXIST') return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+            if (err.code === 'CANCELLED' || err.message === 'Transfer Cancelled') {
+                return res.json({ success: false, error: 'Cancelled' });
+            }
+            console.error('[Transfer Error]', err);
+            res.status(500).json({ error: err.message });
         }
     } finally {
         if (srcAdapter && srcAdapter.close) await srcAdapter.close();
@@ -1756,7 +2069,7 @@ app.post('/api/rename', async (req, res) => {
             const absNew = path.join(absDir, newName); // Same dir, new name
 
             if (!overwrite && await fs.pathExists(absNew)) {
-                 return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
             }
 
             console.log(`[Rename] ${absOld} -> ${absNew}`);
@@ -1772,7 +2085,7 @@ app.post('/api/rename', async (req, res) => {
             // Retry loop for Rename (Handling SHARING_VIOLATION)
             let renameAttempts = 0;
             const maxRenameAttempts = 3;
-            
+
             while (renameAttempts < maxRenameAttempts) {
                 try {
                     await executeSMBCommand(client, () => client.rename(smbOld, smbNew));
@@ -1780,12 +2093,12 @@ app.post('/api/rename', async (req, res) => {
                 } catch (e) {
                     // Handle Sharing Violation or Access Denied (File in use/Locked)
                     if ((e.code === 'STATUS_SHARING_VIOLATION' || e.code === 'STATUS_ACCESS_DENIED') && renameAttempts < maxRenameAttempts - 1) {
-                         console.warn(`[Rename] Locked (${e.code}). Retrying... (${renameAttempts + 1}/${maxRenameAttempts})`);
-                         clearSMBSession(config); // Clear locks
-                         await new Promise(r => setTimeout(r, 500));
-                         client = getSMBClient(config); // Get fresh client
-                         renameAttempts++;
-                         continue;
+                        console.warn(`[Rename] Locked (${e.code}). Retrying... (${renameAttempts + 1}/${maxRenameAttempts})`);
+                        clearSMBSession(config); // Clear locks
+                        await new Promise(r => setTimeout(r, 500));
+                        client = getSMBClient(config); // Get fresh client
+                        renameAttempts++;
+                        continue;
                     }
 
                     if (e.code === 'STATUS_OBJECT_NAME_COLLISION') {
@@ -1795,21 +2108,21 @@ app.post('/api/rename', async (req, res) => {
                                 // Clear session before delete to avoid self-lock
                                 clearSMBSession(config);
                                 client = getSMBClient(config); // Get fresh client
-                                
+
                                 const stats = await executeSMBCommand(client, () => client.stat(smbNew));
                                 if (stats.isDirectory()) await rmDirRecursiveSMB(client, smbNew, config);
                                 else await executeSMBCommand(client, () => client.unlink(smbNew));
-                                
+
                                 // Reset attempt counter to allow retry of rename after successful delete
                                 // But prevent infinite loop if delete succeeds but rename fails repeatedly
                                 // Actually, just let the next loop iteration handle the rename.
                                 // We don't increment renameAttempts here to give it a fair shot?
                                 // Let's just continue loop.
-                                continue; 
-                            } catch (retryErr) { 
+                                continue;
+                            } catch (retryErr) {
                                 // If delete failed with Sharing Violation, we might want to retry the whole outer loop?
                                 // For simplicity, throw here if delete fails.
-                                throw retryErr; 
+                                throw retryErr;
                             }
                         } else {
                             return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
@@ -1824,16 +2137,16 @@ app.post('/api/rename', async (req, res) => {
             // WebDAV Rename
             const client = getWebDAVClient(config);
             const cleanOldPath = oldPath.replace(/^\/+/, '');
-            
+
             const parentDir = path.dirname(cleanOldPath);
             const safeParentDir = parentDir.split(path.sep).join('/');
             const newPath = path.posix.join(safeParentDir, newName);
-            
+
             try {
                 await client.moveFile(cleanOldPath, newPath, { headers: { 'Overwrite': overwrite ? 'T' : 'F' } });
             } catch (e) {
                 if (e.response && (e.response.status === 412 || e.response.status === 409)) {
-                     return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
+                    return res.status(409).json({ error: 'File already exists', code: 'EXIST' });
                 }
                 throw e;
             }
@@ -1849,7 +2162,7 @@ app.post('/api/rename', async (req, res) => {
 app.post('/api/prepare-drag', async (req, res) => {
     try {
         const { items, drive: driveId = 'local' } = req.body;
-        
+
         if (!items || items.length === 0) return res.json({ files: [] });
 
         const config = await getDriveConfig(driveId);
@@ -1870,16 +2183,16 @@ app.post('/api/prepare-drag', async (req, res) => {
                 try {
                     const fileName = path.basename(itemPath);
                     const tempFilePath = path.join(tempDir, fileName);
-                    
+
                     if (config.type === 'smb') {
                         const client = getSMBClient(config, { tag: 'preview' });
                         const readStream = await executeSMBCommand(client, () => client.createReadStream(toSMBPath(itemPath)));
                         const writeStream = fs.createWriteStream(tempFilePath);
                         await pipeline(readStream, writeStream);
                     } else {
-                         const client = getWebDAVClient(config);
-                         const content = await client.getFileContents(itemPath, { format: 'binary' });
-                         await fs.writeFile(tempFilePath, content);
+                        const client = getWebDAVClient(config);
+                        const content = await client.getFileContents(itemPath, { format: 'binary' });
+                        await fs.writeFile(tempFilePath, content);
                     }
                     return tempFilePath;
                 } catch (e) {
@@ -1901,7 +2214,7 @@ app.post('/api/prepare-drag', async (req, res) => {
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const { path: reqPath = '/', drive: driveId = 'local' } = req.query;
-        
+
         try {
             if (driveId === 'local') {
                 const absPath = resolveSafePath(reqPath);
@@ -1909,7 +2222,7 @@ const storage = multer.diskStorage({
                 cb(null, absPath);
             } else {
                 const tempDir = os.tmpdir();
-                cb(null, tempDir); 
+                cb(null, tempDir);
             }
         } catch (e) {
             cb(e);
@@ -1922,7 +2235,7 @@ const storage = multer.diskStorage({
     }
 });
 
-const upload = multer({ 
+const upload = multer({
     storage,
     limits: { fileSize: 10 * 1024 * 1024 * 1024 } // 10GB limit example
 });
@@ -1937,16 +2250,16 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
         const config = await getDriveConfig(driveId);
 
         if (config.type !== 'local') {
-            
+
             for (const file of uploadedFiles) {
                 try {
                     const remotePath = path.posix.join('/', reqPath, file.filename);
                     console.log(`[Upload] Transferring to ${config.type}: ${file.filename}`);
-                    
+
                     if (config.type === 'smb') {
                         // Use autoCloseTimeout: 0 to prevent STATUS_FILE_CLOSED during upload
                         const client = getSMBClient(config, { autoCloseTimeout: 0 });
-                        
+
                         const performUpload = async (retry = false) => {
                             const readStream = fs.createReadStream(file.path);
                             const progressStream = createProgressStream(queryTaskId, file.size);
@@ -1967,7 +2280,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                             try {
                                 const smbPath = toSMBPath(remotePath);
                                 writeStream = await client.createWriteStream(smbPath);
-                                
+
                                 // Check if cancelled during await
                                 if (readStream.destroyed || progressStream.destroyed) {
                                     if (writeStream) writeStream.destroy();
@@ -2001,7 +2314,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                                     try {
                                         clearSMBSession(config);
                                         const smbPath = toSMBPath(remotePath);
-                                        
+
                                         // Retry unlink logic for SHARING_VIOLATION
                                         let unlinkAttempts = 0;
                                         while (unlinkAttempts < 3) {
@@ -2010,7 +2323,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                                                 break;
                                             } catch (unlinkErr) {
                                                 if (unlinkErr.code === 'STATUS_SHARING_VIOLATION' && unlinkAttempts < 2) {
-                                                    console.warn(`[Upload] Sharing Violation on Unlink. Retrying in 500ms... (${unlinkAttempts+1}/3)`);
+                                                    console.warn(`[Upload] Sharing Violation on Unlink. Retrying in 500ms... (${unlinkAttempts + 1}/3)`);
                                                     await new Promise(r => setTimeout(r, 500));
                                                     unlinkAttempts++;
                                                 } else {
@@ -2021,7 +2334,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
 
                                         await performUpload(true); // Retry once
                                     } catch (retryErr) {
-                                        throw retryErr; 
+                                        throw retryErr;
                                     }
                                 } else if (err.message && (err.message.includes('STATUS_FILE_CLOSED') || err.code === 'STATUS_FILE_CLOSED')) {
                                     // console.warn(`[Upload Warn] STATUS_FILE_CLOSED (benign) for ${remotePath}. Ignoring.`);
@@ -2038,13 +2351,13 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                         }
 
                     } else {
-                         const client = getWebDAVClient(config);
-                         // WebDAV usually overwrites by default or we can set header. 
-                         // Check if we need Overwrite header. Default for putFileContents is usually overwrite.
-                         const readStream = fs.createReadStream(file.path);
-                         const progressStream = createProgressStream(queryTaskId, file.size);
-                         
-                         if (queryTaskId) {
+                        const client = getWebDAVClient(config);
+                        // WebDAV usually overwrites by default or we can set header. 
+                        // Check if we need Overwrite header. Default for putFileContents is usually overwrite.
+                        const readStream = fs.createReadStream(file.path);
+                        const progressStream = createProgressStream(queryTaskId, file.size);
+
+                        if (queryTaskId) {
                             activeTasks.set(queryTaskId, {
                                 cancel: () => {
                                     if (readStream) readStream.destroy();
@@ -2052,35 +2365,35 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                                 }
                             });
                         }
-                        
-                         try {
-                             // webdav-client putFileContents usually overwrites.
-                             // To be safe we could add options but let's stick to default which works for most.
-                             await client.putFileContents(remotePath, progressStream, { overwrite: shouldOverwrite });
-                         } catch (err) {
-                             if (readStream.destroyed || progressStream.destroyed) {
-                                 throw new Error('Upload Cancelled');
-                             }
-                             throw err;
-                         }
+
+                        try {
+                            // webdav-client putFileContents usually overwrites.
+                            // To be safe we could add options but let's stick to default which works for most.
+                            await client.putFileContents(remotePath, progressStream, { overwrite: shouldOverwrite });
+                        } catch (err) {
+                            if (readStream.destroyed || progressStream.destroyed) {
+                                throw new Error('Upload Cancelled');
+                            }
+                            throw err;
+                        }
                     }
                     console.log(`[Upload] Success: ${remotePath}`);
                 } catch (e) {
                     if (e.message === 'Upload Cancelled') {
                         console.log(`[Upload] Cancelled, cleaning up: ${remotePath}`);
                         try {
-                             if (config.type === 'smb') {
-                                 const client = getSMBClient(config);
-                                 const smbPath = toSMBPath(remotePath);
-                                 await executeSMBCommand(client, () => client.unlink(smbPath));
-                             } else {
-                                 const client = getWebDAVClient(config);
-                                 await client.deleteFile(remotePath);
-                             }
-                        } catch(cleanupErr) { console.warn('[Upload] Cleanup failed:', cleanupErr.message); }
+                            if (config.type === 'smb') {
+                                const client = getSMBClient(config);
+                                const smbPath = toSMBPath(remotePath);
+                                await executeSMBCommand(client, () => client.unlink(smbPath));
+                            } else {
+                                const client = getWebDAVClient(config);
+                                await client.deleteFile(remotePath);
+                            }
+                        } catch (cleanupErr) { console.warn('[Upload] Cleanup failed:', cleanupErr.message); }
                     } else {
                         console.error(`[Upload] Failed to upload ${file.filename}:`, e);
-                        throw e; 
+                        throw e;
                     }
                 } finally {
                     if (queryTaskId) activeTasks.delete(queryTaskId);
@@ -2088,7 +2401,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
                 }
             }
         } else {
-             console.log('[Upload] Local files saved directly via Multer.');
+            console.log('[Upload] Local files saved directly via Multer.');
         }
         res.json({ success: true });
     } catch (err) {
@@ -2098,7 +2411,7 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
         console.error('[Upload API Error]', err);
         if (uploadedFiles.length > 0 && driveId !== 'local') {
             for (const file of uploadedFiles) {
-                await fs.remove(file.path).catch(() => {});
+                await fs.remove(file.path).catch(() => { });
             }
         }
         res.status(500).json({ error: err.message });
@@ -2114,7 +2427,7 @@ const server = new webdavServer.WebDAVServer({
     httpAuthentication: new webdavServer.HTTPDigestAuthentication(userManager, 'Default Realm'),
     privilegeManager: privilegeManager
 });
-server.setFileSystem('/', new webdavServer.PhysicalFileSystem(STORAGE_DIR), (s) => {});
+server.setFileSystem('/', new webdavServer.PhysicalFileSystem(STORAGE_DIR), (s) => { });
 app.use(webdavServer.extensions.express('/webdav', server));
 
 // Serve static files from React app (for production/electron)
@@ -2124,7 +2437,7 @@ console.log(`[Server] Checking Client Build Path: ${CLIENT_BUILD_PATH}`);
 if (fs.existsSync(CLIENT_BUILD_PATH)) {
     console.log('[Server] Client Build found. Serving static files.');
     app.use(express.static(CLIENT_BUILD_PATH));
-    
+
     // Handle SPA routing: return index.html for any unknown non-API routes
     app.get('*', (req, res, next) => {
         if (req.path.startsWith('/api') || req.path.startsWith('/webdav')) {

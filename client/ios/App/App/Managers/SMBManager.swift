@@ -61,6 +61,50 @@ class SMBManager: NSObject {
         }
     }
     
+    // MARK: - Performance Tracking (EMA)
+    
+    private var lastBytes: [String: Int64] = [:]
+    private var lastUpdate: [String: Date] = [:]
+    private var smoothedSpeed: [String: Double] = [:]
+    
+    /// Notify progress back to JS with EMA smoothing
+    private func notifyProgress(for call: CAPPluginCall, downloaded: Int64, total: Int64) {
+        let callbackId = call.getString("id") ?? "smb_download"
+        let now = Date()
+        
+        let lastTime = lastUpdate[callbackId] ?? now.addingTimeInterval(-1)
+        let lastB = lastBytes[callbackId] ?? 0
+        let dt = now.timeIntervalSince(lastTime)
+        
+        // Update at most once per 500ms to JS, but sample as much as possible
+        if dt >= 0.8 {
+            let diffBytes = downloaded - lastB
+            let instantSpeed = Double(diffBytes) / dt
+            
+            // EMA: 30% instant + 70% history
+            var currentSmoothed = smoothedSpeed[callbackId] ?? instantSpeed
+            currentSmoothed = (currentSmoothed * 0.7) + (instantSpeed * 0.3)
+            
+            smoothedSpeed[callbackId] = currentSmoothed
+            lastBytes[callbackId] = downloaded
+            lastUpdate[callbackId] = now
+            
+            let data: [String: Any] = [
+                "downloaded": downloaded,
+                "total": total,
+                "speed": Int64(currentSmoothed),
+                "id": callbackId
+            ]
+            
+            // Note: Plugin should be the one notifying. 
+            // We can notify via NotificationCenter or passing a delegate.
+            // For simplicity in this bridge, we'll use a globally accessible way or 
+            // expect the caller to handle notifications if we change signature.
+            // But CAPPlugin has its own notification system.
+            NotificationCenter.default.post(name: NSNotification.Name("WebDavProgress"), object: nil, userInfo: data)
+        }
+    }
+    
     // MARK: - Public Methods
     
     /// Connect (test connection only)
@@ -198,14 +242,21 @@ class SMBManager: NSObject {
         let resolvedDest = resolveLocalPath(destPath)
         let localURL = URL(fileURLWithPath: resolvedDest)
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let callbackId = call.getString("id") ?? "smb_download"
         
         print("\(TAG) Download: remote=\(cleanPath), local=\(resolvedDest)")
+        
+        // Reset performance tracking for this ID
+        lastBytes[callbackId] = 0
+        lastUpdate[callbackId] = Date()
+        smoothedSpeed[callbackId] = 0
         
         // Ensure parent directory exists
         let parent = localURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         
-        let progressHandler: @Sendable (Int64, Int64) -> Bool = { bytes, total in
+        let progressHandler: @Sendable (Int64, Int64) -> Bool = { [weak self] bytes, total in
+            self?.notifyProgress(for: call, downloaded: bytes, total: total)
             return true
         }
         
@@ -214,6 +265,18 @@ class SMBManager: NSObject {
                 do {
                     try await client.downloadItem(atPath: cleanPath, to: localURL, progress: progressHandler)
                     print("\(self.TAG) Download complete: \(resolvedDest)")
+                    
+                    // Final 100% notification
+                    let finalData: [String: Any] = [
+                        "downloaded": -1, // Use -1 as signal for 100% if total unknown, or real value
+                        "id": callbackId
+                    ]
+                    NotificationCenter.default.post(name: NSNotification.Name("WebDavProgress"), object: nil, userInfo: finalData)
+                    
+                    self.lastBytes.removeValue(forKey: callbackId)
+                    self.lastUpdate.removeValue(forKey: callbackId)
+                    self.smoothedSpeed.removeValue(forKey: callbackId)
+                    
                     call.resolve()
                 } catch {
                     print("\(self.TAG) Download failed: \(error)")
@@ -241,6 +304,8 @@ class SMBManager: NSObject {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         let overwrite = call.getBool("overwrite") ?? false
         
+        let callbackId = call.getString("id") ?? "smb_upload"
+        
         print("\(TAG) Upload: local=\(resolvedSource), remote=\(cleanPath)")
         
         guard FileManager.default.fileExists(atPath: resolvedSource) else {
@@ -248,7 +313,16 @@ class SMBManager: NSObject {
             return
         }
         
-        let progressHandler: @Sendable (Int64) -> Bool = { bytes in
+        // Reset performance tracking for upload
+        lastBytes[callbackId] = 0
+        lastUpdate[callbackId] = Date()
+        smoothedSpeed[callbackId] = 0
+        
+        let progressHandler: @Sendable (Int64) -> Bool = { [weak self] bytes in
+            // For upload, AMSMB2 usually gives total bytes sent so far
+            // We'll treat total as unknown or pass file size if available
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: resolvedSource)[.size] as? Int64) ?? 0
+            self?.notifyProgress(for: call, downloaded: bytes, total: fileSize)
             return true
         }
         
@@ -260,6 +334,18 @@ class SMBManager: NSObject {
                     }
                     try await client.uploadItem(at: localURL, toPath: cleanPath, progress: progressHandler)
                     print("\(self.TAG) Upload complete: \(cleanPath)")
+                    
+                    // Final cleanup and 100% signal
+                    let finalData: [String: Any] = [
+                        "downloaded": -1,
+                        "id": callbackId
+                    ]
+                    NotificationCenter.default.post(name: NSNotification.Name("WebDavProgress"), object: nil, userInfo: finalData)
+                    
+                    self.lastBytes.removeValue(forKey: callbackId)
+                    self.lastUpdate.removeValue(forKey: callbackId)
+                    self.smoothedSpeed.removeValue(forKey: callbackId)
+                    
                     call.resolve()
                 } catch {
                     print("\(self.TAG) Upload failed: \(error)")

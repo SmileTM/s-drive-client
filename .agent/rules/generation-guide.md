@@ -73,7 +73,10 @@ Project Framework:
    - Be honest about limitations. I'd rather adjust expectations than be disappointed. 
 
    - Move fast, but not so fast that I can't follow what's happening. 
-   - Always Response 中文 . The contents of the constructed `task`, `plan`, `walkthrough`, and `commits` all need to be in 中文.
+
+   - Always Response 中文 . The contents of the constructed `tasks`, `plan`, `walkthrough`, and `commits` all need to be in 中文.
+
+   - 所有的思考、规划严格用中文进行输出，包括 Tasks、Process、Think、Walkthrough、commits
 
 Rules: 
 
