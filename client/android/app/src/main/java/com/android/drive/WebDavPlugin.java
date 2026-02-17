@@ -280,22 +280,27 @@ public class WebDavPlugin extends Plugin {
     private CIFSContext getCifsContext(String username, String password, String domain) {
         synchronized (contextLock) {
             if (tunedContext == null) {
-            // [PERF] Extreme performance tuning (V2) - Target 30MB/s+
-            java.util.Properties prop = new java.util.Properties();
-            prop.put("jcifs.smb.client.rcv_buf_size", "8388608"); // 8MB
-            prop.put("jcifs.smb.client.snd_buf_size", "8388608"); // 8MB
-            prop.put("jcifs.smb.client.maximumBufferSize", "8388608"); // 8MB
-            prop.put("jcifs.smb.client.transactionSize", "8388608"); // 8MB
-            prop.put("jcifs.smb.client.useLargeReadWrite", "true");
-            prop.put("jcifs.smb.client.maxMpxCount", "256"); // Extreme concurrency
-            prop.put("jcifs.smb.client.signingPreferred", "false"); // Critical: Disable signing for speed
-            prop.put("jcifs.smb.client.signingEnforced", "false");
-            prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
-            prop.put("jcifs.smb.client.useSessKeepalive", "true");
-            prop.put("jcifs.smb.client.dfs.disabled", "true");
-            prop.put("jcifs.smb.client.useBatching", "true");
-            // Disable native resolve for speed consistency
-            prop.put("jcifs.resolveOrder", "DNS");
+            // [PERF] Extreme performance tuning (V3) - Protocol Level
+        java.util.Properties prop = new java.util.Properties();
+        prop.put("jcifs.smb.client.minVersion", "SMB202");
+        prop.put("jcifs.smb.client.maxVersion", "SMB311");
+        prop.put("jcifs.smb.client.readSize", "1048576"); // 1MB Read Size
+        prop.put("jcifs.smb.client.writeSize", "1048576"); // 1MB Write Size
+        prop.put("jcifs.smb.client.rcv_buf_size", "8388608"); // 8MB
+        prop.put("jcifs.smb.client.snd_buf_size", "8388608"); // 8MB
+        prop.put("jcifs.smb.client.maximumBufferSize", "8388608"); // 8MB
+        prop.put("jcifs.smb.client.transactionSize", "8388608"); // 8MB
+        prop.put("jcifs.smb.client.useLargeReadWrite", "true");
+        prop.put("jcifs.smb.client.maxMpxCount", "256");
+        prop.put("jcifs.smb.client.signingPreferred", "false");
+        prop.put("jcifs.smb.client.signingEnforced", "false");
+        prop.put("jcifs.smb.client.ipcSigningEnforced", "false");
+        prop.put("jcifs.smb.client.tcpNoDelay", "true");
+        prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
+        prop.put("jcifs.smb.client.useSessKeepalive", "true");
+        prop.put("jcifs.smb.client.dfs.disabled", "true");
+        prop.put("jcifs.smb.client.useBatching", "true");
+        prop.put("jcifs.resolveOrder", "DNS");
                 
                 try {
                     PropertyConfiguration config = new PropertyConfiguration(prop);
@@ -911,7 +916,7 @@ public class WebDavPlugin extends Plugin {
                      if (in == null) throw new IOException("Failed to open input stream");
                      
                      try (java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(smbFile.getOutputStream(), 2097152)) {
-                        byte[] buffer = new byte[1048576]; // [PERF] Use 1MB buffer
+                        byte[] buffer = new byte[8388608]; // [PERF] 8MB buffer
                         int read;
                         
                         // Initial notification update
