@@ -278,7 +278,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.23] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.24] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -1130,14 +1130,12 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.23 Streaming Hyper-Drive (Safe-Mode + Jitter)
-            const streamId = 'str_' + Date.now().toString(36).slice(-5);
-            // Slight jitter to prevent thundering herd on server during rapid seek
-            await new Promise(r => setTimeout(r, Math.floor(Math.random() * 150) + 50));
+            // V9.24 Streaming Hyper-Drive (Persistent-Lane Multiplexing)
+            const streamId = 'hyper_turbo_stream_lane';
 
             const lanes = [];
             // Reduced to 1 lane for maximum stability during seek
-            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: `${streamId}_lane1` }));
+            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: streamId }));
 
             const primaryClient = lanes[0];
 
@@ -1192,9 +1190,8 @@ app.get('/api/raw', async (req, res) => {
 
                 res.on('close', () => {
                     if (!stream.finished) {
-                        stream.destroy(); // Instant cleanup
-                        // V9.23: Aggressive lane purging
-                        setTimeout(() => clearSMBByTag(streamId), 50);
+                        stream.destroy(); // Only close FILE HANDLE. Keep TCP session alive.
+                        // V9.24: REMOVED lane purging. Reusing connection is the key to stability.
                     }
                 });
             } catch (e) {
