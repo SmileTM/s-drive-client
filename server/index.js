@@ -150,7 +150,7 @@ class TurboSMBReadStream extends Readable {
             for (let i = 0; i < this.clients.length; i++) {
                 if (this.destroyed_flag) break;
                 const handle = await executeSMBCommand(this.clients[i], () => {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [SMB_OPEN] ${path.basename(this.smbPath)}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [SMB_OPEN] ${path.basename(this.smbPath)}`);
                     return this.clients[i].openP(this.smbPath, 'r');
                 }, 20000);
                 results.push(handle);
@@ -275,7 +275,7 @@ class TurboSMBReadStream extends Readable {
 
         try {
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V9.31] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
+                console.log(`[TURBO][V9.32] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
             }
             const buf = Buffer.allocUnsafe(size);
             this.inFlightCount++; // TRACK IO
@@ -291,7 +291,7 @@ class TurboSMBReadStream extends Readable {
             this.chunkCount++;
 
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V9.31] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
+                console.log(`[TURBO][V9.32] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
             }
 
             // V9.31 Katana ACC Engine
@@ -615,6 +615,8 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
             console.log(`[SMB Retry] Error (${err.code || err.message}), reconnecting...`);
             // Force disconnect/reset state
             try { client.disconnect(); } catch (e) { }
+            // V9.32: 400ms Backoff before retry to let server recover its TCP stack
+            await new Promise(r => setTimeout(r, 400));
             // Retry once
             try {
                 await ensureSMBConnected(client);
@@ -1185,12 +1187,14 @@ app.get('/api/raw', async (req, res) => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
                 console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Forced Shutdown & Preemption: Zero Directive Overlap
+                // 1. Forced Shutdown & Session Purge (V9.32 The Absolute Zero)
                 if (lastPreviewStream && !lastPreviewStream.destroyed) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [SINGLE_IGNITION] Draining previous stream IO...`);
-                    await lastPreviewStream.shutdown(); // V9.31: Await full drain
-                    // Heavy 600ms Gap after physical handle close
-                    await new Promise(r => setTimeout(r, 600));
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [SINGLE_IGNITION] Purging previous session...`);
+                    await lastPreviewStream.shutdown();
+                    // V9.32: Physical kill of the TCP session to ensure a clean slate
+                    clearSMBByTag('streaming');
+                    // Massive 1000ms Gap to allow the router to completely clear handles/socket tables
+                    await new Promise(r => setTimeout(r, 1000));
                 }
 
                 // 2. Persistent Client Retrieval (Ghost-Protocol v2.1)
@@ -1264,13 +1268,13 @@ app.get('/api/raw', async (req, res) => {
                         }
                     });
                 } catch (e) {
-                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
-                    // V9.31: Setup fail is a CRITICAL state, likely session lost. Force clear cache.
+                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    // V9.32: Critical session recovery
                     clearSMBByTag('streaming');
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
