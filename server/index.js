@@ -150,7 +150,7 @@ class TurboSMBReadStream extends Readable {
             for (let i = 0; i < this.clients.length; i++) {
                 if (this.destroyed_flag) break;
                 const handle = await executeSMBCommand(this.clients[i], () => {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SMB_OPEN] ${path.basename(this.smbPath)}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SMB_OPEN] ${path.basename(this.smbPath)}`);
                     return this.clients[i].openP(this.smbPath, 'r');
                 }, 20000);
                 results.push(handle);
@@ -168,7 +168,7 @@ class TurboSMBReadStream extends Readable {
         if (this.destroyed_flag && this.inFlightCount === 0) return; // Already clean
         this.destroyed_flag = true;
         const shutdownId = Math.random().toString(36).slice(-4);
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
 
         // 1. Wait for mid-air IO packets to land (Max 2s timeout)
         const timeout = Date.now() + 2000;
@@ -180,7 +180,7 @@ class TurboSMBReadStream extends Readable {
 
         // 2. Physical Clean up
         await this._physicalCleanup();
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SHUTDOWN_OK] ${shutdownId}`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SHUTDOWN_OK] ${shutdownId}`);
     }
 
     async _physicalCleanup() {
@@ -189,8 +189,8 @@ class TurboSMBReadStream extends Readable {
             const closePromises = this.fileHandles.map((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SMB_CLOSE] Handle ${handle}`);
-                    return executeSMBCommand(client, () => client.close(handle)).catch(() => { });
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SMB_CLOSE] Handle ${handle}`);
+                    return executeSMBCommand(client, () => client.closeP(handle)).catch(() => { });
                 }
             });
             await Promise.all(closePromises);
@@ -384,8 +384,8 @@ class TurboSMBReadStream extends Readable {
             this.fileHandles.forEach((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
-                    executeSMBCommand(client, () => client.close(handle))
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
+                    executeSMBCommand(client, () => client.closeP(handle))
                         .catch(e => console.warn(`[SMB Turbo] Failed to close handle:`, e.message));
                 }
             });
@@ -566,14 +566,23 @@ const ensureSMBConnected = async (client) => {
             console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [HANDSHAKE_OK]`);
             // Probe logs silenced
         } catch (e) {
-            // If server responds with STATUS_ error, it's alive and authenticated.
-            const isAlive = e.code === 'EISCONN' || (e.code && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
+            // V9.36: Be much stricter about "Alive" signals. 
+            // Fatal SMB errors indicate the session is dead.
+            const isFatal = e.code && (
+                e.code.includes('DELETED') ||
+                e.code.includes('RESET') ||
+                e.code.includes('EXPIRED') ||
+                e.code.includes('CLOSED')
+            );
+
+            const isAlive = (e.code === 'EISCONN') || (e.code && !isFatal && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
+
             if (isAlive) {
-                // Probe logs silenced
                 client.connected = true;
                 return;
             }
-            console.warn(`[SMB][PROBE] Warn: ${e.code || e.message}`);
+            console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [HANDSHAKE_FAIL] ${e.code || e.message}`);
+            throw e; // Force retry logic to hard reset if probe fails
         }
     })();
 
@@ -1192,27 +1201,26 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Unconditional Shutdown & Session Purge (V9.34 The Deep Space)
+                // 1. Unconditional Shutdown & Session Purge (V9.36 The Singularity)
                 if (lastPreviewStream) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SINGLE_IGNITION] Cooling down previous state...`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SINGLE_IGNITION] Cooling down previous state...`);
 
                     let drainSuccess = true;
                     await lastPreviewStream.shutdown().catch(e => {
-                        console.error('[TURBO][V9.35] Shutdown catch:', e.message);
+                        console.error('[TURBO][V9.36] Shutdown catch:', e.message);
                         drainSuccess = false;
                     });
 
-                    // V9.35: Meltdown detection
+                    // V9.36: Meltdown detection
                     if (lastPreviewStream.inFlightCount > 0) {
-                        console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [MELTDOWN] IO Drainage Failed (Left: ${lastPreviewStream.inFlightCount}). Hard Purge & 2.5s Sleep.`);
+                        console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [MELTDOWN] IO Drainage Failed (Left: ${lastPreviewStream.inFlightCount}). Hard Purge & 3s Sleep.`);
                         clearSMBByTag('streaming');
-                        await new Promise(r => setTimeout(r, 2500));
+                        await new Promise(r => setTimeout(r, 3000));
                     } else {
-                        // V9.35 Neutrino Gap: Reuse session but wait longer (2000ms) to let router stabilize
-                        // We NO LONGER unconditional clear to avoid excessive handshakes
-                        await new Promise(r => setTimeout(r, 2000));
+                        // V9.36 Singularity Gap: 3000ms super-cooling period
+                        await new Promise(r => setTimeout(r, 3000));
                     }
                 }
 
@@ -1225,7 +1233,7 @@ app.get('/api/raw', async (req, res) => {
                     // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V9.35] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V9.36] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
                     }
@@ -1293,7 +1301,7 @@ app.get('/api/raw', async (req, res) => {
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
