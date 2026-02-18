@@ -101,13 +101,13 @@ const activeTasks = new Map(); // taskId -> { cancel: Function }
  */
 class TurboSMBReadStream extends Readable {
     constructor(clients, smbPath, fileSize, options = {}) {
-        const highWaterMark = 8 * 1024 * 1024; // V10.6: 8MB Micro-Buffer (Ultra-Brake)
+        const highWaterMark = 8 * 1024 * 1024; // V10.7: 8MB Micro-Buffer (Ultra-Brake)
         super({ highWaterMark });
         this.clients = Array.isArray(clients) ? clients : [clients]; // Multi-Lane Support
         this.smbPath = smbPath;
         this.fileSize = fileSize;
         this.chunkSize = options.chunkSize || 1024 * 1024; // 1MB Accurate Chunks
-        this.concurrency = 1; // V10.6: The Infinity Link (Single Lane Strict)
+        this.concurrency = 1; // V10.7: The Infinity Link (Single Lane Strict)
         this.clientIndex = 0;
         this.startOffset = options.start || 0;
         this.endOffset = (options.end !== undefined) ? options.end : fileSize - 1;
@@ -120,7 +120,7 @@ class TurboSMBReadStream extends Readable {
         this.destroyed_flag = false;
         this.fileHandles = []; this.laneInFlight = []; // One handle per client (lane)
         this.opening = false;
-        this.currentConcurrency = 1; // V10.6: Single Lane
+        this.currentConcurrency = 1; // V10.7: Single Lane
         this.fetchedInCurrentCycle = 0;
 
         // Performance metrics (Real-time Delta)
@@ -129,7 +129,7 @@ class TurboSMBReadStream extends Readable {
         this.lastTotalFetched = 0;
         this.totalFetched = 0;
         this.chunkCount = 0;
-        this.inFlightCount = 0; // V10.6: Global IO Tracker
+        this.inFlightCount = 0; // V10.7: Global IO Tracker
     }
 
     async _read() {
@@ -150,7 +150,7 @@ class TurboSMBReadStream extends Readable {
             for (let i = 0; i < this.clients.length; i++) {
                 if (this.destroyed_flag) break;
                 const handle = await executeSMBCommand(this.clients[i], () => {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [SMB_OPEN] ${path.basename(this.smbPath)}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [SMB_OPEN] ${path.basename(this.smbPath)}`);
                     return this.clients[i].openP(this.smbPath, 'r');
                 }, 20000);
                 results.push(handle);
@@ -163,12 +163,12 @@ class TurboSMBReadStream extends Readable {
         }
     }
 
-    // V10.6: Graceful Shutdown (Wait for IO to drain)
+    // V10.7: Graceful Shutdown (Wait for IO to drain)
     async shutdown() {
         if (this.destroyed_flag && this.inFlightCount === 0) return; // Already clean
         this.destroyed_flag = true;
         const shutdownId = Math.random().toString(36).slice(-4);
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
 
         // 1. Wait for mid-air IO packets to land (Max 2s timeout)
         const timeout = Date.now() + 2000;
@@ -176,17 +176,17 @@ class TurboSMBReadStream extends Readable {
             await new Promise(r => setTimeout(r, 50));
         }
 
-        if (this.inFlightCount > 0) console.warn(`[TURBO][V10.6] [SHUTDOWN_WARN] Forced shutdown while ${this.inFlightCount} IOs still pending`);
+        if (this.inFlightCount > 0) console.warn(`[TURBO][V10.7] [SHUTDOWN_WARN] Forced shutdown while ${this.inFlightCount} IOs still pending`);
 
-        // 2. Logical Clean up Only (V10.6)
+        // 2. Logical Clean up Only (V10.7)
         await this._physicalCleanup();
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [SHUTDOWN_OK] ${shutdownId}`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [SHUTDOWN_OK] ${shutdownId}`);
     }
 
     _destroy(err, cb) {
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [STREAM_DESTROY] Self-destructing...`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [STREAM_DESTROY] Self-destructing...`);
         this.destroyed_flag = true;
-        this.bufferMap.clear(); // V10.6: Immediate Memory Dump
+        this.bufferMap.clear(); // V10.7: Immediate Memory Dump
         this._physicalCleanup().then(() => cb(err));
     }
 
@@ -196,7 +196,7 @@ class TurboSMBReadStream extends Readable {
             const closePromises = this.fileHandles.map((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [SMB_CLOSE] Handle ${handle}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [SMB_CLOSE] Handle ${handle}`);
                     return executeSMBCommand(client, () => client.closeP(handle)).catch(() => { });
                 }
             });
@@ -214,6 +214,8 @@ class TurboSMBReadStream extends Readable {
 
     async _pump() {
         if (this.finished || this.destroyed_flag || this.opening) return;
+        // V10.7: Double check for safety
+        if (this.destroyed) return;
 
         try {
             if (this.fileHandles.length === 0) {
@@ -281,14 +283,14 @@ class TurboSMBReadStream extends Readable {
         }
 
         try {
-            // V10.6: High Frequency Loop Break with logging
+            // V10.7: High Frequency Loop Break with logging
             if (this.destroyed_flag) {
-                // console.log(`[TURBO][V10.6] [IO_ABORT] Pre-IO abort at ${pos}`);
+                // console.log(`[TURBO][V10.7] [IO_ABORT] Pre-IO abort at ${pos}`);
                 return;
             }
 
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V10.6] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
+                console.log(`[TURBO][V10.7] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
             }
             const buf = Buffer.allocUnsafe(size);
             this.inFlightCount++; // TRACK IO
@@ -296,9 +298,9 @@ class TurboSMBReadStream extends Readable {
             try {
                 bytesRead = await client.readP(handle, buf, 0, size, pos);
 
-                // V10.6: Immediate Return on Destruction (Post-Read)
+                // V10.7: Immediate Return on Destruction (Post-Read)
                 if (this.destroyed_flag) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [IO_ABORT] Post-IO abort at ${pos}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [IO_ABORT] Post-IO abort at ${pos}`);
                     return;
                 }
             } finally {
@@ -315,10 +317,10 @@ class TurboSMBReadStream extends Readable {
             this.chunkCount++;
 
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V10.6] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
+                console.log(`[TURBO][V10.7] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
             }
 
-            // V10.6 Katana ACC Engine
+            // V10.7 Katana ACC Engine
             const rtt = Date.now() - startTime;
             if (rtt > 2500) {
                 this.currentConcurrency = Math.max(24, Math.floor(this.currentConcurrency - 8));
@@ -337,7 +339,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -361,7 +363,14 @@ class TurboSMBReadStream extends Readable {
     }
 
     _tryPush() {
-        if (this.destroyed_flag) return;
+        if (this.destroyed_flag || this.destroyed) {
+            // V10.7: Zombie prevention. Do not push any bytes!
+            if (this.bufferMap.size > 0) {
+                // console.log(`[TURBO][V10.7] [ZOMBIE_STOP] Prevented push of ${this.bufferMap.size} chunks.`);
+                this.bufferMap.clear();
+            }
+            return;
+        }
 
         let pushedCount = 0;
         while (this.bufferMap.has(this.nextPushPos)) {
@@ -403,7 +412,7 @@ class TurboSMBReadStream extends Readable {
             this.fileHandles.forEach((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
                     executeSMBCommand(client, () => client.closeP(handle))
                         .catch(e => console.warn(`[SMB Turbo] Failed to close handle:`, e.message));
                 }
@@ -496,7 +505,7 @@ const getSMBClient = (config, options = {}) => {
 
     const cleanShare = config.share ? config.share.replace(/^[\/\\]+|[\/\\]+$/g, '') : '';
     const { tag = 'default', ...smbOptions } = options;
-    // V10.6: The Eternal Link - Always use cache based on tag, even if options are present.
+    // V10.7: The Eternal Link - Always use cache based on tag, even if options are present.
     // This ensures Singleton Persistence across seeks.
 
     const createClientInstance = () => {
@@ -528,7 +537,7 @@ const getSMBClient = (config, options = {}) => {
         return client;
     };
 
-    // V10.6: Strict Singleton Caching
+    // V10.7: Strict Singleton Caching
     // If tag is provided (e.g. 'streaming'), we MUST return the cached instance.
     const key = `${address}|${cleanShare}|${config.username}|${config.password}|${tag}`;
     if (!smbClients.has(key)) {
@@ -583,22 +592,22 @@ const ensureSMBConnected = async (client) => {
 
         const attempt = async () => {
             try {
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [HANDSHAKE_START] ID: ${Math.random().toString(36).slice(-4)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [HANDSHAKE_START] ID: ${Math.random().toString(36).slice(-4)}`);
                 await client.statP('');
                 client.connected = true;
                 client._isMeltdown = false; // Reset on success
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [HANDSHAKE_OK]`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [HANDSHAKE_OK]`);
             } catch (e) {
                 const isResourceExhausted = e.code === 'STATUS_INSUFFICIENT_RESOURCES' || (e.message && e.message.includes('INSUFFICIENT_RESOURCES'));
 
                 if (isResourceExhausted && retryCount < maxResourceRetries) {
                     retryCount++;
-                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [RESOURCE_RECOVERY] Router exhausted. Waiting 5s for Phoenix Resurrection...`);
+                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [RESOURCE_RECOVERY] Router exhausted. Waiting 5s for Phoenix Resurrection...`);
                     await new Promise(r => setTimeout(r, 5000));
                     return attempt();
                 }
 
-                console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [HANDSHAKE_PROBE_ERR] Code: ${e.code || 'NULL'}, Msg: ${e.message}`);
+                console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [HANDSHAKE_PROBE_ERR] Code: ${e.code || 'NULL'}, Msg: ${e.message}`);
 
                 const isFatal = isResourceExhausted || (e.code === 'EISCONN') || (e.code && (
                     e.code.includes('DELETED') ||
@@ -607,26 +616,26 @@ const ensureSMBConnected = async (client) => {
                     e.code.includes('CLOSED')
                 ));
 
-                // V10.6: EISCONN is NO LONGER ALIVE. It's a Ghost Session signal.
+                // V10.7: EISCONN is NO LONGER ALIVE. It's a Ghost Session signal.
                 const isAlive = (e.code && !isFatal && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
 
                 if (isAlive) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [HANDSHAKE_ALIVE_FALLBACK] Marking connected.`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [HANDSHAKE_ALIVE_FALLBACK] Marking connected.`);
                     client.connected = true;
                     return;
                 }
 
                 if (isResourceExhausted) {
-                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [CRITICAL_RESOURCE_MELTDOWN] Router is dying. Meltdown state locked.`);
+                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [CRITICAL_RESOURCE_MELTDOWN] Router is dying. Meltdown state locked.`);
                     client._isMeltdown = true;
                 }
 
-                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [HANDSHAKE_FAIL] Fatal Error: ${e.code || e.message}`);
+                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [HANDSHAKE_FAIL] Fatal Error: ${e.code || e.message}`);
 
-                // V10.6: Instance Immolation - Remove from cache on fatal handshake
+                // V10.7: Instance Immolation - Remove from cache on fatal handshake
                 for (const [key, c] of smbClients.entries()) {
                     if (c === client) {
-                        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [INSTANCE_IMMOLATION] Evicting corrupted client ${key}`);
+                        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [INSTANCE_IMMOLATION] Evicting corrupted client ${key}`);
                         try { c.disconnect(); } catch (err) { }
                         smbClients.delete(key);
                         break;
@@ -683,18 +692,18 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
             const errCode = err.code || err.message;
             console.log(`[SMB Retry] Error (${errCode}), triggering Instance Immolation...`);
 
-            // V10.6: ABSOLUTE EVICTION. No retry on the same object. 
+            // V10.7: ABSOLUTE EVICTION. No retry on the same object. 
             // This prevents ERR_MULTIPLE_CALLBACK by ensuring the old library instance never gets a second chance.
             for (const [key, c] of smbClients.entries()) {
                 if (c === client) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [BLACK_HOLE_EVICTION] Destroying corrupted instance for ${key}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [BLACK_HOLE_EVICTION] Destroying corrupted instance for ${key}`);
                     try { c.disconnect(); } catch (e) { }
                     smbClients.delete(key);
                     break;
                 }
             }
 
-            // V10.6: Extra delay for OS socket release and library cleanup
+            // V10.7: Extra delay for OS socket release and library cleanup
             await new Promise(r => setTimeout(r, 1000));
 
             // Backoff before retry with NEW instance
@@ -706,7 +715,7 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
                 await ensureSMBConnected(newClient);
                 return await commandFn();
             } catch (retryErr) {
-                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [RETRY_CRUSH] Final failure: ${retryErr.message}`);
+                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [RETRY_CRUSH] Final failure: ${retryErr.message}`);
                 throw retryErr;
             }
         }
@@ -1261,15 +1270,15 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Logical Reset Only (V10.6 The Infinity Link)
+                // 1. Logical Reset Only (V10.7 The Infinity Link)
                 if (lastPreviewStream) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [LOGICAL_RESET] Closing previous file handle...`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [LOGICAL_RESET] Closing previous file handle...`);
                     await lastPreviewStream.shutdown().catch(e => {
-                        console.error('[TURBO][V10.6] Shutdown warning:', e.message);
+                        console.error('[TURBO][V10.7] Shutdown warning:', e.message);
                     });
-                    // V10.6: ZERO GAP. No sleep. No disconnect.
+                    // V10.7: ZERO GAP. No sleep. No disconnect.
                     // The TCP connection persists. We just closed the file handle.
                 }
 
@@ -1282,7 +1291,7 @@ app.get('/api/raw', async (req, res) => {
                     // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V10.6] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V10.7] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
                     }
@@ -1338,7 +1347,7 @@ app.get('/api/raw', async (req, res) => {
                     stream.pipe(diagStream).pipe(res);
 
                     res.on('close', () => {
-                        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [RES_CLOSE] Remote connection dropped.`);
+                        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [RES_CLOSE] Remote connection dropped.`);
                         if (!stream.finished) {
                             stream.destroy();
                             stream.unpipe();
@@ -1346,17 +1355,17 @@ app.get('/api/raw', async (req, res) => {
                                 diagStream.unpipe(res);
                                 diagStream.destroy();
                             }
-                            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [BRAKE_ENGAGED] Chain break complete.`);
+                            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [BRAKE_ENGAGED] Chain break complete.`);
                         }
                     });
                 } catch (e) {
-                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
                     // V9.35: Critical session recovery
                     clearSMBByTag('streaming');
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.6] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.7] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
