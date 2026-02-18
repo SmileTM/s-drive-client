@@ -278,7 +278,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.24] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.25.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -335,15 +335,43 @@ class TurboSMBReadStream extends Readable {
         }
     }
 
-    _destroy(err, callback) {
+    async drainAndClose() {
+        if (this.destroyed_flag) return;
         this.destroyed_flag = true;
         this.bufferMap.clear();
 
-        // Close all handles across all lanes
+        const closePromises = [];
         if (this.fileHandles.length > 0) {
             this.fileHandles.forEach((handle, idx) => {
                 const client = this.clients[idx];
-                if (client && handle) { // Ensure client and handle are valid for this lane
+                if (client && handle) {
+                    closePromises.push(
+                        executeSMBCommand(client, () => client.close(handle))
+                            .catch(e => console.warn(`[SMB Turbo] Failed to close handle on lane ${idx}:`, e.message))
+                    );
+                }
+            });
+            this.fileHandles = [];
+        }
+
+        await Promise.all(closePromises);
+        this.destroy(); // Trigger standard stream destruction
+    }
+
+    _destroy(err, callback) {
+        if (this.destroyed_flag && this.fileHandles.length === 0) {
+            super._destroy(err, callback);
+            return;
+        }
+
+        this.destroyed_flag = true;
+        this.bufferMap.clear();
+
+        // Close all handles across all lanes (Sync fallback)
+        if (this.fileHandles.length > 0) {
+            this.fileHandles.forEach((handle, idx) => {
+                const client = this.clients[idx];
+                if (client && handle) {
                     executeSMBCommand(client, () => client.close(handle))
                         .catch(e => console.warn(`[SMB Turbo] Failed to close handle on lane ${idx}:`, e.message));
                 }
@@ -1130,12 +1158,23 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.24 Streaming Hyper-Drive (Persistent-Lane Multiplexing)
+            // V9.25 Streaming Hyper-Drive (Lock-Step Serialization)
+            // Strategy: Global Singleton Stream. Only ONE streaming request is allowed at a time on the SHARED lane.
+            // When a new seek arrives, we MUST destroy the old stream and WAIT for it to close handles before proceeding.
+            if (global.activeVideoStream) {
+                try {
+                    // Force destroy previous stream to release SMB handles on the shared session
+                    // V9.25.1: Async Drain - Wait for handles to actually CLOSE on server
+                    await global.activeVideoStream.drainAndClose();
+                } catch (e) { console.warn('[TURBO] Drain error:', e); }
+                global.activeVideoStream = null;
+            }
+
             const streamId = 'hyper_turbo_stream_lane';
 
             const lanes = [];
-            // Reduced to 1 lane for maximum stability during seek
-            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 64, tag: streamId }));
+            // Reduced to 1 lane with LOWER concurrency (16) to prevent pipelining buffer overflows on server
+            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 20, tag: streamId }));
 
             const primaryClient = lanes[0];
 
@@ -1172,6 +1211,7 @@ app.get('/api/raw', async (req, res) => {
                 // Use TurboSMBReadStream for high performance (Inject 3 Lanes)
                 const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, options);
                 registerSmbStream(smbPath, stream);
+                global.activeVideoStream = stream; // Register as the active singleton
 
                 let backpressureCount = 0;
                 res.on('drain', () => {
