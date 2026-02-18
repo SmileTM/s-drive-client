@@ -823,7 +823,6 @@ function App() {
 
     setIsIslandExpanded(false);
 
-    // 1. Create Tasks
     const batchId = Date.now();
     const newTasks = acceptedFiles.map((f, i) => ({
       id: `upload_${batchId}_${i}`,
@@ -842,10 +841,6 @@ function App() {
     // 2. Start Non-blocking Upload
     // Map files to include their IDs for cancellation targeting
     const filesWithId = acceptedFiles.map((f, i) => {
-      // Create a proxy object or attach id to file (less clean but works)
-      // Or better: modify api to accept objects { file, id }
-      // Current API expects File objects for uploadFiles. 
-      // We will monkey-patch the File object with the ID since JS allows it.
       f.taskId = newTasks[i].id;
       return f;
     });
@@ -858,8 +853,6 @@ function App() {
       activeDrive,
       (index, total, name, speed, currentBytes, totalBytes) => {
         // Update Task Progress
-        // Since api executes sequentially, index-1 corresponds to newTasks[index-1]
-        // We need to map back to our specific task ID.
         const taskIndex = index - 1;
         if (taskIndex >= 0 && taskIndex < newTasks.length) {
           const taskId = newTasks[taskIndex].id;
@@ -874,12 +867,8 @@ function App() {
                 currentBytes,
                 totalBytes,
                 speed,
-                // If previous items are pending but index moved past them, mark them done? 
-                // api runs sequentially, so items < index are done.
               };
             }
-            // Auto-complete previous tasks in this batch if we missed their 'done' event
-            // (Double safety)
             if (newTasks.some(nt => nt.id === t.id) && newTasks.indexOf(newTasks.find(nt => nt.id === t.id)) < taskIndex) {
               if (t.status !== 'done') return { ...t, status: 'done', currentBytes: t.totalBytes };
             }
@@ -888,9 +877,6 @@ function App() {
         }
       },
       (finishedFileName) => {
-        // Mark specific task done by name (fallback if progress didn't hit 100%)
-        // Ideally we use ID, but api only returns filename currently.
-        // We can match by name within this batch.
         const task = newTasks.find(t => t.name === finishedFileName);
         if (task) {
           setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
@@ -903,6 +889,8 @@ function App() {
       },
       shouldOverwrite
     ).catch(err => {
+      console.error("[Upload] api.uploadFiles CRITICAL Error:", err);
+      const errorMsg = err.response?.data?.error || err.message || "Unknown Error";
       // Mark remaining pending tasks as error
       setTasks(prev => prev.map(t => {
         if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
@@ -910,7 +898,7 @@ function App() {
         }
         return t;
       }));
-      showAlert(t.uploadFailed, t.failed, 'error');
+      showAlert(`${t.uploadFailed}: ${errorMsg}`, t.failed, 'error');
     });
   };
 
@@ -1499,7 +1487,11 @@ function App() {
 
         ref={fileInputRef}
 
-        onChange={(e) => handleUpload(Array.from(e.target.files))}
+        onChange={(e) => {
+          const selectedFiles = Array.from(e.target.files);
+          handleUpload(selectedFiles);
+          e.target.value = ''; // Reset to allow same file re-selection
+        }}
 
       />
 

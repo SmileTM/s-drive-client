@@ -658,13 +658,12 @@ const ServerAPI = {
         }
     },
     uploadFiles: async (path, files, driveId, onProgress, onItemComplete, overwrite = false) => {
+        console.log(`[ServerAPI] uploadFiles started. Path: ${path}, Drive: ${driveId}, Files: ${files.length}, Overwrite: ${overwrite}`);
+
         // Process files sequentially for granular progress
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
             const taskId = file.taskId || `upload_${Date.now()}_${i}`;
-
-            let lastUpdate = Date.now();
-            let lastBytes = 0;
 
             if (onProgress) {
                 serverProgressCallbacks[taskId] = (info) => {
@@ -675,27 +674,23 @@ const ServerAPI = {
             const formData = new FormData();
             formData.append('files', file);
 
-            // Use a separate config for each upload
             const config = {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (progressEvent) => {
                     if (onProgress && progressEvent.total) {
-                        const now = Date.now();
-                        const timeDiff = (now - lastUpdate) / 1000;
-                        let speed = 0;
-                        if (timeDiff > 0) {
-                            speed = (progressEvent.loaded - lastBytes) / timeDiff;
-                        }
-                        lastUpdate = now;
-                        lastBytes = progressEvent.loaded;
-
+                        // This tracks JS -> Server progress
+                        const speed = 0; // Local upload speed is less relevant but we can calculate if needed
                         onProgress(i + 1, files.length, file.name, speed, progressEvent.loaded, progressEvent.total);
                     }
                 }
             };
 
             try {
-                await client.streamUploadFile(path, file.path, taskId, overwrite);
+                const url = `/api/upload?path=${encodeURIComponent(path)}&drive=${encodeURIComponent(driveId)}&taskId=${encodeURIComponent(taskId)}&overwrite=${overwrite}`;
+                await axios.post(url, formData, config);
+            } catch (err) {
+                console.error(`[ServerAPI] Upload failed for ${file.name}:`, err);
+                throw err;
             } finally {
                 delete serverProgressCallbacks[taskId];
             }
@@ -1590,9 +1585,8 @@ const NativeAPI = {
             try {
                 const res = await WebDavNative.getServerUrl();
                 if (res && res.url) {
-                    // Use /cache/ prefix to write to cache directory
+                    console.log(`[NativeAPI] Fast temp upload using: ${res.url}`);
                     const uploadUrl = `${res.url}/cache/${encodeURIComponent(tempName)}`;
-                    // Use fetch to upload directly (streaming)
                     const response = await fetch(uploadUrl, {
                         method: 'PUT',
                         body: file
@@ -1609,17 +1603,17 @@ const NativeAPI = {
                             }
                         };
                     }
-                    console.warn('[Native] Fast temp upload failed status:', response.status);
+                    console.warn('[NativeAPI] Fast temp upload failed status:', response.status);
                 }
             } catch (e) {
-                console.warn('[Native] Fast temp upload failed, falling back to slow method:', e);
+                console.warn('[NativeAPI] Fast temp upload failed, falling back to slow method:', e);
             }
 
             // Fallback: Slow Base64 Chunked Write
+            console.log(`[NativeAPI] Falling back to slow Base64 chunked write for: ${file.name}`);
             const CHUNK_SIZE = 1024 * 1024 * 1; // Reduce to 1MB for stability
             let offset = 0;
 
-            // Ensure clean start
             try {
                 await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache });
             } catch (e) { }
@@ -1648,8 +1642,7 @@ const NativeAPI = {
                 }
 
                 offset += CHUNK_SIZE;
-
-                // Critical: Yield to Event Loop to prevent UI Freeze
+                process.env.NODE_ENV !== 'production' && console.log(`[NativeAPI] saveToTemp progress: ${offset}/${file.size}`);
                 await new Promise(resolve => setTimeout(resolve, 10));
             }
 
@@ -1739,18 +1732,21 @@ const NativeAPI = {
                                 path: file.uri,
                                 cleanup: async () => { }
                             };
-                            console.log('[NativeWebDAV] Using shared URI directly:', temp.path);
+                            console.log('[NativeAPI] Using shared URI directly:', temp.path);
                         } else {
+                            console.log(`[NativeAPI] Calling saveToTemp for item ${i + 1}/${files.length}`);
                             temp = await saveToTemp(file);
                         }
 
                         // Stream Upload
                         const remotePath = `${path}/${file.name}`.replace('//', '/');
+                        console.log(`[NativeAPI] Calling client.streamUploadFile: id=${uploadId}, remotePath=${remotePath}, tempPath=${temp.path}`);
                         await client.streamUploadFile(remotePath, temp.path, uploadId);
 
                         reportFinished(file.size);
                         if (onItemComplete) onItemComplete(file.name); // Notify item complete
                     } catch (e) {
+                        console.error(`[NativeAPI] Error during upload item ${i + 1}:`, e);
                         if (taskId && cancellationMap[taskId]?.cancelled) {
                             console.log(`[Upload] Task ${taskId} cancelled during execution.`);
 
