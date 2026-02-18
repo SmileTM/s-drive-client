@@ -141,51 +141,36 @@ class TurboSMBReadStream extends Readable {
         this._pump();
     }
 
+    async ignite() {
+        if (this.opening || this.fileHandles.length > 0 || this.destroyed_flag) return;
+        this.opening = true;
+        try {
+            const results = [];
+            for (let i = 0; i < this.clients.length; i++) {
+                if (this.destroyed_flag) break;
+                // V9.30: Explicit log for physical command
+                const handle = await executeSMBCommand(this.clients[i], () => {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.30] [SMB_OPEN_START] Lane ${i} for ${path.basename(this.smbPath)}`);
+                    return this.clients[i].openP(this.smbPath, 'r');
+                }, 20000);
+                results.push(handle);
+            }
+            this.fileHandles = results.filter(h => h !== null);
+            this.clients = this.clients.filter((_, idx) => results[idx] !== null);
+            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.30] [SMB_OPEN_OK] Handles Active: ${this.fileHandles.length}`);
+            if (this.fileHandles.length === 0) throw new Error('All SMB lanes failed to ignite');
+        } finally {
+            this.opening = false;
+        }
+    }
+
     async _pump() {
-        if (this.finished || this.destroyed_flag) return;
+        if (this.finished || this.destroyed_flag || this.opening) return;
 
         try {
-            if (this.fileHandles.length === 0 && !this.opening) {
-                this.opening = true;
-                const pathTail = this.smbPath.split(/[\\\/]/).pop();
-                // Lane ignition log silenced
-
-                const results = [];
-                for (let i = 0; i < this.clients.length; i++) {
-                    if (this.destroyed_flag) break;
-                    let attempt = 0;
-                    let handle = null;
-                    while (attempt < 2 && !handle) {
-                        try {
-                            // Lane ignition log silenced
-                            handle = await executeSMBCommand(this.clients[i], () => this.clients[i].openP(this.smbPath, 'r'), 20000);
-                        } catch (igniteErr) {
-                            if (this.destroyed_flag) {
-                                break; // Silent exit on destroy
-                            }
-                            // Retry on specific connection errors
-                            if (igniteErr.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION' || igniteErr.code === 'STATUS_FILE_CLOSED') {
-                                console.warn(`[${new Date().toLocaleTimeString()}][TURBO] Lane ignition retry ${attempt + 1}: ${igniteErr.code}`);
-                            } else {
-                                throw igniteErr;
-                            }
-                        }
-                        if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
-                        attempt++;
-                    }
-                    results.push(handle);
-                    if (i < this.clients.length - 1) {
-                        const jitter = Math.floor(Math.random() * 500);
-                        await new Promise(r => setTimeout(r, 1000 + jitter));
-                    }
-                }
-
-                this.fileHandles = results.filter(h => h !== null);
-                this.clients = this.clients.filter((_, idx) => results[idx] !== null);
-
-                this.opening = false;
-                if (this.clients.length === 0) throw new Error('All SMB lanes failed to ignite after retries');
-                // Lane ignition log silenced
+            if (this.fileHandles.length === 0) {
+                // If not ignited yet, _read will call _pump again, or we wait for manual ignite
+                return;
             }
             // Fill pipeline
             let started = 0;
@@ -289,7 +274,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.29.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.30.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -346,45 +331,18 @@ class TurboSMBReadStream extends Readable {
         }
     }
 
-    async drainAndClose() {
-        if (this.destroyed_flag) return;
-        this.destroyed_flag = true;
-        this.bufferMap.clear();
-
-        const closePromises = [];
-        if (this.fileHandles.length > 0) {
-            this.fileHandles.forEach((handle, idx) => {
-                const client = this.clients[idx];
-                if (client && handle) {
-                    closePromises.push(
-                        executeSMBCommand(client, () => client.close(handle))
-                            .catch(e => console.warn(`[SMB Turbo] Failed to close handle on lane ${idx}:`, e.message))
-                    );
-                }
-            });
-            this.fileHandles = [];
-        }
-
-        await Promise.all(closePromises);
-        this.destroy(); // Trigger standard stream destruction
-    }
-
     _destroy(err, callback) {
-        if (this.destroyed_flag && this.fileHandles.length === 0) {
-            super._destroy(err, callback);
-            return;
-        }
-
         this.destroyed_flag = true;
         this.bufferMap.clear();
 
-        // Close all handles across all lanes (Sync fallback)
+        // V9.30: Accurate Handle Cleanup with Logs
         if (this.fileHandles.length > 0) {
             this.fileHandles.forEach((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.30] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
                     executeSMBCommand(client, () => client.close(handle))
-                        .catch(e => console.warn(`[SMB Turbo] Failed to close handle on lane ${idx}:`, e.message));
+                        .catch(e => console.warn(`[SMB Turbo] Failed to close handle:`, e.message));
                 }
             });
             this.fileHandles = [];
@@ -1173,26 +1131,26 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.29] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.30] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
                 // 1. Forceful Preemption: Kill the previous stream if it's still alive
                 if (lastPreviewStream && !lastPreviewStream.destroyed) {
-                    console.log(`[TURBO][V9.29] Preemptively destroying last stream for ${smbPath}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.30] [SINGLE_IGNITION] Preempting previous stream...`);
                     lastPreviewStream.destroy();
-                    // Mandatory 400ms "Air Gap" for the server to process the close handle command
-                    await new Promise(r => setTimeout(r, 400));
+                    // Mandatory 500ms "Air Gap" for the server to digest the CLOSE command
+                    await new Promise(r => setTimeout(r, 500));
                 }
 
-                // 2. Persistent Client Retrieval (Uses Cache via Tag)
-                // We use packetConcurrency: 20 which is safe for most routers
-                const primaryClient = getSMBClient(config, { tag: 'streaming', packetConcurrency: 20 });
+                // 2. Persistent Client Retrieval (Ghost-Protocol v2)
+                // We use packetConcurrency: 5 to keep the state machine ultra-stable
+                const primaryClient = getSMBClient(config, { tag: 'streaming', packetConcurrency: 5 });
                 const lanes = [primaryClient];
 
                 try {
                     // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V9.29] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V9.30] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
                     }
@@ -1225,7 +1183,10 @@ app.get('/api/raw', async (req, res) => {
                     res.setHeader('Content-Type', mimeType);
 
                     // Reduced concurrency for the stream itselt to keep pressure low (1-Lane)
-                    const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, { ...options, concurrency: 16 });
+                    const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, { ...options, concurrency: 8 });
+
+                    // V9.30: THE SYNC IGNITION. Wait for handles inside the LOCK.
+                    await stream.ignite();
                     lastPreviewStream = stream; // Track globally
 
                     registerSmbStream(smbPath, stream);
@@ -1251,11 +1212,11 @@ app.get('/api/raw', async (req, res) => {
                         }
                     });
                 } catch (e) {
-                    console.warn(`[TURBO][V9.29] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    console.warn(`[TURBO][V9.30] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[TURBO][V9.29] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[TURBO][V9.30] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
