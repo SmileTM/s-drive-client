@@ -563,44 +563,55 @@ const ensureSMBConnected = async (client) => {
 
         const attempt = async () => {
             try {
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [HANDSHAKE_START] ID: ${Math.random().toString(36).slice(-4)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [HANDSHAKE_START] ID: ${Math.random().toString(36).slice(-4)}`);
                 await client.statP('');
                 client.connected = true;
                 client._isMeltdown = false; // Reset on success
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [HANDSHAKE_OK]`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [HANDSHAKE_OK]`);
             } catch (e) {
                 const isResourceExhausted = e.code === 'STATUS_INSUFFICIENT_RESOURCES' || (e.message && e.message.includes('INSUFFICIENT_RESOURCES'));
 
                 if (isResourceExhausted && retryCount < maxResourceRetries) {
                     retryCount++;
-                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [RESOURCE_RECOVERY] Router exhausted. Waiting 5s for Phoenix Resurrection...`);
+                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [RESOURCE_RECOVERY] Router exhausted. Waiting 5s for Phoenix Resurrection...`);
                     await new Promise(r => setTimeout(r, 5000));
                     return attempt();
                 }
 
-                console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [HANDSHAKE_PROBE_ERR] Code: ${e.code || 'NULL'}, Msg: ${e.message}`);
+                console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [HANDSHAKE_PROBE_ERR] Code: ${e.code || 'NULL'}, Msg: ${e.message}`);
 
-                const isFatal = isResourceExhausted || (e.code && (
+                const isFatal = isResourceExhausted || (e.code === 'EISCONN') || (e.code && (
                     e.code.includes('DELETED') ||
                     e.code.includes('RESET') ||
                     e.code.includes('EXPIRED') ||
                     e.code.includes('CLOSED')
                 ));
 
-                const isAlive = (e.code === 'EISCONN') || (e.code && !isFatal && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
+                // V9.50: EISCONN is NO LONGER ALIVE. It's a Ghost Session signal.
+                const isAlive = (e.code && !isFatal && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
 
                 if (isAlive) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [HANDSHAKE_ALIVE_FALLBACK] Marking connected.`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [HANDSHAKE_ALIVE_FALLBACK] Marking connected.`);
                     client.connected = true;
                     return;
                 }
 
                 if (isResourceExhausted) {
-                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [CRITICAL_RESOURCE_MELTDOWN] Router is dying. Meltdown state locked.`);
+                    console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [CRITICAL_RESOURCE_MELTDOWN] Router is dying. Meltdown state locked.`);
                     client._isMeltdown = true;
                 }
 
-                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [HANDSHAKE_FAIL] Fatal Error: ${e.code || e.message}`);
+                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [HANDSHAKE_FAIL] Fatal Error: ${e.code || e.message}`);
+
+                // V9.50: Instance Immolation - Remove from cache on fatal handshake
+                for (const [key, c] of smbClients.entries()) {
+                    if (c === client) {
+                        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [INSTANCE_IMMOLATION] Evicting corrupted client ${key}`);
+                        try { c.disconnect(); } catch (err) { }
+                        smbClients.delete(key);
+                        break;
+                    }
+                }
                 throw e;
             }
         };
@@ -649,27 +660,33 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
         );
 
         if (isRetryable || err.message === 'SMB Command Timeout') {
-            console.log(`[SMB Retry] Error (${err.code || err.message}), reconnecting...`);
-            // Force disconnect/reset state
-            try { client.disconnect(); } catch (e) { }
-            // V9.45: Extra delay for OS socket release
-            await new Promise(r => setTimeout(r, 200));
-            // Backoff before retry
-            await new Promise(r => setTimeout(r, 400));
-            // Retry once
+            const errCode = err.code || err.message;
+            console.log(`[SMB Retry] Error (${errCode}), triggering Instance Immolation...`);
+
+            // V9.50: ABSOLUTE EVICTION. No retry on the same object. 
+            // This prevents ERR_MULTIPLE_CALLBACK by ensuring the old library instance never gets a second chance.
+            for (const [key, c] of smbClients.entries()) {
+                if (c === client) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [BLACK_HOLE_EVICTION] Destroying corrupted instance for ${key}`);
+                    try { c.disconnect(); } catch (e) { }
+                    smbClients.delete(key);
+                    break;
+                }
+            }
+
+            // V9.50: Extra delay for OS socket release and library cleanup
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Backoff before retry with NEW instance
+            await new Promise(r => setTimeout(r, 1000));
+
             try {
-                await ensureSMBConnected(client);
+                // This call to getSMBClient will create a NEW client object because we deleted the old one
+                const newClient = getSMBClient(client._config, { tag: client._tag, packetConcurrency: client._packetConcurrency });
+                await ensureSMBConnected(newClient);
                 return await commandFn();
             } catch (retryErr) {
-                console.error('[SMB Retry Fail] Hard resetting session cache.', retryErr.message);
-                // V9.33: If retry fails, we MUST kill the cache for this client to force a fresh TCP start
-                for (const [key, c] of smbClients.entries()) {
-                    if (c === client) {
-                        try { c.disconnect(); } catch (e) { }
-                        smbClients.delete(key);
-                        break;
-                    }
-                }
+                console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [RETRY_CRUSH] Final failure: ${retryErr.message}`);
                 throw retryErr;
             }
         }
@@ -1224,26 +1241,29 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Unconditional Nuclear Purge (V9.45 The Phoenix)
+                // 1. Unconditional Nuclear Purge (V9.50 The Black Hole)
                 if (lastPreviewStream) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [SINGLE_IGNITION] Nuclear cooldown start...`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [SINGLE_IGNITION] Nuclear cooldown start...`);
 
                     await lastPreviewStream.shutdown().catch(e => {
-                        console.error('[TURBO][V9.45] Shutdown warning:', e.message);
+                        console.error('[TURBO][V9.50] Shutdown warning:', e.message);
                     });
 
-                    // V9.45: Absolute Physical Isolation Gaps
+                    // V9.50: High-Isolation Tiered Gaps
                     const primaryClient = getSMBClient(config, { tag: 'streaming' });
                     const hasMeltdown = primaryClient && primaryClient._isMeltdown;
 
-                    let delay = 5000; // Default healthy gap (5s)
-                    if (hasMeltdown) delay = 15000; // Phoenix gap (15s)
-                    else if (lastPreviewStream.inFlightCount > 0) delay = 8000; // Stalled gap (8s)
+                    let delay = 5000; // Healthy: 5s
+                    if (hasMeltdown) delay = 25000; // Black Hole: 25s (The Last Hope)
+                    else if (lastPreviewStream.inFlightCount > 0) delay = 10000; // Stall: 10s
 
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.45] [NUCLEAR_PURGE] Policy: ${hasMeltdown ? 'MELTDOWN' : (lastPreviewStream.inFlightCount > 0 ? 'STALL' : 'HEALTHY')} | Sleep: ${delay / 1000}s`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.50] [NUCLEAR_PURGE] Policy: ${hasMeltdown ? 'MELTDOWN' : (lastPreviewStream.inFlightCount > 0 ? 'STALL' : 'HEALTHY')} | Sleep: ${delay / 1000}s`);
+
+                    // V9.50: Absolute Immolation on every Purge for maximum protocol safety
                     clearSMBByTag('streaming');
+
                     await new Promise(r => setTimeout(r, delay));
                 }
 
