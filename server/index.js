@@ -1170,9 +1170,6 @@ app.get('/api/raw', async (req, res) => {
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
 
-        } else if (config.type === 'smb') {
-            const smbPath = toSMBPath(reqPath);
-
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
