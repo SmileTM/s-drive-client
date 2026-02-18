@@ -168,7 +168,7 @@ class TurboSMBReadStream extends Readable {
         if (this.destroyed_flag && this.inFlightCount === 0) return; // Already clean
         this.destroyed_flag = true;
         const shutdownId = Math.random().toString(36).slice(-4);
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
 
         // 1. Wait for mid-air IO packets to land (Max 2s timeout)
         const timeout = Date.now() + 2000;
@@ -180,7 +180,7 @@ class TurboSMBReadStream extends Readable {
 
         // 2. Physical Clean up
         await this._physicalCleanup();
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SHUTDOWN_OK] ${shutdownId}`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [SHUTDOWN_OK] ${shutdownId}`);
     }
 
     async _physicalCleanup() {
@@ -559,15 +559,13 @@ const ensureSMBConnected = async (client) => {
 
     client._connectPromise = (async () => {
         try {
-            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [HANDSHAKE_START]`);
-            // Probe logs silenced
+            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [HANDSHAKE_START] ID: ${Math.random().toString(36).slice(-4)}`);
             await client.statP('');
             client.connected = true;
-            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [HANDSHAKE_OK]`);
-            // Probe logs silenced
+            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [HANDSHAKE_OK]`);
         } catch (e) {
-            // V9.36: Be much stricter about "Alive" signals. 
-            // Fatal SMB errors indicate the session is dead.
+            console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [HANDSHAKE_PROBE_ERR] Code: ${e.code}, Msg: ${e.message}`);
+
             const isFatal = e.code && (
                 e.code.includes('DELETED') ||
                 e.code.includes('RESET') ||
@@ -578,11 +576,12 @@ const ensureSMBConnected = async (client) => {
             const isAlive = (e.code === 'EISCONN') || (e.code && !isFatal && (e.code.startsWith('STATUS_') || e.code.startsWith('NT_STATUS_')));
 
             if (isAlive) {
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [HANDSHAKE_ALIVE_FALLBACK] Marking connected.`);
                 client.connected = true;
                 return;
             }
-            console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [HANDSHAKE_FAIL] ${e.code || e.message}`);
-            throw e; // Force retry logic to hard reset if probe fails
+            console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [HANDSHAKE_FAIL] Fatal Error: ${e.code || e.message}`);
+            throw e;
         }
     })();
 
@@ -631,7 +630,9 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
             console.log(`[SMB Retry] Error (${err.code || err.message}), reconnecting...`);
             // Force disconnect/reset state
             try { client.disconnect(); } catch (e) { }
-            // V9.33: 400ms Backoff before retry to let server recover its TCP stack
+            // V9.40: Extra delay for OS socket release
+            await new Promise(r => setTimeout(r, 200));
+            // Backoff before retry
             await new Promise(r => setTimeout(r, 400));
             // Retry once
             try {
@@ -1201,27 +1202,21 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Unconditional Shutdown & Session Purge (V9.36 The Singularity)
+                // 1. Unconditional Nuclear Purge (V9.40 The Final Stand)
                 if (lastPreviewStream) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [SINGLE_IGNITION] Cooling down previous state...`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [SINGLE_IGNITION] Nuclear cooldown start...`);
 
-                    let drainSuccess = true;
                     await lastPreviewStream.shutdown().catch(e => {
-                        console.error('[TURBO][V9.36] Shutdown catch:', e.message);
-                        drainSuccess = false;
+                        console.error('[TURBO][V9.40] Shutdown warning:', e.message);
                     });
 
-                    // V9.36: Meltdown detection
-                    if (lastPreviewStream.inFlightCount > 0) {
-                        console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [MELTDOWN] IO Drainage Failed (Left: ${lastPreviewStream.inFlightCount}). Hard Purge & 3s Sleep.`);
-                        clearSMBByTag('streaming');
-                        await new Promise(r => setTimeout(r, 3000));
-                    } else {
-                        // V9.36 Singularity Gap: 3000ms super-cooling period
-                        await new Promise(r => setTimeout(r, 3000));
-                    }
+                    // V9.40: ABSOLUTE KILL. No adaptive reuse. 
+                    // This forces a clean TCP session for every single seek.
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [NUCLEAR_PURGE] Enforcing Session Death & 5s Sleep.`);
+                    clearSMBByTag('streaming');
+                    await new Promise(r => setTimeout(r, 5000));
                 }
 
                 // 2. Persistent Client Retrieval (Ghost-Protocol v2.3)
@@ -1233,7 +1228,7 @@ app.get('/api/raw', async (req, res) => {
                     // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V9.36] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V9.40] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
                     }
@@ -1295,13 +1290,13 @@ app.get('/api/raw', async (req, res) => {
                         }
                     });
                 } catch (e) {
-                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.35] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
                     // V9.35: Critical session recovery
                     clearSMBByTag('streaming');
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.36] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.40] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
