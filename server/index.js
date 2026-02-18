@@ -278,7 +278,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.25.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.26] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -1158,26 +1158,18 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.25 Streaming Hyper-Drive (Lock-Step Serialization)
-            // Strategy: Global Singleton Stream. Only ONE streaming request is allowed at a time on the SHARED lane.
-            // When a new seek arrives, we MUST destroy the old stream and WAIT for it to close handles before proceeding.
-            if (global.activeVideoStream) {
-                try {
-                    // Force destroy previous stream to release SMB handles on the shared session
-                    // V9.25.1: Async Drain - Wait for handles to actually CLOSE on server
-                    await global.activeVideoStream.drainAndClose();
-                } catch (e) { console.warn('[TURBO] Drain error:', e); }
-                global.activeVideoStream = null;
-            }
-
-            const streamId = 'hyper_turbo_stream_lane';
+            // V9.26 Hybrid-Lane (Lazy-Dispose)
+            // Strategy: DEDICATED connection for each seek to avoid "STATUS_NETWORK_NAME_DELETED".
+            // To prevent connection storms, we use LAZY DISPOSAL: old connections hang around for 5s before closing.
+            const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
+            console.log(`[TURBO][V9.26] New Stream Request: ${streamId} for ${path.basename(reqPath)}`);
 
             const lanes = [];
-            // Reduced to 1 lane with LOWER concurrency (16) to prevent pipelining buffer overflows on server
+            // Dedicated lane, standard concurrency
             lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 20, tag: streamId }));
 
             const primaryClient = lanes[0];
-
+            翻
             try {
                 const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                 const fileSize = stats.size;
@@ -1211,7 +1203,7 @@ app.get('/api/raw', async (req, res) => {
                 // Use TurboSMBReadStream for high performance (Inject 3 Lanes)
                 const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, options);
                 registerSmbStream(smbPath, stream);
-                global.activeVideoStream = stream; // Register as the active singleton
+                // No global lock
 
                 let backpressureCount = 0;
                 res.on('drain', () => {
@@ -1230,8 +1222,17 @@ app.get('/api/raw', async (req, res) => {
 
                 res.on('close', () => {
                     if (!stream.finished) {
-                        stream.destroy(); // Only close FILE HANDLE. Keep TCP session alive.
-                        // V9.24: REMOVED lane purging. Reusing connection is the key to stability.
+                        stream.destroy(); // Close FILE HANDLE
+
+                        // V9.26 Hybrid-Lane: LAZY DISPOSAL
+                        // We do NOT close the SMB connection immediately. We let it hang for 5s.
+                        // This prevents "Close -> Open" collision on the same socket (if we were reusing)
+                        // AND prevents "Connect/Disconnect Storm" (if we are creating new ones).
+                        // It smooths out the tear-down process.
+                        setTimeout(() => {
+                            console.log(`[TURBO][V9.26] Lazy disposing client for ${streamId}`);
+                            clearSMBByTag(streamId);
+                        }, 5000);
                     }
                 });
             } catch (e) {
