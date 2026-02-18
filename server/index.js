@@ -1169,7 +1169,7 @@ app.get('/api/raw', async (req, res) => {
             lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 20, tag: streamId }));
 
             const primaryClient = lanes[0];
-            翻
+
             try {
                 const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                 const fileSize = stats.size;
