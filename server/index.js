@@ -26,6 +26,9 @@ app.use(express.json());
 
 const progressEmitter = new EventEmitter();
 const activeSmbStreams = new Map(); // stream -> smbPath
+// V9.28 The Monolith: Global Request Queue & Stat Cache
+const streamingStatCache = new Map(); // path -> { size, mtime, expires }
+let streamingRequestLock = Promise.resolve();
 
 // --- Progress Tracking Helper (V9.6 Smooth-Hyper ported to Node.js) ---
 function createProgressStream(taskId, totalSize) {
@@ -285,7 +288,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.27.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.28.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -1165,99 +1168,95 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.27 Hybrid-Lane (Ghost-Protocol / Ultra-Stability)
-            // Strategy: Dedicated connection + PACKET_CONCURRENCY=1.
-            // Absolute minimal pressure on SMB state machine to isolate if the error is concurrency-related.
-            const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.27] [INIT] ${streamId} for ${path.basename(reqPath)}`);
 
-            const lanes = [];
-            // FORCE CONCURRENCY=1 for the entire lane. One request at a time.
-            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 1, tag: streamId }));
+            // V9.28 The Monolith: Strict Sequential Ignition
+            // Wrap the entire setup in a global lock to prevent concurrent "Connect/Stat/Open" storms.
+            await (streamingRequestLock = streamingRequestLock.then(async () => {
+                const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.28] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-            const primaryClient = lanes[0];
+                // 1. Mandatory Cooldown: Give the server 300ms to breathe if a previous stream just died
+                await new Promise(r => setTimeout(r, 300));
 
-            try {
-                console.log(`[TURBO][V9.27] [STAT_START] ${streamId}`);
-                const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
-                console.log(`[TURBO][V9.27] [STAT_OK] ${streamId} size=${stats.size}`);
-                const fileSize = stats.size;
-                const lastModified = stats.mtime;
-                const range = req.headers.range;
-                let options = {};
+                const lanes = [];
+                // FORCE CONCURRENCY=1 for the entire lane. One request at a time.
+                lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 1, tag: streamId }));
+                const primaryClient = lanes[0];
 
-                if (range) {
-                    const parts = range.replace(/bytes=/, "").split("-");
-                    const start = parseInt(parts[0], 10);
-                    const end = parts[1] ? parseInt(parts[1], 10) : undefined;
-                    options.start = start;
-                    if (end) options.end = end;
-                    const finalEnd = end || (fileSize - 1);
-                    const chunksize = (finalEnd - start) + 1;
-
-                    res.status(206);
-                    res.setHeader('Content-Range', `bytes ${start}-${finalEnd}/${fileSize}`);
-                    res.setHeader('Content-Length', chunksize);
-                } else {
-                    res.setHeader('Content-Length', fileSize);
-                }
-
-                res.setHeader('Accept-Ranges', 'bytes');
-                if (lastModified) res.setHeader('Last-Modified', new Date(lastModified).toUTCString());
-
-                const fileName = path.basename(reqPath);
-                const mimeType = mime.lookup(fileName) || 'application/octet-stream';
-                res.setHeader('Content-Type', mimeType);
-
-                // Use TurboSMBReadStream for high performance (Inject 3 Lanes)
-                const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, options);
-                registerSmbStream(smbPath, stream);
-                // No global lock
-
-                let backpressureCount = 0;
-                res.on('drain', () => {
-                    backpressureCount++;
-                    if (backpressureCount % 20 === 0) console.log(`[PERF][SMB-TURBO] Stream Drain (Backpressure) x${backpressureCount}`);
-                });
-
-                stream.on('error', (err) => {
-                    if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
-                    console.error('SMB Turbo Stream Error', err);
-                });
-
-                // Attach diagnostic monitor
-                const diagStream = createProgressStream('DIAG_RAW_' + Date.now(), fileSize);
-                stream.pipe(diagStream).pipe(res);
-
-                res.on('close', () => {
-                    if (!stream.finished) {
-                        stream.destroy(); // Close FILE HANDLE
-
-                        // V9.27 Hybrid-Lane: LAZY DISPOSAL
-                        // Reduce to 1000ms to avoid hitting total connection limits.
-                        setTimeout(() => {
-                            console.log(`[TURBO][V9.27] Lazy disposing client for ${streamId}`);
-                            clearSMBByTag(streamId);
-                        }, 1000);
+                try {
+                    // 2. Stat Cache: Reduce SMB overhead for metadata
+                    let stats = streamingStatCache.get(smbPath);
+                    if (!stats || stats.expires < Date.now()) {
+                        console.log(`[TURBO][V9.28] [STAT_FETCH] ${streamId}`);
+                        stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
+                        streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
+                    } else {
+                        console.log(`[TURBO][V9.28] [STAT_CACHE_HIT] ${streamId}`);
                     }
-                });
-            } catch (e) {
-                // V9.23 Iron-Clad Error Suppression for Seek-Thrashing
-                if (e.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION' ||
-                    e.code === 'STATUS_NETWORK_NAME_DELETED' ||
-                    e.code === 'ECONNRESET' ||
-                    e.message?.includes('socket') ||
-                    e.message?.includes('closed')) {
-                    console.warn(`[TURBO][WARN] Stream Seek Interrupted (Safe-Mode): ${e.code}`);
-                    return res.end();
-                }
 
-                if (e.code === 'STATUS_OBJECT_PATH_NOT_FOUND' || e.code === 'STATUS_OBJECT_NAME_NOT_FOUND') {
-                    return res.status(404).send('File not found');
-                }
-                throw e;
-            }
+                    const fileSize = stats.size;
+                    const lastModified = stats.mtime;
+                    const range = req.headers.range;
+                    let options = {};
 
+                    if (range) {
+                        const parts = range.replace(/bytes=/, "").split("-");
+                        const start = parseInt(parts[0], 10);
+                        const end = parts[1] ? parseInt(parts[1], 10) : undefined;
+                        options.start = start;
+                        if (end) options.end = end;
+                        const finalEnd = end || (fileSize - 1);
+                        const chunksize = (finalEnd - start) + 1;
+
+                        res.status(206);
+                        res.setHeader('Content-Range', `bytes ${start}-${finalEnd}/${fileSize}`);
+                        res.setHeader('Content-Length', chunksize);
+                    } else {
+                        res.setHeader('Content-Length', fileSize);
+                    }
+
+                    res.setHeader('Accept-Ranges', 'bytes');
+                    if (lastModified) res.setHeader('Last-Modified', new Date(lastModified).toUTCString());
+
+                    const mimeType = mime.lookup(reqPath) || 'application/octet-stream';
+                    res.setHeader('Content-Type', mimeType);
+
+                    // Use TurboSMBReadStream with reduced concurrency for stable video play
+                    const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, { ...options, concurrency: 16 });
+                    registerSmbStream(smbPath, stream);
+
+                    let backpressureCount = 0;
+                    res.on('drain', () => {
+                        backpressureCount++;
+                        if (backpressureCount % 20 === 0) console.log(`[PERF][SMB-TURBO] Stream Drain (Backpressure) x${backpressureCount}`);
+                    });
+
+                    stream.on('error', (err) => {
+                        if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
+                        console.error('SMB Turbo Stream Error', err);
+                    });
+
+                    // Attach diagnostic monitor
+                    const diagStream = createProgressStream('DIAG_RAW_' + Date.now(), fileSize);
+                    stream.pipe(diagStream).pipe(res);
+
+                    res.on('close', () => {
+                        if (!stream.finished) {
+                            stream.destroy(); // Close FILE HANDLE
+                            setTimeout(() => {
+                                console.log(`[TURBO][V9.28] Lazy disposing client for ${streamId}`);
+                                clearSMBByTag(streamId);
+                            }, 1000);
+                        }
+                    });
+                } catch (e) {
+                    console.warn(`[TURBO][V9.28] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    if (!res.headersSent) res.status(500).send(e.message);
+                    else res.end();
+                } finally {
+                    console.log(`[TURBO][V9.28] [LOCK_RELEASE] ${streamId}`);
+                }
+            }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
             const client = getWebDAVClient(config);
 
