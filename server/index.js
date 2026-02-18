@@ -107,8 +107,8 @@ class TurboSMBReadStream extends Readable {
         this.smbPath = smbPath;
         this.fileSize = fileSize;
         this.chunkSize = options.chunkSize || 1024 * 1024; // 1MB Accurate Chunks
-        this.concurrency = 128; // Katana Safe Bound
-        this.clientIndex = 0; // Round-robin lane selector
+        this.concurrency = options.concurrency || 16; // V9.34: Mandatory limit from options
+        this.clientIndex = 0;
         this.startOffset = options.start || 0;
         this.endOffset = (options.end !== undefined) ? options.end : fileSize - 1;
 
@@ -120,7 +120,7 @@ class TurboSMBReadStream extends Readable {
         this.destroyed_flag = false;
         this.fileHandles = []; this.laneInFlight = []; // One handle per client (lane)
         this.opening = false;
-        this.currentConcurrency = 24; // V9.20 Katana-Start (3 lanes * 8 reqs)
+        this.currentConcurrency = 8; // V9.34: Conservative start
         this.fetchedInCurrentCycle = 0;
 
         // Performance metrics (Real-time Delta)
@@ -275,12 +275,17 @@ class TurboSMBReadStream extends Readable {
 
         try {
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V9.33] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
+                console.log(`[TURBO][V9.34] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
             }
             const buf = Buffer.allocUnsafe(size);
             this.inFlightCount++; // TRACK IO
-            const bytesRead = await client.readP(handle, buf, 0, size, pos);
-            this.inFlightCount--; // LAND IO
+            let bytesRead;
+            try {
+                bytesRead = await client.readP(handle, buf, 0, size, pos);
+            } finally {
+                this.inFlightCount--; // V9.34: ABSOLUTE LANDING GUARANTEE
+            }
+
             const execTime = Date.now() - startTime; this.laneInFlight[laneIdx]--;
             if (this.destroyed_flag) return;
 
@@ -1185,29 +1190,41 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.34] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Unconditional Shutdown & Session Purge (V9.33 The Event Horizon)
+                // 1. Unconditional Shutdown & Session Purge (V9.34 The Deep Space)
                 if (lastPreviewStream) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SINGLE_IGNITION] Purging previous state...`);
-                    // We await shutdown even if it's already "destroyed" because IO might be in-flight
-                    await lastPreviewStream.shutdown().catch(() => { });
-                    // V9.33: Absolute kill of the TCP session 
-                    clearSMBByTag('streaming');
-                    // Critical 1200ms Gap to allow the router's protocol stack to undergo a cold reset
-                    await new Promise(r => setTimeout(r, 1200));
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.34] [SINGLE_IGNITION] Purging previous state...`);
+
+                    let drainSuccess = true;
+                    await lastPreviewStream.shutdown().catch(e => {
+                        console.error('[TURBO][V9.34] Shutdown catch:', e.message);
+                        drainSuccess = false;
+                    });
+
+                    // V9.34: If drainage failed (SHUTDOWN_WARN), the router is likely choked.
+                    // We must trigger a HARD meltdown reset.
+                    if (lastPreviewStream.inFlightCount > 0) {
+                        console.error(`[${new Date().toLocaleTimeString()}][TURBO][V9.34] [MELTDOWN] IO Drainage Failed (Left: ${lastPreviewStream.inFlightCount}). Triggering 2.5s Hard Reset.`);
+                        clearSMBByTag('streaming');
+                        await new Promise(r => setTimeout(r, 2500));
+                    } else {
+                        // Healthy sequence: Clear and wait standard 1.2s
+                        clearSMBByTag('streaming');
+                        await new Promise(r => setTimeout(r, 1200));
+                    }
                 }
 
-                // 2. Persistent Client Retrieval (Ghost-Protocol v2.1)
-                // We further restrict packetConcurrency to 4 for total safety
-                const primaryClient = getSMBClient(config, { tag: 'streaming', packetConcurrency: 4 });
+                // 2. Persistent Client Retrieval (Ghost-Protocol v2.3)
+                // We further restrict packetConcurrency to 2 for absolute protocol safety
+                const primaryClient = getSMBClient(config, { tag: 'streaming', packetConcurrency: 2 });
                 const lanes = [primaryClient];
 
                 try {
                     // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V9.33] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V9.34] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
                     }
@@ -1269,13 +1286,13 @@ app.get('/api/raw', async (req, res) => {
                         }
                     });
                 } catch (e) {
-                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.34] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
                     // V9.33: Critical session recovery
                     clearSMBByTag('streaming');
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.34] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
