@@ -151,7 +151,7 @@ class TurboSMBReadStream extends Readable {
             for (let i = 0; i < this.clients.length; i++) {
                 if (this.destroyed_flag) break;
                 const handle = await executeSMBCommand(this.clients[i], () => {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [SMB_OPEN] ${path.basename(this.smbPath)}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO] [SMB_OPEN] ${path.basename(this.smbPath)}`);
                     return this.clients[i].openP(this.smbPath, 'r');
                 }, 20000);
                 results.push(handle);
@@ -166,51 +166,28 @@ class TurboSMBReadStream extends Readable {
 
     // V10.8: Graceful Shutdown (Wait for IO to drain)
     async shutdown() {
-        if (this.destroyed_flag && this.inFlightCount === 0) return; // Already clean
+        if (this.destroyed_flag && this.inFlightCount === 0) return;
         this.destroyed_flag = true;
         const shutdownId = Math.random().toString(36).slice(-4);
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
 
-        // 1. Wait for mid-air IO packets to land (Max 2s timeout)
         const timeout = Date.now() + 2000;
         while (this.inFlightCount > 0 && Date.now() < timeout) {
             await new Promise(r => setTimeout(r, 50));
         }
 
-        if (this.inFlightCount > 0) console.warn(`[TURBO][V10.8] [SHUTDOWN_WARN] Forced shutdown while ${this.inFlightCount} IOs still pending`);
+        if (this.inFlightCount > 0) console.warn(`[TURBO] [SHUTDOWN_WARN] Forced shutdown while ${this.inFlightCount} IOs pending`);
 
-        // 2. Logical Clean up Only (V10.8)
         await this._physicalCleanup();
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [SHUTDOWN_OK] ${shutdownId}`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO] [SHUTDOWN_OK] ${shutdownId}`);
     }
 
     _destroy(err, cb) {
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [STREAM_DESTROY] Self-destructing...`);
+        if (this.destroyed_flag) return;
         this.destroyed_flag = true;
-        this.bufferMap.clear(); // V10.8: Immediate Memory Dump
-        this._physicalCleanup().then(() => cb(err));
-    }
-
-    async _physicalCleanup() {
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO] [STREAM_DESTROY] Self-destructing...`);
         this.bufferMap.clear();
-        if (this.fileHandles.length > 0) {
-            const closePromises = this.fileHandles.map((handle, idx) => {
-                const client = this.clients[idx];
-                if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [SMB_CLOSE] Handle ${handle}`);
-                    return executeSMBCommand(client, () => client.closeP(handle)).catch(() => { });
-                }
-            });
-            await Promise.all(closePromises);
-            this.fileHandles = [];
-        }
-    }
-
-    _destroy(err, callback) {
-        this.destroyed_flag = true;
-        this.bufferMap.clear();
-        // Fire and forget physical cleanup if not already called via shutdown
-        this._physicalCleanup().finally(() => super._destroy(err, callback));
+        this._physicalCleanup().finally(() => super._destroy(err, cb));
     }
 
     async _pump() {
@@ -291,7 +268,7 @@ class TurboSMBReadStream extends Readable {
             }
 
             if (this.chunkCount % 50 === 0) {
-                console.log(`[TURBO][V10.8] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
+                console.log(`[TURBO] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
             }
             const buf = Buffer.allocUnsafe(size);
             this.inFlightCount++; // TRACK IO
@@ -299,11 +276,7 @@ class TurboSMBReadStream extends Readable {
             try {
                 bytesRead = await client.readP(handle, buf, 0, size, pos);
 
-                // V10.8: Immediate Return on Destruction (Post-Read)
-                if (this.destroyed_flag) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [IO_ABORT] Post-IO abort at ${pos}`);
-                    return;
-                }
+                if (this.destroyed_flag) return;
             } finally {
                 this.inFlightCount--; // V9.34: ABSOLUTE LANDING GUARANTEE
             }
@@ -318,7 +291,7 @@ class TurboSMBReadStream extends Readable {
             this.chunkCount++;
 
             if (this.chunkCount % 50 === 0) {
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
             }
 
             // V10.8 Katana ACC Engine
@@ -340,7 +313,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 100 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -365,11 +338,7 @@ class TurboSMBReadStream extends Readable {
 
     _tryPush() {
         if (this.destroyed_flag || this.destroyed) {
-            // V10.8: Zombie prevention. Do not push any bytes!
-            if (this.bufferMap.size > 0) {
-                // console.log(`[TURBO][V10.8] [ZOMBIE_STOP] Prevented push of ${this.bufferMap.size} chunks.`);
-                this.bufferMap.clear();
-            }
+            if (this.bufferMap.size > 0) this.bufferMap.clear();
             return;
         }
 
@@ -395,14 +364,12 @@ class TurboSMBReadStream extends Readable {
                 this.backpressureStartTime = this.backpressureStartTime || Date.now();
                 const waitTime = Date.now() - this.backpressureStartTime;
 
-                // V10.8: Sampling logs (every 20MB)
                 if (Math.floor(this.nextPushPos / (1024 * 1024)) % 20 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}] [TURBO][V10.8][BACKPRESSURE] Local consumer buffer full. Waiting ${waitTime}ms...`);
+                    console.log(`[${new Date().toLocaleTimeString()}] [TURBO] [BACKPRESSURE] Local consumer buffer full. Waiting ${waitTime}ms...`);
                 }
 
-                // V10.8: PRESSURE TIMEOUT (3 Seconds)
                 if (waitTime > 3000) {
-                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V10.8][KILL_SIGNAL] Pressure Timeout (3s). Client unresponsive. Self-destructing.`);
+                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO] [KILL_SIGNAL] Pressure Timeout (3s). Client unresponsive. Self-destructing.`);
                     this.destroy(new Error('Pressure Timeout'));
                 }
                 break;
@@ -418,24 +385,19 @@ class TurboSMBReadStream extends Readable {
         }
     }
 
-    _destroy(err, callback) {
-        this.destroyed_flag = true;
+    async _physicalCleanup() {
         this.bufferMap.clear();
-
-        // V9.30: Accurate Handle Cleanup with Logs
         if (this.fileHandles.length > 0) {
-            this.fileHandles.forEach((handle, idx) => {
+            const closePromises = this.fileHandles.map((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.8] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
-                    executeSMBCommand(client, () => client.closeP(handle))
-                        .catch(e => console.warn(`[SMB Turbo] Failed to close handle:`, e.message));
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO] [SMB_CLOSE] Handle ${handle}`);
+                    return executeSMBCommand(client, () => client.closeP(handle)).catch(() => { });
                 }
             });
+            await Promise.all(closePromises);
             this.fileHandles = [];
         }
-
-        super._destroy(err, callback);
     }
 }
 
