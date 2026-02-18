@@ -244,6 +244,9 @@ class TurboSMBReadStream extends Readable {
         }
 
         try {
+            if (this.chunkCount % 10 === 0) {
+                console.log(`[TURBO][V9.27] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
+            }
             const buf = Buffer.allocUnsafe(size); // Zero-copy optimization
             // Directly call readP on selected lane with its own handle
             const bytesRead = await client.readP(handle, buf, 0, size, pos);
@@ -255,6 +258,10 @@ class TurboSMBReadStream extends Readable {
             this.activeRequests--;
             this.totalFetched += safeBytesRead;
             this.chunkCount++;
+
+            if (this.chunkCount % 10 === 0) {
+                console.log(`[TURBO][V9.27] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
+            }
 
             // V9.20 Katana ACC Engine (High Precision Feedback)
             const rtt = Date.now() - startTime;
@@ -278,7 +285,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.26] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.27.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -1158,20 +1165,22 @@ app.get('/api/raw', async (req, res) => {
             res.sendFile(resolveSafePath(reqPath));
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
-            // V9.26 Hybrid-Lane (Lazy-Dispose)
-            // Strategy: DEDICATED connection for each seek to avoid "STATUS_NETWORK_NAME_DELETED".
-            // To prevent connection storms, we use LAZY DISPOSAL: old connections hang around for 5s before closing.
+            // V9.27 Hybrid-Lane (Ghost-Protocol / Ultra-Stability)
+            // Strategy: Dedicated connection + PACKET_CONCURRENCY=1.
+            // Absolute minimal pressure on SMB state machine to isolate if the error is concurrency-related.
             const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-            console.log(`[TURBO][V9.26] New Stream Request: ${streamId} for ${path.basename(reqPath)}`);
+            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.27] [INIT] ${streamId} for ${path.basename(reqPath)}`);
 
             const lanes = [];
-            // Dedicated lane, standard concurrency
-            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 20, tag: streamId }));
+            // FORCE CONCURRENCY=1 for the entire lane. One request at a time.
+            lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 1, tag: streamId }));
 
             const primaryClient = lanes[0];
 
             try {
+                console.log(`[TURBO][V9.27] [STAT_START] ${streamId}`);
                 const stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
+                console.log(`[TURBO][V9.27] [STAT_OK] ${streamId} size=${stats.size}`);
                 const fileSize = stats.size;
                 const lastModified = stats.mtime;
                 const range = req.headers.range;
@@ -1224,15 +1233,12 @@ app.get('/api/raw', async (req, res) => {
                     if (!stream.finished) {
                         stream.destroy(); // Close FILE HANDLE
 
-                        // V9.26 Hybrid-Lane: LAZY DISPOSAL
-                        // We do NOT close the SMB connection immediately. We let it hang for 5s.
-                        // This prevents "Close -> Open" collision on the same socket (if we were reusing)
-                        // AND prevents "Connect/Disconnect Storm" (if we are creating new ones).
-                        // It smooths out the tear-down process.
+                        // V9.27 Hybrid-Lane: LAZY DISPOSAL
+                        // Reduce to 1000ms to avoid hitting total connection limits.
                         setTimeout(() => {
-                            console.log(`[TURBO][V9.26] Lazy disposing client for ${streamId}`);
+                            console.log(`[TURBO][V9.27] Lazy disposing client for ${streamId}`);
                             clearSMBByTag(streamId);
-                        }, 5000);
+                        }, 1000);
                     }
                 });
             } catch (e) {
