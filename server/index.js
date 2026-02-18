@@ -279,135 +279,133 @@ class TurboSMBReadStream extends Readable {
             return;
         }
 
-    }
-
         try {
-    // V10.5: High Frequency Loop Break
-    if (this.destroyed_flag) return;
+            // V10.5: High Frequency Loop Break
+            if (this.destroyed_flag) return;
 
-    if (this.chunkCount % 10 === 0) {
-        console.log(`[TURBO][V10.5] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
-    }
-    const buf = Buffer.allocUnsafe(size);
-    this.inFlightCount++; // TRACK IO
-    let bytesRead;
-    try {
-        bytesRead = await client.readP(handle, buf, 0, size, pos);
-
-        // V10.5: Immediate Return on Destruction (Post-Read)
-        if (this.destroyed_flag) return;
-    } finally {
-        this.inFlightCount--; // V9.34: ABSOLUTE LANDING GUARANTEE
-    }
-
-    const execTime = Date.now() - startTime; this.laneInFlight[laneIdx]--;
-    if (this.destroyed_flag) return;
-
-    const safeBytesRead = bytesRead || 0;
-    this.bufferMap.set(pos, (safeBytesRead === size) ? buf : buf.subarray(0, safeBytesRead));
-    this.activeRequests--;
-    this.totalFetched += safeBytesRead;
-    this.chunkCount++;
-
-    if (this.chunkCount % 10 === 0) {
-        console.log(`[TURBO][V10.5] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
-    }
-
-    // V10.5 Katana ACC Engine
-    const rtt = Date.now() - startTime;
-    if (rtt > 2500) {
-        this.currentConcurrency = Math.max(24, Math.floor(this.currentConcurrency - 8));
-    } else if (rtt < 1200) {
-        this.fetchedInCurrentCycle++;
-        if (this.fetchedInCurrentCycle >= 4) {
-            this.currentConcurrency = Math.min(this.concurrency, this.currentConcurrency + 1);
-            this.fetchedInCurrentCycle = 0;
-        }
-    }
-
-    const now = Date.now();
-    if (now - this.lastLogTime >= 1000) {
-        const sessionDt = (now - this.startTime) / 1000;
-        const sessionAvg = (this.totalFetched / (1024 * 1024) / sessionDt).toFixed(2);
-        const dt = (now - this.lastLogTime) / 1000;
-        const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
-        if (this.chunkCount % 15 === 0) {
-            console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.5] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
-        }
-
-        this.lastLogTime = now;
-        this.lastTotalFetched = this.totalFetched;
-    }
-
-    this._tryPush();
-    this._pump();
-} catch (err) {
-    // Silenced closing errors
-    if (this.destroyed_flag && (
-        err.code === 'STATUS_FILE_CLOSED' ||
-        err.message?.includes('STATUS_FILE_CLOSED') ||
-        err.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION'
-    )) return;
-
-    console.error(`[${new Date().toLocaleTimeString()}][TURBO][IO-ERR] Offset ${pos} (Exec: ${Date.now() - startTime}ms):`, err.message);
-    this.activeRequests--;
-    if (!this.destroyed_flag) this.destroy(err);
-}
-    }
-
-_tryPush() {
-    if (this.destroyed_flag) return;
-
-    let pushedCount = 0;
-    while (this.bufferMap.has(this.nextPushPos)) {
-        const buffer = this.bufferMap.get(this.nextPushPos);
-        this.bufferMap.delete(this.nextPushPos);
-
-        const size = buffer.length;
-        this.nextPushPos += size;
-
-        const canContinue = this.push(buffer);
-        pushedCount++;
-
-        if (this.nextPushPos > this.endOffset) {
-            this.finished = true;
-            this.push(null);
-            // EOF reached silently
-            break;
-        }
-
-        if (!canContinue) {
-            console.log(`[${new Date().toLocaleTimeString()}] [TURBO][BACKPRESSURE] Local consumer buffer full. Pausing push at ${Math.floor(this.nextPushPos / (1024 * 1024))}MB`);
-            break;
-        }
-    }
-
-    // If we are stuck waiting for a specific chunk
-    if (pushedCount === 0 && this.bufferMap.size > 0 && !this.finished) {
-        const available = Array.from(this.bufferMap.keys()).sort((a, b) => a - b);
-        // console.log(`[${new Date().toLocaleTimeString()}] [TURBO][STATUS] Waiting for offset: ${this.nextPushPos}. Buffers ready: ${available.length} | First ready: ${available[0]}`);
-    }
-}
-
-_destroy(err, callback) {
-    this.destroyed_flag = true;
-    this.bufferMap.clear();
-
-    // V9.30: Accurate Handle Cleanup with Logs
-    if (this.fileHandles.length > 0) {
-        this.fileHandles.forEach((handle, idx) => {
-            const client = this.clients[idx];
-            if (client && handle) {
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.5] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
-                executeSMBCommand(client, () => client.closeP(handle))
-                    .catch(e => console.warn(`[SMB Turbo] Failed to close handle:`, e.message));
+            if (this.chunkCount % 10 === 0) {
+                console.log(`[TURBO][V10.5] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
             }
-        });
-        this.fileHandles = [];
+            const buf = Buffer.allocUnsafe(size);
+            this.inFlightCount++; // TRACK IO
+            let bytesRead;
+            try {
+                bytesRead = await client.readP(handle, buf, 0, size, pos);
+
+                // V10.5: Immediate Return on Destruction (Post-Read)
+                if (this.destroyed_flag) return;
+            } finally {
+                this.inFlightCount--; // V9.34: ABSOLUTE LANDING GUARANTEE
+            }
+
+            const execTime = Date.now() - startTime; this.laneInFlight[laneIdx]--;
+            if (this.destroyed_flag) return;
+
+            const safeBytesRead = bytesRead || 0;
+            this.bufferMap.set(pos, (safeBytesRead === size) ? buf : buf.subarray(0, safeBytesRead));
+            this.activeRequests--;
+            this.totalFetched += safeBytesRead;
+            this.chunkCount++;
+
+            if (this.chunkCount % 10 === 0) {
+                console.log(`[TURBO][V10.5] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
+            }
+
+            // V10.5 Katana ACC Engine
+            const rtt = Date.now() - startTime;
+            if (rtt > 2500) {
+                this.currentConcurrency = Math.max(24, Math.floor(this.currentConcurrency - 8));
+            } else if (rtt < 1200) {
+                this.fetchedInCurrentCycle++;
+                if (this.fetchedInCurrentCycle >= 4) {
+                    this.currentConcurrency = Math.min(this.concurrency, this.currentConcurrency + 1);
+                    this.fetchedInCurrentCycle = 0;
+                }
+            }
+
+            const now = Date.now();
+            if (now - this.lastLogTime >= 1000) {
+                const sessionDt = (now - this.startTime) / 1000;
+                const sessionAvg = (this.totalFetched / (1024 * 1024) / sessionDt).toFixed(2);
+                const dt = (now - this.lastLogTime) / 1000;
+                const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
+                if (this.chunkCount % 15 === 0) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.5] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                }
+
+                this.lastLogTime = now;
+                this.lastTotalFetched = this.totalFetched;
+            }
+
+            this._tryPush();
+            this._pump();
+        } catch (err) {
+            // Silenced closing errors
+            if (this.destroyed_flag && (
+                err.code === 'STATUS_FILE_CLOSED' ||
+                err.message?.includes('STATUS_FILE_CLOSED') ||
+                err.code === 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION'
+            )) return;
+
+            console.error(`[${new Date().toLocaleTimeString()}][TURBO][IO-ERR] Offset ${pos} (Exec: ${Date.now() - startTime}ms):`, err.message);
+            this.activeRequests--;
+            if (!this.destroyed_flag) this.destroy(err);
+        }
     }
 
-    super._destroy(err, callback);
-}
+    _tryPush() {
+        if (this.destroyed_flag) return;
+
+        let pushedCount = 0;
+        while (this.bufferMap.has(this.nextPushPos)) {
+            const buffer = this.bufferMap.get(this.nextPushPos);
+            this.bufferMap.delete(this.nextPushPos);
+
+            const size = buffer.length;
+            this.nextPushPos += size;
+
+            const canContinue = this.push(buffer);
+            pushedCount++;
+
+            if (this.nextPushPos > this.endOffset) {
+                this.finished = true;
+                this.push(null);
+                // EOF reached silently
+                break;
+            }
+
+            if (!canContinue) {
+                console.log(`[${new Date().toLocaleTimeString()}] [TURBO][BACKPRESSURE] Local consumer buffer full. Pausing push at ${Math.floor(this.nextPushPos / (1024 * 1024))}MB`);
+                break;
+            }
+        }
+
+        // If we are stuck waiting for a specific chunk
+        if (pushedCount === 0 && this.bufferMap.size > 0 && !this.finished) {
+            const available = Array.from(this.bufferMap.keys()).sort((a, b) => a - b);
+            // console.log(`[${new Date().toLocaleTimeString()}] [TURBO][STATUS] Waiting for offset: ${this.nextPushPos}. Buffers ready: ${available.length} | First ready: ${available[0]}`);
+        }
+    }
+
+    _destroy(err, callback) {
+        this.destroyed_flag = true;
+        this.bufferMap.clear();
+
+        // V9.30: Accurate Handle Cleanup with Logs
+        if (this.fileHandles.length > 0) {
+            this.fileHandles.forEach((handle, idx) => {
+                const client = this.clients[idx];
+                if (client && handle) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V10.5] [SMB_CLOSE] Handle ${handle} on Lane ${idx}`);
+                    executeSMBCommand(client, () => client.closeP(handle))
+                        .catch(e => console.warn(`[SMB Turbo] Failed to close handle:`, e.message));
+                }
+            });
+            this.fileHandles = [];
+        }
+
+        super._destroy(err, callback);
+    }
 }
 
 app.post('/api/cancel', (req, res) => {
