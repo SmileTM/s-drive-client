@@ -26,9 +26,10 @@ app.use(express.json());
 
 const progressEmitter = new EventEmitter();
 const activeSmbStreams = new Map(); // stream -> smbPath
-// V9.28 The Monolith: Global Request Queue & Stat Cache
+// V9.29 The Eternal Lane: Persistent Connection & Global Mutex
 const streamingStatCache = new Map(); // path -> { size, mtime, expires }
 let streamingRequestLock = Promise.resolve();
+let lastPreviewStream = null;
 
 // --- Progress Tracking Helper (V9.6 Smooth-Hyper ported to Node.js) ---
 function createProgressStream(taskId, totalSize) {
@@ -288,7 +289,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.28.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.29.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -1169,29 +1170,34 @@ app.get('/api/raw', async (req, res) => {
         } else if (config.type === 'smb') {
             const smbPath = toSMBPath(reqPath);
 
-            // V9.28 The Monolith: Strict Sequential Ignition
-            // Wrap the entire setup in a global lock to prevent concurrent "Connect/Stat/Open" storms.
+        } else if (config.type === 'smb') {
+            const smbPath = toSMBPath(reqPath);
+
+            // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.28] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.29] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Mandatory Cooldown: Give the server 300ms to breathe if a previous stream just died
-                await new Promise(r => setTimeout(r, 300));
+                // 1. Forceful Preemption: Kill the previous stream if it's still alive
+                if (lastPreviewStream && !lastPreviewStream.destroyed) {
+                    console.log(`[TURBO][V9.29] Preemptively destroying last stream for ${smbPath}`);
+                    lastPreviewStream.destroy();
+                    // Mandatory 400ms "Air Gap" for the server to process the close handle command
+                    await new Promise(r => setTimeout(r, 400));
+                }
 
-                const lanes = [];
-                // FORCE CONCURRENCY=1 for the entire lane. One request at a time.
-                lanes.push(getSMBClient(config, { autoCloseTimeout: 0, packetConcurrency: 1, tag: streamId }));
-                const primaryClient = lanes[0];
+                // 2. Persistent Client Retrieval (Uses Cache via Tag)
+                // We use packetConcurrency: 20 which is safe for most routers
+                const primaryClient = getSMBClient(config, { tag: 'streaming', packetConcurrency: 20 });
+                const lanes = [primaryClient];
 
                 try {
-                    // 2. Stat Cache: Reduce SMB overhead for metadata
+                    // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V9.28] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V9.29] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
-                    } else {
-                        console.log(`[TURBO][V9.28] [STAT_CACHE_HIT] ${streamId}`);
                     }
 
                     const fileSize = stats.size;
@@ -1221,8 +1227,10 @@ app.get('/api/raw', async (req, res) => {
                     const mimeType = mime.lookup(reqPath) || 'application/octet-stream';
                     res.setHeader('Content-Type', mimeType);
 
-                    // Use TurboSMBReadStream with reduced concurrency for stable video play
+                    // Reduced concurrency for the stream itselt to keep pressure low (1-Lane)
                     const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, { ...options, concurrency: 16 });
+                    lastPreviewStream = stream; // Track globally
+
                     registerSmbStream(smbPath, stream);
 
                     let backpressureCount = 0;
@@ -1236,25 +1244,21 @@ app.get('/api/raw', async (req, res) => {
                         console.error('SMB Turbo Stream Error', err);
                     });
 
-                    // Attach diagnostic monitor
                     const diagStream = createProgressStream('DIAG_RAW_' + Date.now(), fileSize);
                     stream.pipe(diagStream).pipe(res);
 
                     res.on('close', () => {
                         if (!stream.finished) {
-                            stream.destroy(); // Close FILE HANDLE
-                            setTimeout(() => {
-                                console.log(`[TURBO][V9.28] Lazy disposing client for ${streamId}`);
-                                clearSMBByTag(streamId);
-                            }, 1000);
+                            stream.destroy();
+                            // No timeout here, we let the NEXT request handle the cooldown in the lock
                         }
                     });
                 } catch (e) {
-                    console.warn(`[TURBO][V9.28] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    console.warn(`[TURBO][V9.29] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[TURBO][V9.28] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[TURBO][V9.29] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
