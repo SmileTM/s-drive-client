@@ -1355,6 +1355,7 @@ app.get('/api/raw', async (req, res) => {
 
                     stream.on('error', (err) => {
                         if (err.code === 'STATUS_FILE_CLOSED' || err.message?.includes('STATUS_FILE_CLOSED')) return;
+                        if (err.message === 'Pressure Timeout') return; // V10.8.1: Silence expected safety closure
                         console.error('SMB Turbo Stream Error', err);
                     });
 
