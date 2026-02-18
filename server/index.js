@@ -129,7 +129,7 @@ class TurboSMBReadStream extends Readable {
         this.lastTotalFetched = 0;
         this.totalFetched = 0;
         this.chunkCount = 0;
-        this.inFlightCount = 0; // V9.31: Global IO Tracker
+        this.inFlightCount = 0; // V9.33: Global IO Tracker
     }
 
     async _read() {
@@ -150,7 +150,7 @@ class TurboSMBReadStream extends Readable {
             for (let i = 0; i < this.clients.length; i++) {
                 if (this.destroyed_flag) break;
                 const handle = await executeSMBCommand(this.clients[i], () => {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [SMB_OPEN] ${path.basename(this.smbPath)}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SMB_OPEN] ${path.basename(this.smbPath)}`);
                     return this.clients[i].openP(this.smbPath, 'r');
                 }, 20000);
                 results.push(handle);
@@ -163,12 +163,12 @@ class TurboSMBReadStream extends Readable {
         }
     }
 
-    // V9.31: Graceful Shutdown (Wait for IO to drain)
+    // V9.33: Graceful Shutdown (Wait for IO to drain)
     async shutdown() {
-        if (this.destroyed_flag) return;
+        if (this.destroyed_flag && this.inFlightCount === 0) return; // Already clean
         this.destroyed_flag = true;
         const shutdownId = Math.random().toString(36).slice(-4);
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SHUTDOWN_START] ${shutdownId} (In-Flight: ${this.inFlightCount})`);
 
         // 1. Wait for mid-air IO packets to land (Max 2s timeout)
         const timeout = Date.now() + 2000;
@@ -176,11 +176,11 @@ class TurboSMBReadStream extends Readable {
             await new Promise(r => setTimeout(r, 50));
         }
 
-        if (this.inFlightCount > 0) console.warn(`[TURBO][V9.31] [SHUTDOWN_WARN] Forced shutdown while ${this.inFlightCount} IOs still pending`);
+        if (this.inFlightCount > 0) console.warn(`[TURBO][V9.33] [SHUTDOWN_WARN] Forced shutdown while ${this.inFlightCount} IOs still pending`);
 
         // 2. Physical Clean up
         await this._physicalCleanup();
-        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [SHUTDOWN_OK] ${shutdownId}`);
+        console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SHUTDOWN_OK] ${shutdownId}`);
     }
 
     async _physicalCleanup() {
@@ -189,7 +189,7 @@ class TurboSMBReadStream extends Readable {
             const closePromises = this.fileHandles.map((handle, idx) => {
                 const client = this.clients[idx];
                 if (client && handle) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [SMB_CLOSE] Handle ${handle}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SMB_CLOSE] Handle ${handle}`);
                     return executeSMBCommand(client, () => client.close(handle)).catch(() => { });
                 }
             });
@@ -275,7 +275,7 @@ class TurboSMBReadStream extends Readable {
 
         try {
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V9.32] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
+                console.log(`[TURBO][V9.33] [IO_START] Pos: ${pos} | Lane: ${laneIdx} | Slot: ${this.activeRequests}/${this.concurrency}`);
             }
             const buf = Buffer.allocUnsafe(size);
             this.inFlightCount++; // TRACK IO
@@ -291,10 +291,10 @@ class TurboSMBReadStream extends Readable {
             this.chunkCount++;
 
             if (this.chunkCount % 10 === 0) {
-                console.log(`[TURBO][V9.32] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
+                console.log(`[TURBO][V9.33] [IO_OK] Pos: ${pos} | Bytes: ${safeBytesRead} | Time: ${execTime}ms`);
             }
 
-            // V9.31 Katana ACC Engine
+            // V9.33 Katana ACC Engine
             const rtt = Date.now() - startTime;
             if (rtt > 2500) {
                 this.currentConcurrency = Math.max(24, Math.floor(this.currentConcurrency - 8));
@@ -313,7 +313,7 @@ class TurboSMBReadStream extends Readable {
                 const dt = (now - this.lastLogTime) / 1000;
                 const instantSpeed = ((this.totalFetched - this.lastTotalFetched) / (1024 * 1024) / dt).toFixed(2);
                 if (this.chunkCount % 15 === 0) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31.1] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] S: ${instantSpeed}MB/s (均速: ${sessionAvg}MB/s) | Net: ${execTime}ms | P: ${this.currentConcurrency} | Buf: ${this.bufferMap.size}`);
                 }
 
                 this.lastLogTime = now;
@@ -615,7 +615,7 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
             console.log(`[SMB Retry] Error (${err.code || err.message}), reconnecting...`);
             // Force disconnect/reset state
             try { client.disconnect(); } catch (e) { }
-            // V9.32: 400ms Backoff before retry to let server recover its TCP stack
+            // V9.33: 400ms Backoff before retry to let server recover its TCP stack
             await new Promise(r => setTimeout(r, 400));
             // Retry once
             try {
@@ -623,7 +623,7 @@ const executeSMBCommand = async (client, commandFn, timeoutMs = 0) => {
                 return await commandFn();
             } catch (retryErr) {
                 console.error('[SMB Retry Fail] Hard resetting session cache.', retryErr.message);
-                // V9.31: If retry fails, we MUST kill the cache for this client to force a fresh TCP start
+                // V9.33: If retry fails, we MUST kill the cache for this client to force a fresh TCP start
                 for (const [key, c] of smbClients.entries()) {
                     if (c === client) {
                         try { c.disconnect(); } catch (e) { }
@@ -1185,16 +1185,17 @@ app.get('/api/raw', async (req, res) => {
             // V9.29 The Eternal Lane: Strict Persistent Serialization
             await (streamingRequestLock = streamingRequestLock.then(async () => {
                 const streamId = 'str_' + Date.now().toString(36).slice(-5) + '_' + Math.floor(Math.random() * 1000);
-                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.31] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
+                console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [LOCK_ENTER] ${streamId} for ${path.basename(reqPath)}`);
 
-                // 1. Forced Shutdown & Session Purge (V9.32 The Absolute Zero)
-                if (lastPreviewStream && !lastPreviewStream.destroyed) {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [SINGLE_IGNITION] Purging previous session...`);
-                    await lastPreviewStream.shutdown();
-                    // V9.32: Physical kill of the TCP session to ensure a clean slate
+                // 1. Unconditional Shutdown & Session Purge (V9.33 The Event Horizon)
+                if (lastPreviewStream) {
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SINGLE_IGNITION] Purging previous state...`);
+                    // We await shutdown even if it's already "destroyed" because IO might be in-flight
+                    await lastPreviewStream.shutdown().catch(() => { });
+                    // V9.33: Absolute kill of the TCP session 
                     clearSMBByTag('streaming');
-                    // Massive 1000ms Gap to allow the router to completely clear handles/socket tables
-                    await new Promise(r => setTimeout(r, 1000));
+                    // Critical 1200ms Gap to allow the router's protocol stack to undergo a cold reset
+                    await new Promise(r => setTimeout(r, 1200));
                 }
 
                 // 2. Persistent Client Retrieval (Ghost-Protocol v2.1)
@@ -1206,7 +1207,7 @@ app.get('/api/raw', async (req, res) => {
                     // 3. Stat Cache: High efficiency metadata
                     let stats = streamingStatCache.get(smbPath);
                     if (!stats || stats.expires < Date.now()) {
-                        console.log(`[TURBO][V9.31] [STAT_FETCH] ${streamId}`);
+                        console.log(`[TURBO][V9.33] [STAT_FETCH] ${streamId}`);
                         stats = await executeSMBCommand(primaryClient, () => primaryClient.statP(smbPath));
                         streamingStatCache.set(smbPath, { ...stats, expires: Date.now() + 30000 });
                     }
@@ -1268,13 +1269,13 @@ app.get('/api/raw', async (req, res) => {
                         }
                     });
                 } catch (e) {
-                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
-                    // V9.32: Critical session recovery
+                    console.warn(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [SERIAL_SETUP_FAIL] ${streamId}:`, e.message);
+                    // V9.33: Critical session recovery
                     clearSMBByTag('streaming');
                     if (!res.headersSent) res.status(500).send(e.message);
                     else res.end();
                 } finally {
-                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.32] [LOCK_RELEASE] ${streamId}`);
+                    console.log(`[${new Date().toLocaleTimeString()}][TURBO][V9.33] [LOCK_RELEASE] ${streamId}`);
                 }
             }).catch(err => console.error('[TURBO] Global Queue Critical Error', err)));
         } else {
