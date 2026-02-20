@@ -750,6 +750,26 @@ const base64ToBlob = (base64, mimeType = 'application/octet-stream') => {
     return new Blob([byteArray], { type: mimeType });
 };
 
+const guessMimeTypeFromPath = (path = '') => {
+    const lower = String(path).toLowerCase();
+    if (lower.endsWith('.flac')) return 'audio/flac';
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.aac')) return 'audio/aac';
+    if (lower.endsWith('.ogg')) return 'audio/ogg';
+    if (lower.endsWith('.mp4')) return 'video/mp4';
+    if (lower.endsWith('.mov')) return 'video/quicktime';
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.mkv')) return 'video/x-matroska';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    return 'application/octet-stream';
+};
+
 let cachedServerUrl = null;
 
 // --- Helper: Notifications ---
@@ -1963,11 +1983,61 @@ const NativeAPI = {
             try {
                 const drives = await NativeAPI.getDrives();
                 const config = drives.find(d => d.id === driveId);
+
+                // [STREAM] SMB Streaming via Local Proxy
+                if (config.type === 'smb') {
+                    try {
+                        if (!cachedServerUrl) {
+                            const res = await WebDavNative.getServerUrl();
+                            if (res && res.url) cachedServerUrl = res.url;
+                        }
+                        if (cachedServerUrl) {
+                            const baseUrl = cachedServerUrl.endsWith('/') ? cachedServerUrl.slice(0, -1) : cachedServerUrl;
+                            const pwd = decrypt(config.password);
+                            const params = new URLSearchParams({
+                                address: config.address,
+                                share: config.share,
+                                path: path,
+                                username: config.username,
+                                password: pwd,
+                                domain: config.domain || ''
+                            });
+                            const url = `${baseUrl}/smb?${params.toString()}`;
+                            console.log('[Native] Generated SMB Stream URL:', url);
+                            return url;
+                        }
+                    } catch (e) {
+                        console.warn('[Native] Failed to get local server for SMB stream:', e);
+                    }
+                }
+
+                // [STREAM] WebDAV streaming via Local Proxy on native iOS/Android.
+                // This enables range requests so media can seek without full pre-download.
+                if (Capacitor.isNativePlatform()) {
+                    try {
+                        if (!cachedServerUrl) {
+                            const res = await WebDavNative.getServerUrl();
+                            if (res && res.url) cachedServerUrl = res.url;
+                        }
+                        if (cachedServerUrl) {
+                            const baseUrl = cachedServerUrl.endsWith('/') ? cachedServerUrl.slice(0, -1) : cachedServerUrl;
+                            const params = new URLSearchParams({
+                                baseUrl: config.url,
+                                path: path,
+                                username: config.username || '',
+                                password: decrypt(config.password || '')
+                            });
+                            return `${baseUrl}/webdav?${params.toString()}`;
+                        }
+                    } catch (e) {
+                        console.warn('[Native] Failed to build local WebDAV stream URL:', e);
+                    }
+                }
+
+                // Fallback for web/electron: fetch full file and use blob URL.
                 const client = getWebDAVClient(config);
-                // Get file link (download link) usually requires auth.
-                // Better to download content and convert to blob URL
                 const buffer = await client.getFileContents(path, { format: 'binary' });
-                const blob = base64ToBlob(buffer);
+                const blob = base64ToBlob(buffer, guessMimeTypeFromPath(path));
                 return URL.createObjectURL(blob);
             } catch (e) { return ''; }
         }

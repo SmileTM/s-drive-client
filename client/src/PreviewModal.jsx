@@ -28,21 +28,23 @@ const CustomAudioPlayer = ({ url, autoPlay = false }) => {
   const [isPlaying, setIsPlaying] = useState(autoPlay);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-
-  // Debug: Check if worker is accessible
-  useEffect(() => {
-    console.log('[Preview] Worker Src:', pdfjs.GlobalWorkerOptions.workerSrc);
-    fetch(pdfjs.GlobalWorkerOptions.workerSrc)
-      .then(res => console.log('[Preview] Worker fetch status:', res.status))
-      .catch(e => console.error('[Preview] Worker fetch failed:', e));
-  }, []);
+  const safePlay = (media) => {
+    if (!media) return;
+    const promise = media.play();
+    if (promise && typeof promise.catch === 'function') {
+      promise.catch((e) => {
+        console.warn('[Preview] Audio play() failed:', e);
+        setIsPlaying(false);
+      });
+    }
+  };
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
     if (autoPlay) {
-      audio.play().catch(() => setIsPlaying(false));
+      safePlay(audio);
     }
 
     const updateTime = () => setCurrentTime(audio.currentTime);
@@ -71,7 +73,7 @@ const CustomAudioPlayer = ({ url, autoPlay = false }) => {
     if (isPlaying) {
       audioRef.current.pause();
     } else {
-      audioRef.current.play();
+      safePlay(audioRef.current);
     }
   };
 
@@ -127,6 +129,18 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
   const [isPlaying, setIsPlaying] = useState(autoPlay);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekTime, setSeekTime] = useState(0);
+  const safePlay = (media) => {
+    if (!media) return;
+    const promise = media.play();
+    if (promise && typeof promise.catch === 'function') {
+      promise.catch((e) => {
+        console.warn('[Preview] Video play() failed:', e);
+        setIsPlaying(false);
+      });
+    }
+  };
 
   useEffect(() => {
     const video = videoRef.current;
@@ -135,7 +149,9 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
     // AutoPlay handled by prop on element, but we need to sync state
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
-    const updateTime = () => setCurrentTime(video.currentTime);
+    const updateTime = () => {
+      if (!isSeeking) setCurrentTime(video.currentTime);
+    };
     const updateDuration = () => setDuration(video.duration);
     const onEnded = () => setIsPlaying(false);
 
@@ -152,20 +168,36 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
       video.removeEventListener('loadedmetadata', updateDuration);
       video.removeEventListener('ended', onEnded);
     };
-  }, [url]);
+  }, [url, isSeeking]);
 
   const togglePlay = () => {
     if (!videoRef.current) return;
     if (isPlaying) videoRef.current.pause();
-    else videoRef.current.play();
+    else safePlay(videoRef.current);
   };
 
   const handleSeek = (e) => {
     const time = parseFloat(e.target.value);
-    if (videoRef.current) {
-      videoRef.current.currentTime = time;
-      setCurrentTime(time);
+    setSeekTime(time);
+    setCurrentTime(time);
+  };
+
+  const beginSeek = () => {
+    if (!videoRef.current) return;
+    setIsSeeking(true);
+    setSeekTime(videoRef.current.currentTime || 0);
+  };
+
+  const commitSeek = () => {
+    if (!videoRef.current) return;
+    const target = Number.isFinite(seekTime) ? seekTime : 0;
+    if (typeof videoRef.current.fastSeek === 'function') {
+      videoRef.current.fastSeek(target);
+    } else {
+      videoRef.current.currentTime = target;
     }
+    setCurrentTime(target);
+    setIsSeeking(false);
   };
 
   return (
@@ -175,6 +207,8 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
           ref={videoRef}
           src={url}
           autoPlay={autoPlay}
+          preload="metadata"
+          playsInline
           className="w-full max-h-[70vh] object-contain"
         />
         {/* Overlay Play Button (Fade out if playing?) - simplified: show only when paused */}
@@ -201,12 +235,14 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
             type="range"
             min="0"
             max={duration || 0}
-            value={currentTime}
+            value={isSeeking ? seekTime : currentTime}
             onChange={handleSeek}
+            onMouseDown={beginSeek}
+            onTouchStart={(e) => { e.stopPropagation(); beginSeek(); }}
+            onMouseUp={commitSeek}
+            onTouchEnd={(e) => { e.stopPropagation(); commitSeek(); }}
             onClick={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
             onTouchMove={(e) => e.stopPropagation()}
-            onTouchEnd={(e) => e.stopPropagation()}
             className="w-full h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:accent-indigo-400"
           />
 

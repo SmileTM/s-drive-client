@@ -19,6 +19,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.RandomAccessFile;
 import java.io.ByteArrayOutputStream;
 import java.net.ServerSocket;
@@ -52,6 +53,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import androidx.core.app.NotificationCompat;
 import android.widget.RemoteViews;
+import android.os.PowerManager;
 
 import java.util.concurrent.ConcurrentHashMap;
 import okhttp3.Call;
@@ -94,7 +96,6 @@ public class WebDavPlugin extends Plugin {
 
     private void startTransfer() {
         int count = activeTransfers.getAndIncrement();
-        android.util.Log.d("WebDavNative", "startTransfer, count before increment: " + count);
         if (count == 0) {
             Context context = getContext();
             Intent intent = new Intent(context, FileTransferService.class);
@@ -105,21 +106,10 @@ public class WebDavPlugin extends Plugin {
                 context.startService(intent);
             }
         }
-        
-        // [PERF] Acquire WiFi Lock for stable high throughput
-        if (wifiLock == null) {
-            WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            if (wm != null) {
-                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "WebDavSMBTransferLock");
-                wifiLock.acquire();
-                android.util.Log.d("WebDavNative", "WiFi High-Perf Lock Acquired");
-            }
-        }
     }
 
     private void endTransfer() {
         int count = activeTransfers.decrementAndGet();
-        android.util.Log.d("WebDavNative", "endTransfer, count after decrement: " + count);
         if (count <= 0) {
             activeTransfers.set(0);
             Context context = getContext();
@@ -130,13 +120,6 @@ public class WebDavPlugin extends Plugin {
             // Force cancel notification ID 9999
             NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             manager.cancel(9999);
-
-            // [PERF] Release WiFi Lock
-            if (wifiLock != null && wifiLock.isHeld()) {
-                wifiLock.release();
-                wifiLock = null;
-                android.util.Log.d("WebDavNative", "WiFi High-Perf Lock Released");
-            }
         }
     }
 
@@ -198,11 +181,20 @@ public class WebDavPlugin extends Plugin {
         super.load();
         initClient();
         try {
-            // Set some default properties for jcifs-ng if needed
-            // Properties prop = new Properties();
-            // prop.setProperty("jcifs.smb.client.minVersion", "SMB202");
-            // prop.setProperty("jcifs.smb.client.maxVersion", "SMB311");
-            // SingletonContext.init(prop);
+            // [PERF] Global WiFi Lock for High Performance
+            if (wifiLock == null) {
+                WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wm != null) {
+                    // WIFI_MODE_FULL_LOW_LATENCY = 4 (API 29+)
+                    int lockType = WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        lockType = 4; // Use literal 4 to avoid compile error on older SDKs if not defined
+                    }
+                    wifiLock = wm.createWifiLock(lockType, "WebDavGlobalHighPerfLock");
+                    wifiLock.acquire();
+                    android.util.Log.i("WebDavNative", "Global WiFi Lock Acquired (Type: " + lockType + ")");
+                }
+            }
             
             localServer = new LocalFileServer();
             localServer.start();
@@ -215,6 +207,11 @@ public class WebDavPlugin extends Plugin {
     protected void handleOnDestroy() {
         if (localServer != null) {
             localServer.stopServer();
+        }
+        if (wifiLock != null && wifiLock.isHeld()) {
+            wifiLock.release();
+            wifiLock = null;
+            android.util.Log.i("WebDavNative", "Global WiFi Lock Released");
         }
         super.handleOnDestroy();
     }
@@ -260,6 +257,24 @@ public class WebDavPlugin extends Plugin {
             
             // Cancel SMB
             cancelledSmbTasks.put(id, true);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void requestBatteryOptimizationBypass(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            String packageName = getContext().getPackageName();
+            PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                Intent intent = new Intent();
+                intent.setAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(Uri.parse("package:" + packageName));
+                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(intent);
+                call.resolve();
+                return;
+            }
         }
         call.resolve();
     }
@@ -1101,6 +1116,7 @@ public class WebDavPlugin extends Plugin {
         private int port;
         private boolean isRunning = true;
         private final ExecutorService executor = Executors.newFixedThreadPool(16);
+        private final AtomicInteger activeStreams = new AtomicInteger(0);
 
         public LocalFileServer() throws IOException {
             serverSocket = new ServerSocket(0);
@@ -1163,6 +1179,16 @@ public class WebDavPlugin extends Plugin {
                             }
                         }
                     }
+                }
+
+                // Route: /smb/stream?address=...
+                if (path.startsWith("/smb")) {
+                    if ("OPTIONS".equals(method)) {
+                        out.write("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Range, Content-Type\r\nAccess-Control-Max-Age: 86400\r\n\r\n".getBytes());
+                    } else {
+                        handleSmbStream(parts[1], rangeStart, rangeEnd, out);
+                    }
+                    return;
                 }
 
                 File root;
@@ -1250,6 +1276,253 @@ public class WebDavPlugin extends Plugin {
             } finally {
                 try { socket.close(); } catch (IOException e) {}
             }
+        }
+
+        public void handleSmbStream(String uri, long rangeStart, long rangeEnd, OutputStream out) {
+            SmbRandomAccessFile raf = null;
+            final int streamId = activeStreams.incrementAndGet();
+            
+            try {
+                android.util.Log.d("WebDavNative", "handleSmbStream: " + uri);
+                
+                int qIndex = uri.indexOf('?');
+                if (qIndex == -1) {
+                    out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes());
+                    return;
+                }
+                
+                String query = uri.substring(qIndex + 1);
+                String[] pairs = query.split("&");
+                String address = null, share = null, path = null, user = "", pass = "", domain = "";
+                
+                for (String pair : pairs) {
+                    int idx = pair.indexOf('=');
+                    if (idx > 0) {
+                        String key = java.net.URLDecoder.decode(pair.substring(0, idx), "UTF-8");
+                        String val = java.net.URLDecoder.decode(pair.substring(idx + 1), "UTF-8");
+                        if (key.equals("address")) address = val;
+                        else if (key.equals("share")) share = val;
+                        else if (key.equals("path")) path = val;
+                        else if (key.equals("username")) user = val;
+                        else if (key.equals("password")) pass = val;
+                        else if (key.equals("domain")) domain = val;
+                    }
+                }
+
+                if (address == null || share == null || path == null) {
+                    out.write("HTTP/1.1 400 Bad Request (Missing Params)\r\n\r\n".getBytes());
+                    return;
+                }
+
+                // [PERF] Seek-first strategy:
+                // For small range requests (common when dragging progress bar), prefer
+                // single-lane low-latency streaming over high-throughput multi-lane mode.
+                final int CHUNK_SIZE = 2 * 1024 * 1024;
+                final BytePool bytePool = BytePool.getInstance(CHUNK_SIZE);
+                
+                CIFSContext ctx = getCifsContext(user, pass, domain);
+                String url = buildSmbUrl(address, share, path);
+                final SmbFile smbFile = new SmbFile(url, ctx);
+                
+                raf = new SmbRandomAccessFile(smbFile, "r");
+                long fileLength = raf.length();
+
+                if (rangeEnd == -1) rangeEnd = fileLength - 1;
+                long contentLength = rangeEnd - rangeStart + 1;
+                
+                // Headers
+                StringBuilder headers = new StringBuilder();
+                headers.append("HTTP/1.1 206 Partial Content\r\n");
+                headers.append("Content-Type: video/mp4\r\n"); 
+                headers.append("Accept-Ranges: bytes\r\n");
+                headers.append("Content-Length: ").append(contentLength).append("\r\n");
+                headers.append("Content-Range: bytes ").append(rangeStart).append("-").append(rangeEnd).append("/").append(fileLength).append("\r\n");
+                headers.append("Access-Control-Allow-Origin: *\r\n");
+                headers.append("\r\n");
+                out.write(headers.toString().getBytes());
+
+                final boolean hasExplicitRange = (rangeStart > 0) || (rangeEnd < fileLength - 1);
+                if (hasExplicitRange && contentLength <= 8L * 1024L * 1024L) {
+                    // Low-latency path for frequent seek operations.
+                    BufferedOutputStream bout = new BufferedOutputStream(out, 64 * 1024);
+                    byte[] buffer = new byte[256 * 1024];
+                    long remaining = contentLength;
+                    raf.seek(rangeStart);
+                    while (remaining > 0) {
+                        int toRead = (int) Math.min(buffer.length, remaining);
+                        int read = raf.read(buffer, 0, toRead);
+                        if (read <= 0) break;
+                        bout.write(buffer, 0, read);
+                        remaining -= read;
+                    }
+                    bout.flush();
+                    return;
+                }
+                
+                final int THREAD_COUNT = 3;
+                final ConcurrentHashMap<Long, SMBChunk> bufferMap = new ConcurrentHashMap<>();
+                final java.util.concurrent.Semaphore bufferPermits = new java.util.concurrent.Semaphore(16); // 32MB Buffer
+                final java.util.concurrent.atomic.AtomicLong nextReadOffset = new java.util.concurrent.atomic.AtomicLong(rangeStart);
+                final java.util.concurrent.atomic.AtomicBoolean streamRunning = new java.util.concurrent.atomic.AtomicBoolean(true);
+                final java.util.concurrent.atomic.AtomicReference<Throwable> workerError = new java.util.concurrent.atomic.AtomicReference<>(null);
+                final Object notifyLock = new Object();
+                final java.util.List<Thread> workers = new java.util.ArrayList<>();
+                final long finalRangeEnd = rangeEnd;
+                final long finalContentLength = contentLength;
+                final long finalRangeStart = rangeStart;
+
+                // --- Start Workers ---
+                for (int i = 0; i < THREAD_COUNT; i++) {
+                    final int workerId = i;
+                    Thread worker = new Thread(() -> {
+                        SmbRandomAccessFile myRaf = null;
+                        try {
+                             myRaf = new SmbRandomAccessFile(smbFile, "r");
+                            while (streamRunning.get()) {
+                                bufferPermits.acquire(); 
+                                long myOffset = nextReadOffset.getAndAdd(CHUNK_SIZE);
+                                if (myOffset > finalRangeEnd || !streamRunning.get()) {
+                                    bufferPermits.release();
+                                    break; 
+                                }
+
+                                byte[] buf = bytePool.acquire();
+                                int toRead = (int) Math.min(CHUNK_SIZE, finalContentLength - (myOffset - finalRangeStart));
+                                if (toRead <= 0) {
+                                     bytePool.release(buf);
+                                     bufferPermits.release();
+                                     break;
+                                }
+
+                                myRaf.seek(myOffset);
+                                long t0 = System.currentTimeMillis();
+                                int read = myRaf.read(buf, 0, toRead);
+                                long cost = System.currentTimeMillis() - t0;
+
+                                if (cost > 500) {
+                                    android.util.Log.w("WebDavNative", "[TRACE] [Lane#" + workerId + "] [IO_SLOW] Cost: " + cost + "ms, Offset: " + myOffset);
+                                }
+
+                                if (read <= 0) {
+                                    bytePool.release(buf);
+                                    bufferPermits.release();
+                                    break;
+                                }
+                                bufferMap.put(myOffset, new SMBChunk(buf, read));
+                                synchronized(notifyLock) { notifyLock.notify(); }
+                            }
+                        } catch (Exception e) {
+                            if (streamRunning.get()) workerError.set(e);
+                        } finally {
+                            if (myRaf != null) try { myRaf.close(); } catch (Exception e) {}
+                        }
+                    }, "SMB-Lane-" + i);
+                    workers.add(worker);
+                    worker.start();
+                }
+
+                // --- Consumer ---
+                BufferedOutputStream bout = new BufferedOutputStream(out, 64 * 1024);
+                long currentOffset = rangeStart;
+                long totalBytesWritten = 0;
+                long startTime = System.currentTimeMillis();
+                long lastLogTime = startTime;
+                long lastBytesWritten = 0;
+
+                try {
+                    while (currentOffset <= rangeEnd && streamRunning.get()) {
+                        if (workerError.get() != null) throw new IOException(workerError.get());
+
+                        SMBChunk chunk = null;
+                        synchronized(notifyLock) {
+                            while (streamRunning.get() && (chunk = bufferMap.remove(currentOffset)) == null) {
+                                if (workerError.get() != null) throw new IOException(workerError.get());
+                                long tWaitStart = System.currentTimeMillis();
+                                notifyLock.wait(500); 
+                                long waitCost = System.currentTimeMillis() - tWaitStart;
+                                if (waitCost > 100 && streamRunning.get()) {
+                                    android.util.Log.w("WebDavNative", "[TRACE] [Consumer] [GAP] Waited " + waitCost + "ms for Offset: " + currentOffset);
+                                }
+                            }
+                        }
+
+                        if (chunk == null) continue;
+                        bout.write(chunk.data, 0, chunk.actualLength);
+                        currentOffset += chunk.actualLength;
+                        totalBytesWritten += chunk.actualLength;
+                        bytePool.release(chunk.data);
+                        bufferPermits.release();
+
+                        // [DIAGNOSTICS] Log Speed & WiFi Stats every 1s
+                        long now = System.currentTimeMillis();
+                        if (now - lastLogTime >= 1000) {
+                            long diff = totalBytesWritten - lastBytesWritten;
+                            double speed = (diff / 1024.0 / 1024.0) * (1000.0 / (now - lastLogTime));
+                            
+                            // Get WiFi Stats
+                            int rssi = -127;
+                            int linkSpeed = -1;
+                            boolean ignoringBattery = false;
+                            try {
+                                WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                                if (wm != null) {
+                                    android.net.wifi.WifiInfo info = wm.getConnectionInfo();
+                                    if (info != null) {
+                                        rssi = info.getRssi();
+                                        linkSpeed = info.getLinkSpeed();
+                                    }
+                                }
+                                PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+                                if (pm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                    ignoringBattery = pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+                                }
+                            } catch (Exception e) {}
+
+                            android.util.Log.i("WebDavNative", String.format(java.util.Locale.US, 
+                                "[SPEED] %.2f MB/s | [WIFI] RSSI: %d dBm, LinkSpeed: %d Mbps | [POWER] NoLimit: %b | [BUFFER] %d/16", 
+                                speed, rssi, linkSpeed, ignoringBattery, 16 - bufferPermits.availablePermits()));
+                            
+                            lastLogTime = now;
+                            lastBytesWritten = totalBytesWritten;
+                        }
+                    }
+                    bout.flush();
+                } finally {
+                    streamRunning.set(false);
+                    for (Thread t : workers) t.interrupt();
+                    for (SMBChunk c : bufferMap.values()) bytePool.release(c.data);
+                }
+            } catch (Exception e) {
+                if (isClientDisconnect(e)) {
+                    android.util.Log.d("WebDavNative", "handleSmbStream client disconnected: " + e.getMessage());
+                } else {
+                    android.util.Log.e("WebDavNative", "handleSmbStream error", e);
+                }
+            } finally {
+                activeStreams.decrementAndGet();
+                if (raf != null) try { raf.close(); } catch (Exception e) {}
+            }
+        }
+
+        private boolean isClientDisconnect(Throwable err) {
+            Throwable cur = err;
+            while (cur != null) {
+                String cls = cur.getClass().getName();
+                String msg = cur.getMessage();
+                if (cls.contains("ConnectionResetException")) return true;
+                if (cur instanceof java.net.SocketException || cur instanceof java.io.EOFException) {
+                    if (msg == null) return true;
+                    String lower = msg.toLowerCase(java.util.Locale.ROOT);
+                    if (lower.contains("connection reset")
+                        || lower.contains("broken pipe")
+                        || lower.contains("socket closed")
+                        || lower.contains("connection aborted")) {
+                        return true;
+                    }
+                }
+                cur = cur.getCause();
+            }
+            return false;
         }
     }
 
@@ -2038,6 +2311,45 @@ public class WebDavPlugin extends Plugin {
              call.reject(e.getMessage());
         } finally {
             if (callbackId != null) activeCalls.remove(callbackId);
+        }
+    }
+
+    private static class SMBChunk {
+        final byte[] data;
+        final int actualLength;
+        SMBChunk(byte[] data, int actualLength) {
+            this.data = data;
+            this.actualLength = actualLength;
+        }
+    }
+
+    private static class BytePool {
+        private final java.util.concurrent.LinkedBlockingQueue<byte[]> pool;
+        private final int bufferSize;
+        private static BytePool instance;
+
+        private BytePool(int bufferSize) {
+            this.bufferSize = bufferSize;
+            this.pool = new java.util.concurrent.LinkedBlockingQueue<>(64);
+            for (int i = 0; i < 16; i++) pool.add(new byte[bufferSize]);
+        }
+
+        public static synchronized BytePool getInstance(int size) {
+            if (instance == null || instance.bufferSize != size) {
+                instance = new BytePool(size);
+            }
+            return instance;
+        }
+
+        public byte[] acquire() {
+            byte[] buf = pool.poll();
+            return (buf != null) ? buf : new byte[bufferSize];
+        }
+
+        public void release(byte[] buf) {
+            if (buf != null && buf.length == bufferSize) {
+                pool.offer(buf);
+            }
         }
     }
 }

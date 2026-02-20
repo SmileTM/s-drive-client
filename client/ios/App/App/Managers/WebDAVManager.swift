@@ -1,14 +1,12 @@
 import Foundation
 import Capacitor
 
-class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSessionDownloadDelegate {
+class WebDAVManager: NSObject {
     
     private let TAG = "[WebDAVManager]"
     private let appGroup = "group.com.android.drive.share"
-    
-    // Track active download tasks
-    private var downloadCallbacks = [Int: (call: CAPPluginCall, destURL: URL)]()
-    private var uploadCallbacks = [Int: CAPPluginCall]()
+    private let taskQueue = DispatchQueue(label: "WebDAVManager.TaskQueue")
+    private var activeTasks: [String: URLSessionTask] = [:]
     
     override init() {
         super.init()
@@ -24,6 +22,28 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         return docs.appendingPathComponent(cleanPath).path
+    }
+    
+    private func registerTask(_ task: URLSessionTask, for id: String) {
+        taskQueue.sync {
+            activeTasks[id] = task
+        }
+    }
+    
+    private func clearTask(for id: String) {
+        taskQueue.sync {
+            activeTasks.removeValue(forKey: id)
+        }
+    }
+    
+    func cancelTransfer(id: String) -> Bool {
+        var task: URLSessionTask?
+        taskQueue.sync {
+            task = activeTasks[id]
+            activeTasks.removeValue(forKey: id)
+        }
+        task?.cancel()
+        return task != nil
     }
     
     // MARK: - Public Methods
@@ -94,8 +114,9 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
         
         let resolvedDest = resolveLocalPath(destPath)
         let destURL = URL(fileURLWithPath: resolvedDest)
+        let transferId = call.getString("id") ?? UUID().uuidString
         
-        print("\(TAG) Download: \(urlString) -> \(resolvedDest)")
+        print("\(TAG) Download[\(transferId)]: \(urlString) -> \(resolvedDest)")
         
         // Ensure parent directory exists
         let parent = destURL.deletingLastPathComponent()
@@ -113,8 +134,13 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
         // For large files, a download task would be better but this works for V1
         let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             guard let self = self else { return }
+            self.clearTask(for: transferId)
             
             if let error = error {
+                if (error as NSError).code == NSURLErrorCancelled {
+                    call.reject("Cancelled")
+                    return
+                }
                 call.reject("Download failed: \(error.localizedDescription)")
                 return
             }
@@ -139,6 +165,7 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
                 call.reject("Failed to write file: \(error.localizedDescription)")
             }
         }
+        registerTask(task, for: transferId)
         task.resume()
     }
     
@@ -157,8 +184,9 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
         
         let resolvedSource = resolveLocalPath(sourcePath)
         let sourceURL = URL(fileURLWithPath: resolvedSource)
+        let transferId = call.getString("id") ?? UUID().uuidString
         
-        print("\(TAG) Upload: \(resolvedSource) -> \(urlString)")
+        print("\(TAG) Upload[\(transferId)]: \(resolvedSource) -> \(urlString)")
         
         guard FileManager.default.fileExists(atPath: resolvedSource) else {
             call.reject("Source file not found: \(resolvedSource)")
@@ -183,8 +211,13 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
         
         let task = URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
             guard let self = self else { return }
+            self.clearTask(for: transferId)
             
             if let error = error {
+                if (error as NSError).code == NSURLErrorCancelled {
+                    call.reject("Cancelled")
+                    return
+                }
                 call.reject("Upload failed: \(error.localizedDescription)")
                 return
             }
@@ -199,6 +232,7 @@ class WebDAVManager: NSObject, URLSessionDelegate, URLSessionTaskDelegate, URLSe
             print("\(self.TAG) Upload complete: \(resolvedSource)")
             call.resolve()
         }
+        registerTask(task, for: transferId)
         task.resume()
     }
     

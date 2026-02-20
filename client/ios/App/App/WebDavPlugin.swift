@@ -52,9 +52,10 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
     ]
     
     // MARK: - Managers
-    private let webdav = WebDAVManager()
-    private let smb = SMBManager()
-    private let server = LocalServerManager()
+    // Using singletons for shared state and resource management
+    private let webdav = WebDAVManager() // TODO: Consider making this singleton if needed
+    private let smb = SMBManager.shared
+    private let server = LocalServerManager.shared
     
     override public func load() {
         print("[WebDavPlugin] Plugin loaded (Capacitor 8 CAPBridgedPlugin)")
@@ -65,7 +66,12 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
     
     @objc private func handleProgressNotification(_ notification: Notification) {
         guard let userInfo = notification.userInfo else { return }
-        self.notifyListeners("downloadProgress", data: userInfo)
+        let data = userInfo.reduce(into: [String: Any]()) { result, entry in
+            if let key = entry.key as? String {
+                result[key] = entry.value
+            }
+        }
+        self.notifyListeners("downloadProgress", data: data)
     }
     
     // MARK: - WebDAV Methods
@@ -87,7 +93,17 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
     }
     
     @objc func cancel(_ call: CAPPluginCall) {
-        call.resolve()
+        guard let id = call.getString("id"), !id.isEmpty else {
+            call.reject("Missing id")
+            return
+        }
+        let webdavCancelled = webdav.cancelTransfer(id: id)
+        let smbCancelled = smb.cancelTransfer(id: id)
+        call.resolve([
+            "cancelled": webdavCancelled || smbCancelled,
+            "webdav": webdavCancelled,
+            "smb": smbCancelled
+        ])
     }
     
     // MARK: - Background / Notification (Stubs)
@@ -113,6 +129,7 @@ public class WebDavPlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - Local Server
     
     @objc func getServerUrl(_ call: CAPPluginCall) {
+        server.ensureServerRunning()
         server.getServerUrl(call)
     }
     
