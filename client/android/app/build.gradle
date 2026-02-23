@@ -36,7 +36,7 @@ android {
 
     applicationVariants.all { variant ->
         variant.outputs.all {
-            outputFileName = "WebDavClient-${variant.versionName}.apk"
+            outputFileName = "SDriveClient-${variant.versionName}.apk"
         }
     }
     buildTypes {

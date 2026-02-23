@@ -418,7 +418,7 @@ app.post('/api/cancel', (req, res) => {
 
 const PORT = process.env.PORT || 8000;
 const STORAGE_DIR = os.homedir(); // Default to User Home directory
-const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
+const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.s-drive-client');
 const CONFIG_FILE = path.join(APP_DATA_DIR, 'drives.json');
 
 // --- Progress SSE Endpoint ---
@@ -457,7 +457,7 @@ const getWebDAVClient = (config) => {
         headers: {
             // Jianguoyun and some other WebDAV servers block unknown/empty User-Agents
             // Mimic a standard client or just be explicit
-            'User-Agent': 'WebDavClient/1.0.0 (Electron)'
+            'User-Agent': 'SDriveClient/1.0.0 (Electron)'
         }
     });
 };

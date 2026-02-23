@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const os = require('os');
 
 // Determine User Data Path (Same logic as server/index.js)
-const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.webdav-client');
+const APP_DATA_DIR = process.env.USER_DATA_PATH || path.join(os.homedir(), '.s-drive-client');
 // Ensure directory exists (sync is fine here as it's startup)
 if (!fs.existsSync(APP_DATA_DIR)) {
     try {

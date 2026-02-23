@@ -1,6 +1,6 @@
 {
   "appId": "com.android.drive",
-  "appName": "WebDavClient",
+  "appName": "S Drive Client",
   "webDir": "dist",
   "plugins": {
     "CapacitorHttp": {

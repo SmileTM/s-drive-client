@@ -101,9 +101,47 @@ jobs:
           name: electron-dist
           path: dist-electron/
 
+  build-ios:
+    name: Build iOS App
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm run install-all
+
+      - name: Build Web Assets
+        run: |
+          cd client
+          npm run build
+
+      - name: Sync Capacitor
+        run: |
+          cd client
+          npx cap sync ios
+
+      - name: Build iOS
+        run: |
+          cd client/ios/App
+          xcodebuild -project App.xcodeproj -scheme App -configuration Release -sdk iphoneos -derivedDataPath build -allowProvisioningUpdates build CODE_SIGNING_ALLOWED=NO
+          cd build/Build/Products/Release-iphoneos
+          zip -r ../../../../../../SDriveClient-iOS.zip *.app
+
+      - name: Upload iOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app-build
+          path: client/SDriveClient-iOS.zip
+
   release:
     name: Create Release
-    needs: [build-android, build-electron]
+    needs: [build-android, build-electron, build-ios]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -121,6 +159,12 @@ jobs:
           name: electron-dist
           path: release-artifacts/electron
 
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-app-build
+          path: release-artifacts/ios
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -129,4 +173,5 @@ jobs:
             release-artifacts/electron/*.dmg
             release-artifacts/electron/*.zip
             release-artifacts/electron/*.exe
+            release-artifacts/ios/*.zip
           generate_release_notes: true

@@ -1516,8 +1516,8 @@ const NativeAPI = {
                         // But `WebDavPlugin.java` line 670: `File root = Environment.getExternalStorageDirectory();`.
                         // It forces ExternalStorage.
 
-                        // So we must use a temp folder in ExternalStorage (e.g. .WebDavClientTemp).
-                        const tempDir = `.WebDavClientTemp`;
+                        // So we must use a temp folder in ExternalStorage (e.g. .SDriveClientTemp).
+                        const tempDir = `.SDriveClientTemp`;
                         try { await NativeAPI.createFolder(`/${tempDir}`, 'local'); } catch (e) { /* ignore if exists */ }
                         const localTempPath = `/${tempDir}/${tempFileName}`;
 

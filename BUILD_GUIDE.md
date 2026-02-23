@@ -1,4 +1,4 @@
-# WebDev Client 全平台打包指南
+# S Drive Client 全平台打包指南
 
 本项目采用 **Web 前端 (React)** + **Node.js 后端** (桌面端) / **原生插件** (移动端) 的混合架构。
 
