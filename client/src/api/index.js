@@ -798,8 +798,37 @@ const ServerAPI = {
             console.error('[ServerAPI] Cancel failed', e);
         }
     },
+    downloadFile: async (file, driveId, { onProgress, onComplete } = {}) => {
+        const url = `/api/raw?path=${encodeURIComponent(file.path)}&drive=${driveId}&download=true`;
+
+        // Electron Environment
+        if (window.electron && window.electron.selectSavePath) {
+            const savePath = await window.electron.selectSavePath(file.name);
+            if (!savePath) return; // User cancelled
+
+            const fullUrl = window.location.origin + url;
+            // Note: Electron's window.electron.downloadFile currently doesn't provide granular progress in JS 
+            // but we could implement it. For now, we'll mark it as started and then done.
+            if (onProgress) onProgress(0, 100, file.name, 0, 0, file.size);
+            await window.electron.downloadFile(fullUrl, savePath);
+            if (onProgress) onProgress(100, 100, file.name, 0, file.size, file.size);
+            if (onComplete) onComplete(file.name, savePath);
+            return { success: true, path: savePath };
+        }
+
+        // Standard Web Environment
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        if (onComplete) onComplete(file.name);
+        return { success: true };
+    },
     requestPermissions: async () => { }
 };
+
 
 // --- Helper: Base64 to Blob ---
 const base64ToBlob = (base64, mimeType = 'application/octet-stream') => {
@@ -2333,6 +2362,126 @@ const NativeAPI = {
             }
         } catch (e) {
             console.warn('[Native] Failed to request permissions:', e);
+        }
+    },
+
+    downloadFile: async (file, driveId, { onProgress, onComplete } = {}) => {
+        // [Electron on Mobile?] Technically unlikely, but let's check
+        if (window.electron && window.electron.selectSavePath) {
+            return ServerAPI.downloadFile(file, driveId, { onProgress, onComplete });
+        }
+
+        // Mobile Native Download
+        const taskId = `download_${Date.now()}`;
+        console.log('[NativeAPI] downloadFile started', { platform: Capacitor.getPlatform(), driveId, taskId });
+        try {
+            // [NEW] Android Save-As Logic
+            if (Capacitor.getPlatform() === 'android') {
+                console.log('[NativeAPI] Android platform detected, picking save location...');
+
+                // Simple mime-type detection to avoid browser polyfill issues with 'mime-types' library
+                const getMimeType = (filename) => {
+                    const ext = filename.split('.').pop().toLowerCase();
+                    const map = {
+                        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
+                        'webp': 'image/webp', 'mp4': 'video/mp4', 'mov': 'video/quicktime', 'mp3': 'audio/mpeg',
+                        'pdf': 'application/pdf', 'txt': 'text/plain', 'json': 'application/json',
+                        'zip': 'application/zip', 'heic': 'image/heic'
+                    };
+                    return map[ext] || 'application/octet-stream';
+                };
+
+                const picked = await WebDavNative.pickSaveLocation({
+                    name: file.name,
+                    mimeType: getMimeType(file.name)
+                });
+
+                console.log('[NativeAPI] pickSaveLocation result:', picked);
+
+                if (!picked || !picked.uri) return;
+
+                // [FIX] Instead of localhost, let Native code download DIRECTLY from drive (bypass Network isolation)
+                const drives = await NativeAPI.getDrives();
+                const config = drives.find(d => d.id === driveId);
+                const password = config ? decrypt(config.password) : '';
+
+                let downloadRequest = {
+                    uri: picked.uri,
+                    taskId: taskId,
+                    driveType: config?.type || 'webdav'
+                };
+
+                if (config?.type === 'smb') {
+                    downloadRequest = {
+                        ...downloadRequest,
+                        address: config.address,
+                        share: config.share,
+                        path: file.path,
+                        username: config.username,
+                        password: password,
+                        domain: config.domain || ''
+                    };
+                } else if (config?.type === 'local') {
+                    downloadRequest.url = window.location.origin + `/api/raw?path=${encodeURIComponent(file.path)}&drive=${driveId}&download=true`;
+                } else {
+                    // WebDAV
+                    const client = new NativeWebDAVClient({ ...config, password });
+                    downloadRequest.url = client._resolveUrl(file.path);
+                    downloadRequest.headers = { 'Authorization': client.authHeader };
+                }
+
+
+                // Set up progress listener for this specific task
+                const listener = await WebDavNative.addListener('downloadProgress', (info) => {
+                    if (onProgress) {
+                        onProgress(info.current, info.total, file.name, info.speed, info.current, info.total);
+                    }
+                });
+
+                try {
+                    await WebDavNative.downloadToUri(downloadRequest);
+
+
+                    if (onComplete) onComplete(file.name, picked.path);
+                    return { success: true, path: picked.path };
+                } finally {
+                    listener.remove();
+                }
+            }
+
+            // Legacy/iOS Fallback (Download to App/Download folder)
+            if (onProgress) onProgress(0, 100, file.name, 0, 0, file.size);
+            if (driveId === 'local') {
+                await Filesystem.copy({
+                    from: file.path,
+                    to: `Download/${file.name}`,
+                    directory: Directory.ExternalStorage,
+                    toDirectory: Directory.ExternalStorage
+                });
+                if (onProgress) onProgress(100, 100, file.name, 0, file.size, file.size);
+                if (onComplete) onComplete(file.name, `Download/${file.name}`);
+                return { success: true, path: `Download/${file.name}` };
+            }
+
+            // Remote Download via Native Stream (Legacy)
+            const drives = await NativeAPI.getDrives();
+            const config = drives.find(d => d.id === driveId);
+            const client = getWebDAVClient(config);
+
+            const downloadListener = await WebDavNative.addListener('downloadProgress', (info) => {
+                if (onProgress) onProgress(info.current, info.total, file.name, info.speed, info.current, info.total);
+            });
+
+            try {
+                await client.streamDownloadFile(file.path, `Download/${file.name}`, taskId);
+                if (onComplete) onComplete(file.name, `Download/${file.name}`);
+                return { success: true, path: `Download/${file.name}` };
+            } finally {
+                downloadListener.remove();
+            }
+        } catch (err) {
+            console.error('[Native Download] Failed:', err);
+            throw err;
         }
     }
 };

@@ -1820,9 +1820,6 @@ function App() {
     // or we can implement a specific 'Download' action that saves to device public Downloads.
     // But based on the app structure, 'local' drive IS the device storage access.
 
-    const sourceDrive = activeDrive;
-    const destDrive = "local";
-    const targetPath = "/Download"; // Standard Download folder on Android/Local
 
     // Ensure target folder exists (implicitly handled by transfer or manual check)
     // Actually crossDriveTransfer doesn't auto-create parent dest folder if not recursive?
@@ -1874,25 +1871,40 @@ function App() {
       );
     };
 
-    const onComplete = (finishedItemName) => {
+    const onComplete = (finishedItemName, finalPath) => {
       setTasks((prev) =>
         prev.map((t) =>
           t.id === taskId
-            ? { ...t, status: "done", currentBytes: t.totalBytes }
+            ? { ...t, status: "done", currentBytes: t.totalBytes, path: finalPath || t.path }
             : t
         )
       );
       // If we are viewing the download folder, refresh
+      const targetPath = "Download/";
       if (activeDrive === "local" && currentPathRef.current === targetPath) {
         fetchFilesRef.current(targetPath);
       }
     };
 
-    // Ensure Download folder exists (Optional, but good practice)
-    // We can fire-and-forget this check or do it inside api
+    // Use unified downloadFile for Native/Electron Save-As logic
+    const isSaveAsPlatform =
+      (Capacitor.getPlatform() === 'android') ||
+      (window.electron && window.electron.selectSavePath);
 
-    api
-      .crossDriveTransfer(
+    if (isSaveAsPlatform) {
+      const sourceDrive = activeDrive || "local";
+      api.downloadFile(file, sourceDrive, { onProgress, onComplete })
+        .catch((err) => {
+          setTasks((prev) =>
+            prev.map((t) => (t.id === taskId ? { ...t, status: "error" } : t))
+          );
+          showAlert(t.downloadFailed + ": " + err.message, t.failed, "error");
+        });
+    } else {
+      const sourceDrive = activeDrive || "local";
+      const destDrive = "local";
+      const targetPath = "Download/";
+      api.crossDriveTransfer(
         itemsWithId,
         sourceDrive,
         targetPath,
@@ -1901,12 +1913,13 @@ function App() {
         onProgress,
         onComplete
       )
-      .catch((err) => {
-        setTasks((prev) =>
-          prev.map((t) => (t.id === taskId ? { ...t, status: "error" } : t))
-        );
-        showAlert(t.downloadFailed + ": " + err.message, t.failed, "error");
-      });
+        .catch((err) => {
+          setTasks((prev) =>
+            prev.map((t) => (t.id === taskId ? { ...t, status: "error" } : t))
+          );
+          showAlert(t.downloadFailed + ": " + err.message, t.failed, "error");
+        });
+    }
   };
 
   const handleRetryTask = (task) => {
@@ -2610,10 +2623,12 @@ function App() {
                 sortedFiles.findIndex((f) => f.path === previewFile.path) > 0
               }
               onDownload={handleDownload} // Pass the download handler
+              setTasks={setTasks} // CRITICAL: Allow preview to update task list
               onFullscreenChange={(isFS) => {
                 isPreviewFullscreenRef.current = isFS;
               }}
             />
+
           )}
         </AnimatePresence>
 

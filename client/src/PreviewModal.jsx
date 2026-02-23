@@ -284,7 +284,7 @@ const CustomVideoPlayer = ({ url, autoPlay = false, isFullscreen = false, toggle
   );
 };
 
-const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh', onDownload, onFullscreenChange }) => {
+const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh', onDownload, setTasks, onFullscreenChange }) => {
   const triggerClose = (source) => {
     // console.warn(`[PreviewModal] triggerClose CALLED from source: ${source}`);
     onClose();
@@ -435,51 +435,70 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
     e.preventDefault();
     e.stopPropagation();
 
+    /* 
     if (onDownload) {
       onDownload(file);
       return;
     }
+    */
 
-    if (!isNative) {
-      if (!url) return;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      return;
-    }
 
     try {
-      let blob;
-      if (url && url.startsWith('blob:')) {
-        const response = await fetch(url);
-        blob = await response.blob();
-      } else {
-        blob = await api.getFileBlob(file.path, drive);
+      console.log('[PreviewModal] handleDownload triggered', { fileName: file.name, drive });
+      setLoading(true);
+
+      let taskId = null;
+      if (setTasks) {
+        taskId = `download_${Date.now()}`;
+        const newTask = {
+          id: taskId,
+          name: file.name,
+          size: file.size,
+          status: "pending",
+          currentBytes: 0,
+          totalBytes: file.size,
+          speed: 0,
+          type: "download",
+          fullPath: file.path
+        };
+        setTasks(prev => [newTask, ...prev]);
       }
 
-      const reader = new FileReader();
-      reader.readAsDataURL(blob);
-      reader.onloadend = async () => {
-        const base64data = reader.result;
-        try {
-          await Filesystem.writeFile({
-            path: `Download/${file.name}`,
-            data: base64data,
-            directory: Directory.ExternalStorage,
-            recursive: true
-          });
-          alert(t.downloadSuccess);
-        } catch (err) {
-          console.error(err);
-          alert(t.downloadFailed);
+      const result = await api.downloadFile(file, drive, {
+        onProgress: (current, total, name, speed) => {
+          if (setTasks && taskId) {
+            setTasks(prev => prev.map(t => t.id === taskId ? {
+              ...t,
+              status: current === total ? "done" : "active",
+              currentBytes: current,
+              totalBytes: total || t.totalBytes,
+              speed
+            } : t));
+          }
+        },
+        onComplete: (name, finalPath) => {
+          if (setTasks && taskId) {
+            setTasks(prev => prev.map(t => t.id === taskId ? {
+              ...t,
+              status: "done",
+              path: finalPath
+            } : t));
+          }
         }
-      };
+      });
+
+      if (result && result.success) {
+        // Paths are now shown in the task list, so we don't necessarily need an alert
+        // unless result.path is available and we want to confirm.
+      }
     } catch (err) {
-      console.error(err);
+      console.error('[Download] Failed:', err);
       alert(t.downloadFailed);
+    } finally {
+      setLoading(false);
     }
   };
+
 
   return (
     <motion.div
@@ -653,15 +672,14 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
               <p className="text-lg font-semibold text-slate-800">{t.noPreview}</p>
               <p className="text-sm text-slate-500 mt-1 break-all px-4">{file.name}</p>
             </div>
-            {drive !== 'local' && (
-              <button
-                onClick={handleDownload}
-                className="flex items-center gap-2 bg-indigo-500 text-white px-8 py-3 rounded-2xl hover:bg-indigo-600 transition-all font-medium shadow-lg shadow-indigo-200 active:scale-95 text-sm"
-              >
-                <ArrowDownTrayIcon className="w-5 h-5" />
-                {t.download}
-              </button>
-            )}
+            <button
+              onClick={handleDownload}
+              className="flex items-center gap-2 bg-indigo-500 text-white px-8 py-3 rounded-2xl hover:bg-indigo-600 transition-all font-medium shadow-lg shadow-indigo-200 active:scale-95 text-sm"
+            >
+              <ArrowDownTrayIcon className="w-5 h-5" />
+              {t.download}
+            </button>
+
           </div>
         )}
       </motion.div>
@@ -683,15 +701,14 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
             <XMarkIcon className="w-6 h-6" />
           </button>
 
-          {drive !== 'local' && (
-            <button
-              onClick={handleDownload}
-              className="flex items-center justify-center rounded-full bg-white/20 backdrop-blur-xl border border-white/20 shadow-xl text-white transition-all active:scale-95 p-3.5 hover:bg-white/30"
-              title={t.download}
-            >
-              <ArrowDownTrayIcon className="w-6 h-6" />
-            </button>
-          )}
+          <button
+            onClick={handleDownload}
+            className="flex items-center justify-center rounded-full bg-white/20 backdrop-blur-xl border border-white/20 shadow-xl text-white transition-all active:scale-95 p-3.5 hover:bg-white/30"
+            title={t.download}
+          >
+            <ArrowDownTrayIcon className="w-6 h-6" />
+          </button>
+
         </div>
       )}
 

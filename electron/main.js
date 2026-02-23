@@ -24,132 +24,175 @@ function log(msg) {
 
 // IPC: Handle Native Drag Start
 ipcMain.on('ondragstart', async (event, files, driveId) => {
-    log(`[IPC] ondragstart: ${files.length} items from ${driveId}`);
-    
-    const iconPath = path.join(__dirname, '../client/assets/icon.png');
-    
-    // Strategy 1: Instant Local Drag
-    if (driveId === 'local') {
-        try {
-            // Local storage root
-            const storageDir = require('os').homedir();
-            
-            const absFiles = files.map(f => {
-                // Remove leading slashes and resolve against Home
-                const rel = f.replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
-                return path.join(storageDir, rel);
-            }).filter(p => fs.existsSync(p));
+  log(`[IPC] ondragstart: ${files.length} items from ${driveId}`);
 
-            if (absFiles.length > 0) {
-                log(`[Drag] Starting LOCAL drag for ${absFiles.length} files`);
-                
-                const dragOptions = {
-                    file: absFiles[0],
-                    files: absFiles
-                };
-                if (fs.existsSync(iconPath)) {
-                    dragOptions.icon = iconPath;
-                }
+  const iconPath = path.join(__dirname, '../client/assets/icon.png');
 
-                event.sender.startDrag(dragOptions);
-            }
-        } catch (e) {
-            log(`[Drag] Local resolution failed: ${e.message}`);
-        }
-        return;
-    }
-
-    // Strategy 2: Remote/WebDAV Drag (Async Download)
+  // Strategy 1: Instant Local Drag
+  if (driveId === 'local') {
     try {
-        const response = await fetch(`http://127.0.0.1:${serverPort}/api/prepare-drag`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ items: files, drive: driveId })
-        });
+      // Local storage root
+      const storageDir = require('os').homedir();
 
-        if (response.ok) {
-            const result = await response.json();
-            if (result.files && result.files.length > 0) {
-                log(`[Drag] Starting REMOTE drag for: ${JSON.stringify(result.files)}`);
-                
-                const dragOptions = {
-                    file: result.files[0],
-                    files: result.files
-                };
-                if (fs.existsSync(iconPath)) {
-                    dragOptions.icon = iconPath;
-                } else {
-                    log(`[Drag] Warning: Icon not found at ${iconPath}`);
-                }
+      const absFiles = files.map(f => {
+        // Remove leading slashes and resolve against Home
+        const rel = f.replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
+        return path.join(storageDir, rel);
+      }).filter(p => fs.existsSync(p));
 
-                event.sender.startDrag(dragOptions);
-            }
-        } else {
-            log(`[Drag] Server returned ${response.status}`);
+      if (absFiles.length > 0) {
+        log(`[Drag] Starting LOCAL drag for ${absFiles.length} files`);
+
+        const dragOptions = {
+          file: absFiles[0],
+          files: absFiles
+        };
+        if (fs.existsSync(iconPath)) {
+          dragOptions.icon = iconPath;
         }
+
+        event.sender.startDrag(dragOptions);
+      }
     } catch (e) {
-        log(`[Drag] Request failed: ${e.message}`);
+      log(`[Drag] Local resolution failed: ${e.message}`);
     }
+    return;
+  }
+
+  // Strategy 2: Remote/WebDAV Drag (Async Download)
+  try {
+    const response = await fetch(`http://127.0.0.1:${serverPort}/api/prepare-drag`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: files, drive: driveId })
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      if (result.files && result.files.length > 0) {
+        log(`[Drag] Starting REMOTE drag for: ${JSON.stringify(result.files)}`);
+
+        const dragOptions = {
+          file: result.files[0],
+          files: result.files
+        };
+        if (fs.existsSync(iconPath)) {
+          dragOptions.icon = iconPath;
+        } else {
+          log(`[Drag] Warning: Icon not found at ${iconPath}`);
+        }
+
+        event.sender.startDrag(dragOptions);
+      }
+    } else {
+      log(`[Drag] Server returned ${response.status}`);
+    }
+  } catch (e) {
+    log(`[Drag] Request failed: ${e.message}`);
+  }
 });
+
+// IPC: Select Save Path
+ipcMain.handle('select-save-path', async (event, defaultName) => {
+  log(`[IPC] select-save-path called for: ${defaultName}`);
+  const { filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: '选择保存位置',
+    defaultPath: defaultName,
+    buttonLabel: '保存'
+  });
+  return filePath;
+});
+
+// IPC: Download File to Path
+ipcMain.handle('download-file', async (event, url, targetPath) => {
+  log(`[IPC] download-file: ${url} -> ${targetPath}`);
+  const axios = require('axios');
+  const writer = fs.createWriteStream(targetPath);
+
+  try {
+    const response = await axios({
+      url,
+      method: 'GET',
+      responseType: 'stream'
+    });
+
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => {
+        log(`[IPC] download-file finished: ${targetPath}`);
+        resolve({ success: true });
+      });
+      writer.on('error', (err) => {
+        log(`[IPC] download-file error: ${err.message}`);
+        reject(err);
+      });
+    });
+  } catch (err) {
+    log(`[IPC] download-file initial error: ${err.message}`);
+    throw err;
+  }
+});
+
 
 // Helper to find a free port
 function getPort(startPort) {
-    return new Promise((resolve, reject) => {
-        const server = net.createServer();
-        server.listen(startPort, '127.0.0.1', () => {
-            server.close(() => resolve(startPort));
-        });
-        server.on('error', (err) => {
-            if (err.code === 'EADDRINUSE') {
-                resolve(getPort(startPort + 1));
-            } else {
-                reject(err);
-            }
-        });
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(startPort, '127.0.0.1', () => {
+      server.close(() => resolve(startPort));
     });
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(getPort(startPort + 1));
+      } else {
+        reject(err);
+      }
+    });
+  });
 }
 
 function getLogContent() {
-    try {
-        if (fs.existsSync(LOG_PATH)) {
-            const stats = fs.statSync(LOG_PATH);
-            const size = stats.size;
-            const bufferSize = Math.min(10000, size); // Read last 10KB
-            const buffer = Buffer.alloc(bufferSize);
-            const fd = fs.openSync(LOG_PATH, 'r');
-            fs.readSync(fd, buffer, 0, bufferSize, size - bufferSize);
-            fs.closeSync(fd);
-            return buffer.toString('utf8');
-        }
-        return 'Log file not found.';
-    } catch (e) {
-        return `Error reading log: ${e.message}`;
+  try {
+    if (fs.existsSync(LOG_PATH)) {
+      const stats = fs.statSync(LOG_PATH);
+      const size = stats.size;
+      const bufferSize = Math.min(10000, size); // Read last 10KB
+      const buffer = Buffer.alloc(bufferSize);
+      const fd = fs.openSync(LOG_PATH, 'r');
+      fs.readSync(fd, buffer, 0, bufferSize, size - bufferSize);
+      fs.closeSync(fd);
+      return buffer.toString('utf8');
     }
+    return 'Log file not found.';
+  } catch (e) {
+    return `Error reading log: ${e.message}`;
+  }
 }
 
 async function startServer() {
   const serverPath = path.join(__dirname, '../server/index.js');
   log(`Starting server from: ${serverPath}`);
-  
+
   if (!fs.existsSync(serverPath)) {
-      log('CRITICAL: Server file not found!');
-      return;
+    log('CRITICAL: Server file not found!');
+    return;
   }
 
   // Find a free port
   try {
-      serverPort = await getPort(8000);
-      log(`Found free port: ${serverPort}`);
+    serverPort = await getPort(8000);
+    log(`Found free port: ${serverPort}`);
   } catch (err) {
-      log(`Failed to find free port: ${err.message}`);
-      serverPort = 8000; // Fallback
+    log(`Failed to find free port: ${err.message}`);
+    serverPort = 8000; // Fallback
   }
 
   // Start the server as a child process
   serverProcess = fork(serverPath, [], {
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-    env: { 
-      ...process.env, 
+    env: {
+      ...process.env,
       NODE_ENV: 'production',
       USER_DATA_PATH: app.getPath('userData'),
       ELECTRON_LOG_PATH: LOG_PATH,
@@ -170,11 +213,11 @@ async function startServer() {
   });
 
   serverProcess.on('error', (err) => {
-      log(`Server failed to start: ${err.message}`);
+    log(`Server failed to start: ${err.message}`);
   });
-  
+
   serverProcess.on('exit', (code, signal) => {
-      log(`Server exited with code ${code} and signal ${signal}`);
+    log(`Server exited with code ${code} and signal ${signal}`);
   });
 
   log(`Server started with PID: ${serverProcess.pid}`);
@@ -191,7 +234,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js') // Register Preload
     },
     titleBarStyle: 'hidden',
-    trafficLightPosition: { x: 10, y: 10 }, 
+    trafficLightPosition: { x: 10, y: 10 },
     autoHideMenuBar: true,
     icon: path.join(__dirname, '../client/assets/icon.png')
   });
@@ -208,9 +251,9 @@ function createWindow() {
     })
     .catch((err) => {
       log(`Server timeout or error: ${err}`);
-      
+
       const logContent = getLogContent().replace(/\n/g, '<br/>');
-      
+
       // Load error page
       const errorHtml = `
         <html>

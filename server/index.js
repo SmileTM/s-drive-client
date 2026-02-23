@@ -1300,6 +1300,11 @@ app.get('/api/raw', async (req, res) => {
                     const mimeType = mime.lookup(reqPath) || 'application/octet-stream';
                     res.setHeader('Content-Type', mimeType);
 
+                    if (req.query.download === 'true') {
+                        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(path.basename(reqPath))}"`);
+                    }
+
+
                     // Reduced concurrency for the stream itselt to keep pressure low (1-Lane)
                     const stream = new TurboSMBReadStream(lanes, smbPath, fileSize, { ...options, concurrency: 4 });
 
@@ -1379,8 +1384,10 @@ app.get('/api/raw', async (req, res) => {
                     'accept-ranges',
                     'last-modified',
                     'etag',
-                    'cache-control'
+                    'cache-control',
+                    'content-disposition'
                 ];
+
 
                 forwardHeaders.forEach(key => {
                     const val = getHeader(key);

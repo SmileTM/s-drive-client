@@ -201,25 +201,33 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                                                 {task.subName.split('/').pop()}
                                                             </p>
                                                         )}
-                                                        <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono mt-0.5">
-                                                            {task.type === 'delete' ? (
-                                                                <span className="text-slate-500">{task.status === 'active' ? (t.deleting || 'Deleting...') : ''}</span>
-                                                            ) : (
-                                                                <>
-                                                                    {task.status === 'active' && task.speed > 0 && (
-                                                                        <>
-                                                                            <span className="text-indigo-500">{formatSpeed(task.speed)}</span>
-                                                                            <span>•</span>
-                                                                        </>
-                                                                    )}
-                                                                    {task.isDirectory && task.totalBytes > 0 ? (
-                                                                        <span>{task.currentBytes}/{task.totalBytes} files</span>
-                                                                    ) : (
-                                                                        <span>{formatSize(task.currentBytes || 0)} / {formatSize(task.totalBytes || 0)}</span>
-                                                                    )}
-                                                                </>
+                                                        <div className="flex flex-col gap-0.5 mt-0.5">
+                                                            <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
+                                                                {task.type === 'delete' ? (
+                                                                    <span className="text-slate-500">{task.status === 'active' ? (t.deleting || 'Deleting...') : ''}</span>
+                                                                ) : (
+                                                                    <>
+                                                                        {task.status === 'active' && task.speed > 0 && (
+                                                                            <>
+                                                                                <span className="text-indigo-500">{formatSpeed(task.speed)}</span>
+                                                                                <span>•</span>
+                                                                            </>
+                                                                        )}
+                                                                        {task.isDirectory && task.totalBytes > 0 ? (
+                                                                            <span>{task.currentBytes}/{task.totalBytes} files</span>
+                                                                        ) : (
+                                                                            <span>{formatSize(task.currentBytes || 0)} / {formatSize(task.totalBytes || 0)}</span>
+                                                                        )}
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                            {task.status === 'done' && task.path && (
+                                                                <p className="text-[10px] text-emerald-500 font-medium truncate pr-4">
+                                                                    {lang === 'zh' ? '已保存到：' : 'Saved to: '}{task.path}
+                                                                </p>
                                                             )}
                                                         </div>
+
                                                     </div>
                                                 </div>
 

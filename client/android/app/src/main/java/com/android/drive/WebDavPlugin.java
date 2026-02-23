@@ -6,6 +6,10 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.PermissionCallback;
+import com.getcapacitor.annotation.ActivityCallback;
+import androidx.activity.result.ActivityResult;
+import android.app.Activity;
+
 
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -107,6 +111,8 @@ public class WebDavPlugin extends Plugin {
     private static final ExecutorService thumbExecutor = Executors.newFixedThreadPool(4); // [FIX] Limit concurrent thumbnail generation to prevent app hanging
     private static final java.util.concurrent.Semaphore webdavThumbLimiter = new java.util.concurrent.Semaphore(1); // [FIX] WebDAV (especially Jianguoyun) is very sensitive to concurrency
     private static final ConcurrentHashMap<String, Long> driveCoolDowns = new ConcurrentHashMap<>(); // [FIX] Track throttled drives (HTTP 503)
+    private final ConcurrentHashMap<String, PluginCall> pendingSaveRequests = new ConcurrentHashMap<>();
+
 
     // [PERF] Track both Future and Call for deep cancellation
     private static class ThumbJob {
@@ -3378,4 +3384,175 @@ public class WebDavPlugin extends Plugin {
             }
         }
     }
+
+    @PluginMethod
+    public void pickSaveLocation(PluginCall call) {
+        String fileName = call.getString("name", "downloaded_file");
+        String mimeType = call.getString("mimeType", "*/*");
+        
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType(mimeType);
+        intent.putExtra(Intent.EXTRA_TITLE, fileName);
+        
+        startActivityForResult(call, intent, "handleSaveLocationResult");
+    }
+
+    @ActivityCallback
+    private void handleSaveLocationResult(PluginCall call, ActivityResult result) {
+        if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+            Uri uri = result.getData().getData();
+            if (uri != null) {
+                // Return URI to JS so it can start the actual download with this URI
+                JSObject ret = new JSObject();
+                ret.put("uri", uri.toString());
+                ret.put("path", getDisplayPath(uri));
+                call.resolve(ret);
+            } else {
+                call.reject("Failed to get URI");
+            }
+        } else {
+            call.reject("User cancelled save location selection");
+        }
+    }
+
+    private String getDisplayPath(Uri uri) {
+        String path = uri.getPath();
+        if (path == null) return "selected location";
+        if (path.contains(":")) {
+            return path.split(":")[1];
+        }
+        return path;
+    }
+
+    @PluginMethod
+    public void downloadToUri(PluginCall call) {
+        String uriStr = call.getString("uri");
+        String driveType = call.getString("driveType", "webdav");
+        String taskId = call.getString("taskId");
+        
+        // Smb Specific
+        String address = call.getString("address");
+        String share = call.getString("share");
+        String smbPath = call.getString("path");
+        String smbUsername = call.getString("username");
+        String smbPassword = call.getString("password");
+        String smbDomain = call.getString("domain", "");
+
+        // WebDAV / Local Specific
+        String downloadUrl = call.getString("url");
+        JSObject headers = call.getObject("headers");
+
+        if (uriStr == null) {
+            call.reject("Missing URI");
+            return;
+        }
+
+        startTransfer();
+
+        new Thread(() -> {
+            boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+            Uri uri = Uri.parse(uriStr);
+            String fileName = getDisplayPath(uri);
+            if (fileName.contains("/")) fileName = fileName.substring(fileName.lastIndexOf('/') + 1);
+            
+            try {
+                // Initialize notification
+                doUpdateNotification(9999, isZh ? "正在准备下载" : "Preparing Download", fileName, 0, 0, "");
+                
+                if ("smb".equals(driveType)) {
+                    // --- NATIVE SMB DIRECT DOWNLOAD ---
+                    android.util.Log.d("WebDavNative", "[SMB] Direct download to URI: " + smbPath);
+                    CIFSContext ctx = getCifsContext(smbUsername, smbPassword, smbDomain);
+                    String smbUrl = buildSmbUrl(address, share, smbPath);
+                    
+                    try (SmbFile smbFile = new SmbFile(smbUrl, ctx);
+                         SmbRandomAccessFile sraf = new SmbRandomAccessFile(smbFile, "r");
+                         OutputStream out = getContext().getContentResolver().openOutputStream(uri)) {
+                        
+                        long totalBytes = smbFile.length();
+                        long downloaded = 0;
+                        byte[] buffer = new byte[262144]; // 256KB buffer
+                        int read;
+                        long lastUpdate = 0;
+                        long startTime = System.currentTimeMillis();
+                        
+                        while ((read = sraf.read(buffer)) != -1) {
+                            out.write(buffer, 0, read);
+                            downloaded += read;
+                            
+                            long now = System.currentTimeMillis();
+                            if (now - lastUpdate > 1000) {
+                                int progress = (int) (downloaded * 100 / (totalBytes > 0 ? totalBytes : 1));
+                                String speedStr = formatSpeed(downloaded * 1000 / (now - startTime + 1));
+                                doUpdateNotification(9999, isZh ? "正在下载" : "Downloading", fileName, (int)downloaded, (int)totalBytes, speedStr);
+                                lastUpdate = now;
+                            }
+                        }
+                    }
+                } else {
+                    // --- HTTP (WebDAV or Local) DIRECT DOWNLOAD ---
+                    if (downloadUrl == null) {
+                        call.reject("Missing download URL");
+                        return;
+                    }
+
+                    Request.Builder rb = new Request.Builder().url(downloadUrl).get();
+                    if (headers != null) {
+                        for (Iterator<String> it = headers.keys(); it.hasNext(); ) {
+                            String key = it.next();
+                            rb.addHeader(key, headers.getString(key));
+                        }
+                    }
+
+                    Call networkCall = client.newCall(rb.build());
+                    if (taskId != null) activeCalls.put(taskId, networkCall);
+
+                    long startTimeDownload = System.currentTimeMillis();
+                    try (Response response = networkCall.execute()) {
+                        if (!response.isSuccessful() || response.body() == null) {
+                            throw new IOException("HTTP " + response.code());
+                        }
+
+                        long contentLength = response.body().contentLength();
+                        long downloaded = 0;
+                        
+                        try (InputStream in = response.body().byteStream();
+                             OutputStream out = getContext().getContentResolver().openOutputStream(uri)) {
+                            
+                            byte[] buffer = new byte[262144];
+                            int read;
+                            long lastUpdate = 0;
+                            while ((read = in.read(buffer)) != -1) {
+                                out.write(buffer, 0, read);
+                                downloaded += read;
+                                
+                                long now = System.currentTimeMillis();
+                                if (now - lastUpdate > 1000) {
+                                    int progress = (int) (downloaded * 100 / (contentLength > 0 ? contentLength : 1));
+                                    String speedStr = formatSpeed(downloaded * 1000 / (now - startTimeDownload + 1));
+                                    doUpdateNotification(9999, isZh ? "正在下载" : "Downloading", fileName, (int)downloaded, (int)contentLength, speedStr);
+                                    lastUpdate = now;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                doUpdateNotification(9999, isZh ? "下载完成" : "Download Complete", fileName, 100, 100, "");
+                JSObject ret = new JSObject();
+                ret.put("success", true);
+                ret.put("path", fileName);
+                call.resolve(ret);
+            } catch (Exception e) {
+                android.util.Log.e("WebDavNative", "downloadToUri failed: " + e.getMessage(), e);
+                call.reject(e.getMessage());
+            } finally {
+                if (taskId != null) activeCalls.remove(taskId);
+                endTransfer();
+            }
+        }).start();
+    }
 }
+
+
