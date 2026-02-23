@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon, PlayIcon, PauseIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowDownTrayIcon, DocumentIcon, ChevronLeftIcon, ChevronRightIcon, PlayIcon, PauseIcon, ArrowsPointingOutIcon, ArrowsPointingInIcon } from '@heroicons/react/24/outline';
 import heic2any from 'heic2any';
 import clsx from 'clsx';
 import { Document, Page, pdfjs } from 'react-pdf';
@@ -124,13 +124,20 @@ const CustomAudioPlayer = ({ url, autoPlay = false }) => {
   );
 };
 
-const CustomVideoPlayer = ({ url, autoPlay = false }) => {
+const CustomVideoPlayer = ({ url, autoPlay = false, isFullscreen = false, toggleFullscreen }) => {
   const videoRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(autoPlay);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekTime, setSeekTime] = useState(0);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    console.log('[Preview] CustomVideoPlayer MOUNTED. URL:', url);
+    return () => console.log('[Preview] CustomVideoPlayer UNMOUNTED. URL:', url);
+  }, [url]);
+
   const safePlay = (media) => {
     if (!media) return;
     const promise = media.play();
@@ -143,10 +150,21 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
   };
 
   useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        console.log('[Preview] CustomVideoPlayer Escape intercepted (preventing modal close)');
+        e.stopPropagation();
+        if (toggleFullscreen) toggleFullscreen();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [isFullscreen, toggleFullscreen]);
+
+  useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    // AutoPlay handled by prop on element, but we need to sync state
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const updateTime = () => {
@@ -201,17 +219,17 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
   };
 
   return (
-    <div className="flex flex-col w-full bg-black/80 backdrop-blur-xl rounded-2xl overflow-hidden shadow-2xl">
-      <div className="relative w-full bg-black" onClick={(e) => { e.stopPropagation(); togglePlay(); }}>
+    <div ref={containerRef} className="flex flex-col w-full h-full overflow-hidden">
+      <div className="relative w-full h-full flex flex-col items-center justify-center bg-transparent" onClick={(e) => { e.stopPropagation(); togglePlay(); }}>
         <video
           ref={videoRef}
           src={url}
           autoPlay={autoPlay}
           preload="metadata"
           playsInline
-          className="w-full max-h-[70vh] object-contain"
+          style={{ transform: "translateZ(0)" }}
+          className="w-full h-full object-contain max-h-full"
         />
-        {/* Overlay Play Button (Fade out if playing?) - simplified: show only when paused */}
         {!isPlaying && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none">
             <div className="p-4 bg-white/20 backdrop-blur-md rounded-full text-white">
@@ -221,7 +239,6 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
         )}
       </div>
 
-      {/* Custom Controls Bar */}
       <div className="p-4 flex items-center gap-4 text-white">
         <button
           onClick={(e) => { e.stopPropagation(); togglePlay(); }}
@@ -251,24 +268,46 @@ const CustomVideoPlayer = ({ url, autoPlay = false }) => {
             <span>{formatTime(duration)}</span>
           </div>
         </div>
+
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFullscreen();
+          }}
+          className="p-2 hover:bg-white/10 rounded-full transition-colors flex-shrink-0"
+          title={isFullscreen ? "退出全屏" : "全屏"}
+        >
+          {isFullscreen ? <ArrowsPointingInIcon className="w-6 h-6" /> : <ArrowsPointingOutIcon className="w-6 h-6" />}
+        </button>
       </div>
     </div>
   );
 };
 
-const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh', onDownload }) => {
+const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext, hasPrev, lang = 'zh', onDownload, onFullscreenChange }) => {
+  const triggerClose = (source) => {
+    // console.warn(`[PreviewModal] triggerClose CALLED from source: ${source}`);
+    onClose();
+  };
+
   const t = translations[lang];
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(false);
   const [url, setUrl] = useState('');
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Swipe State
+  // Sync fullscreen state back to parent if callback provided
+  useEffect(() => {
+    if (onFullscreenChange) {
+      onFullscreenChange(isFullscreen);
+    }
+  }, [isFullscreen, onFullscreenChange]);
+
   const touchStart = useRef(null);
   const touchEnd = useRef(null);
   const minSwipeDistance = 50;
-  const isZoomed = useRef(false); // Track zoom state
+  const isZoomed = useRef(false);
 
-  // PDF State
   const [numPages, setNumPages] = useState(null);
   const [pdfScale, setPdfScale] = useState(1.0);
 
@@ -284,16 +323,18 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
   const isNative = Capacitor.isNativePlatform();
 
   useEffect(() => {
+    // console.log(`[PreviewModal] MOUNTED for file: ${file.name}`);
+    return () => { }; // console.log(`[PreviewModal] UNMOUNTED for file: ${file.name}`);
+  }, [file.name]);
+
+  useEffect(() => {
     const load = async () => {
-      // Reset Zoom state on file change
       isZoomed.current = false;
       setUrl('');
       setContent(null);
 
       if (isHeic) {
         setLoading(true);
-
-        // Server-side Conversion (Web/Electron)
         if (!isNative) {
           const previewUrl = `/api/preview?path=${encodeURIComponent(file.path)}&drive=${drive}`;
           setUrl(previewUrl);
@@ -301,21 +342,17 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
           return;
         }
 
-        // Client-side Conversion (Native Fallback)
         try {
-          // For HEIC, we need the actual blob to convert
           const blob = await api.getFileBlob(file.path, drive);
           const convertedBlob = await heic2any({
             blob,
             toType: "image/jpeg",
             quality: 0.8
           });
-          // Handle case where heic2any returns an array
           const resultBlob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
           setUrl(URL.createObjectURL(resultBlob));
         } catch (e) {
           console.error("HEIC conversion failed", e);
-          // Fallback to raw URL if conversion fails
           const res = await api.getFileUrl(file.path, drive);
           setUrl(res);
         } finally {
@@ -348,27 +385,33 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
     }
   }, [file.path, drive, isText, isHeic]);
 
-  // Keyboard Navigation
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        if (isFullscreen) {
+          console.log('[PreviewModal] Escape key pressed directly on Modal (exiting fullscreen)');
+          setIsFullscreen(false);
+        } else {
+          console.log('[PreviewModal] Escape key pressed directly on Modal (closing)');
+          triggerClose('Escape Key');
+        }
+      }
       if (e.key === 'ArrowRight' && onNext) onNext();
       if (e.key === 'ArrowLeft' && onPrev) onPrev();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, onNext, onPrev]);
+  }, [onClose, onNext, onPrev, isFullscreen]);
 
-  // Swipe Handlers
   const onTouchStart = (e) => {
-    e.stopPropagation(); // Prevent sidebar or parent gestures
-    if (isZoomed.current) return; // Ignore swipes if zoomed
+    e.stopPropagation();
+    if (isZoomed.current) return;
     touchEnd.current = null;
     touchStart.current = e.targetTouches[0].clientX;
   };
 
   const onTouchMove = (e) => {
-    e.stopPropagation(); // Prevent sidebar or parent gestures
+    e.stopPropagation();
     if (isZoomed.current) return;
     touchEnd.current = e.targetTouches[0].clientX;
   };
@@ -412,7 +455,6 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         const response = await fetch(url);
         blob = await response.blob();
       } else {
-        // If url is not ready yet, fetch the blob directly from the API
         blob = await api.getFileBlob(file.path, drive);
       }
 
@@ -444,15 +486,31 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-2xl p-4"
-      onClick={onClose}
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
+      className={clsx(
+        "fixed inset-0 z-[100] flex items-center justify-center backdrop-blur-2xl transition-all",
+        isFullscreen ? "bg-black p-0" : "bg-black/40 p-4"
+      )}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (isFullscreen) return;
+        // console.log('[PreviewModal] Background Backdrop Clicked');
+        triggerClose('Background Backdrop');
+      }}
+      onTouchStart={(e) => {
+        e.stopPropagation();
+        onTouchStart(e);
+      }}
+      onTouchMove={(e) => {
+        e.stopPropagation();
+        onTouchMove(e);
+      }}
+      onTouchEnd={(e) => {
+        e.stopPropagation();
+        onTouchEnd();
+      }}
     >
 
-      {/* Navigation Arrows (Desktop/Tablet) */}
-      {hasPrev && (
+      {hasPrev && !isFullscreen && (
         <button
           onClick={(e) => { e.stopPropagation(); onPrev(); }}
           className="absolute left-4 top-1/2 -translate-y-1/2 p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all hidden md:flex z-50"
@@ -461,7 +519,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         </button>
       )}
 
-      {hasNext && (
+      {hasNext && !isFullscreen && (
         <button
           onClick={(e) => { e.stopPropagation(); onNext(); }}
           className="absolute right-4 top-1/2 -translate-y-1/2 p-3 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all hidden md:flex z-50"
@@ -470,17 +528,18 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         </button>
       )}
 
-      {/* Main Content Area */}
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        className="relative max-w-5xl max-h-[85vh] w-full flex flex-col items-center justify-center pb-16"
-        onClick={e => e.stopPropagation()} // Prevent closing when clicking content
+        className={clsx(
+          "relative flex flex-col items-center justify-center transition-all",
+          isFullscreen ? "w-full h-full max-w-none max-h-none p-0" : "w-full max-w-5xl max-h-[85vh] pb-16"
+        )}
+        onClick={e => e.stopPropagation()}
       >
 
-        {/* Preview Renderers */}
         {(isImage || isHeic) && url && (
           <div
             className="w-full h-full flex items-center justify-center overflow-hidden"
@@ -492,7 +551,7 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
               maxScale={8}
               centerOnInit={true}
               onTransformed={(ref) => {
-                isZoomed.current = ref.state.scale > 1.01; // Tiny tolerance
+                isZoomed.current = ref.state.scale > 1.01;
               }}
             >
               <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
@@ -507,7 +566,21 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
 
         {isVideo && url && (
-          <CustomVideoPlayer key={url} url={url} autoPlay={true} />
+          <div className={clsx(
+            "w-full h-full flex items-center justify-center overflow-hidden transition-all",
+            isFullscreen ? "bg-black rounded-none" : "bg-black/80 backdrop-blur-xl rounded-2xl shadow-2xl"
+          )}>
+            <CustomVideoPlayer
+              key={url}
+              url={url}
+              autoPlay={true}
+              isFullscreen={isFullscreen}
+              toggleFullscreen={() => {
+                console.log("[Preview] calling lifted toggleFullscreen");
+                setIsFullscreen(prev => !prev)
+              }}
+            />
+          </div>
         )}
 
         {isAudio && url && (
@@ -571,7 +644,6 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
           </div>
         )}
 
-        {/* Fallback for unsupported types */}
         {!isImage && !isHeic && !isVideo && !isAudio && !isPDF && !isText && (
           <div className="glass-bg-default glass-blur p-10 rounded-[32px] shadow-2xl flex flex-col items-center gap-6 border border-white/20 max-w-sm">
             <div className="w-20 h-20 bg-white/50 rounded-2xl flex items-center justify-center shadow-inner text-slate-300">
@@ -594,31 +666,34 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         )}
       </motion.div>
 
-      {/* Unified Bottom Controls - Centered for Mobile Ergonomics */}
-      <div
-        className="fixed left-1/2 -translate-x-1/2 z-50 flex items-center transition-all gap-4"
-        style={{ bottom: 'calc(2rem + env(safe-area-inset-bottom))' }}
-      >
-        {/* Close Button */}
-        <button
-          onClick={onClose}
-          className="flex items-center justify-center rounded-full bg-white/20 backdrop-blur-xl border border-white/20 shadow-xl text-white transition-all active:scale-95 p-3.5 hover:bg-white/30"
-          title={t.close}
+      {!isFullscreen && (
+        <div
+          className="fixed left-1/2 -translate-x-1/2 z-50 flex items-center transition-all gap-4"
+          style={{ bottom: 'calc(2rem + env(safe-area-inset-bottom))' }}
         >
-          <XMarkIcon className="w-6 h-6" />
-        </button>
-
-        {/* Download Button */}
-        {drive !== 'local' && (
           <button
-            onClick={handleDownload}
+            onClick={(e) => {
+              e.stopPropagation();
+              console.log('[PreviewModal] Unified Close Button Clicked');
+              triggerClose('Unified Close Button');
+            }}
             className="flex items-center justify-center rounded-full bg-white/20 backdrop-blur-xl border border-white/20 shadow-xl text-white transition-all active:scale-95 p-3.5 hover:bg-white/30"
-            title={t.download}
+            title={t.close}
           >
-            <ArrowDownTrayIcon className="w-6 h-6" />
+            <XMarkIcon className="w-6 h-6" />
           </button>
-        )}
-      </div>
+
+          {drive !== 'local' && (
+            <button
+              onClick={handleDownload}
+              className="flex items-center justify-center rounded-full bg-white/20 backdrop-blur-xl border border-white/20 shadow-xl text-white transition-all active:scale-95 p-3.5 hover:bg-white/30"
+              title={t.download}
+            >
+              <ArrowDownTrayIcon className="w-6 h-6" />
+            </button>
+          )}
+        </div>
+      )}
 
     </motion.div>
   );

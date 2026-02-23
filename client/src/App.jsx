@@ -1,10 +1,18 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useDropzone } from 'react-dropzone';
-import { motion, AnimatePresence } from 'framer-motion';
-import api from './api';
-import { Capacitor } from '@capacitor/core';
-import { App as CapApp } from '@capacitor/app';
-import TransferDashboard, { CircularProgress } from './components/TransferDashboard';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from "react";
+import { useDropzone } from "react-dropzone";
+import { motion, AnimatePresence } from "framer-motion";
+import api from "./api";
+import { Capacitor } from "@capacitor/core";
+import { App as CapApp } from "@capacitor/app";
+import TransferDashboard, {
+  CircularProgress,
+} from "./components/TransferDashboard";
 import {
   FolderIcon,
   DocumentIcon,
@@ -32,85 +40,173 @@ import {
   ChevronDownIcon,
   GlobeAltIcon,
   DocumentDuplicateIcon,
-  InformationCircleIcon
-} from '@heroicons/react/24/outline';
-import clsx from 'clsx';
-import PreviewModal from './PreviewModal';
-import AddDriveModal from './AddDriveModal';
-import ShareReceiver from './components/ShareReceiver';
-import InputModal from './InputModal';
-import DetailsModal from './DetailsModal';
-import ConfirmModal from './ConfirmModal';
-import ConflictModal from './components/ConflictModal';
-import AlertModal from './AlertModal';
-import { translations } from './i18n';
+  InformationCircleIcon,
+} from "@heroicons/react/24/outline";
+import clsx from "clsx";
+import PreviewModal from "./PreviewModal";
+import AddDriveModal from "./AddDriveModal";
+import ShareReceiver from "./components/ShareReceiver";
+import InputModal from "./InputModal";
+import DetailsModal from "./DetailsModal";
+import ConfirmModal from "./ConfirmModal";
+import ConflictModal from "./components/ConflictModal";
+import AlertModal from "./AlertModal";
+import { translations } from "./i18n";
 
 // --- Icons Helper ---
 const getFileIcon = (file) => {
-  if (file.isDirectory) return <FolderIcon className="w-8 h-8 text-indigo-400" />;
-  if (file.type?.startsWith('image')) return <PhotoIcon className="w-8 h-8 text-pink-400" />;
-  if (file.type?.startsWith('video')) return <VideoCameraIcon className="w-8 h-8 text-blue-400" />;
+  if (file.isDirectory)
+    return <FolderIcon className="w-8 h-8 text-indigo-400" />;
+  if (file.type?.startsWith("image"))
+    return <PhotoIcon className="w-8 h-8 text-pink-400" />;
+  if (file.type?.startsWith("video"))
+    return <VideoCameraIcon className="w-8 h-8 text-blue-400" />;
   return <DocumentIcon className="w-8 h-8 text-slate-500" />;
 };
 
 const formatSize = (bytes) => {
-  if (bytes === 0) return '0 B';
+  if (bytes === 0) return "0 B";
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 };
 
 // --- Components ---
 
-const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handleMove, viewMode, onPreview, activeDrive, isSelectionMode, showPath, t }) => {
+// --- Global Thumbnail Reveal Manager ---
+// Ensures thumbnails appear one-by-one in strict visual order (lower index first)
+let thumbnailRevealQueue = []; // Array of { index, callback }
+let isRevealLoopRunning = false;
+
+function addToRevealQueue(index, callback) {
+  thumbnailRevealQueue.push({ index, callback });
+  // Always keep sorted by index so lower indices (top-left) show up first
+  thumbnailRevealQueue.sort((a, b) => a.index - b.index);
+
+  if (!isRevealLoopRunning) {
+    isRevealLoopRunning = true;
+    revealLoop();
+  }
+}
+
+function revealLoop() {
+  if (thumbnailRevealQueue.length === 0) {
+    isRevealLoopRunning = false;
+    return;
+  }
+
+  // Take the best candidate (lowest index)
+  const item = thumbnailRevealQueue.shift();
+  item.callback();
+
+  // Consistent 60ms gap for a premium, flowing feel
+  setTimeout(revealLoop, 60);
+}
+
+function clearRevealQueue() {
+  thumbnailRevealQueue = [];
+}
+
+const FileItem = ({
+  file,
+  index,
+  selectedPaths,
+  toggleSelection,
+  handleNavigate,
+  handleMove,
+  viewMode,
+  onPreview,
+  activeDrive,
+  isSelectionMode,
+  showPath,
+  t,
+}) => {
   const isSelected = selectedPaths.has(file.path);
   const fullPath = file.path;
   const [isDragOver, setIsDragOver] = useState(false);
   const timerRef = useRef(null);
   const pointerDownPos = useRef(null);
   const [isLongPress, setIsLongPress] = useState(false);
-  const isList = viewMode === 'list';
-  const [thumbnailUrl, setThumbnailUrl] = useState('');
+  const isList = viewMode === "list";
+  const [thumbnailUrl, setThumbnailUrl] = useState("");
 
   // Safe Thumbnail Logic
-  const isImage = !file.isDirectory && /\.(jpg|jpeg|png|gif|webp|svg|bmp|heic|heif)$/i.test(file.name);
+  const isImage =
+    !file.isDirectory &&
+    /\.(jpg|jpeg|png|gif|webp|svg|bmp|heic|heif)$/i.test(file.name);
+  const isVideo =
+    !file.isDirectory &&
+    /\.(mp4|mkv|mov|avi|wmv|flv|webm|m4v|3gp|mpeg|mpg)$/i.test(file.name);
   const isPDF = !file.isDirectory && /\.pdf$/i.test(file.name);
 
   const itemInfo = file.isDirectory
-    ? (file.itemCount !== undefined ? t.items.replace('{count}', file.itemCount) : t.folder)
+    ? file.itemCount !== undefined
+      ? t.items.replace("{count}", file.itemCount)
+      : t.folder
     : formatSize(file.size);
 
+  // [PERF] Lazy-load thumbnails: only fetch when item is visible in viewport
+  const itemRef = useRef(null);
+  // Force first 20 items to be visible initially to ensure first screen loads automatically
+  const [isVisible, setIsVisible] = useState(index < 20);
+
   useEffect(() => {
+    // If already visible (from initial state), no need to observe
+    if (isVisible) return;
+
+    const el = itemRef.current;
+    if (!el || (!isImage && !isVideo)) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true);
+          observer.disconnect(); // Once visible, stop observing
+        }
+      },
+      { rootMargin: "400px" } // Pre-fetch more ahead for smoother scrolling
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isImage, isVideo, isVisible]);
+
+  useEffect(() => {
+    if (!isVisible) return;
     let active = true;
     let createdUrl = null;
-    if (isImage) {
-      // Delay slightly to prioritize UI render
-      const load = async () => {
-        try {
-          const url = await api.getThumbnailUrl(file.path, activeDrive || 'local');
-          if (active && url) {
-            setThumbnailUrl(url);
-            // If it's a blob URL, track it for cleanup
-            if (url.startsWith('blob:')) createdUrl = url;
-          }
-        } catch (e) {
-          // Ignore error
+    const controller = new AbortController();
+
+    const load = async () => {
+      try {
+        const url = await api.getThumbnailUrl(
+          file.path,
+          activeDrive || "local",
+          controller.signal
+        );
+        if (active && url) {
+          // Instead of showing immediately, enter the sequential reveal queue
+          addToRevealQueue(index, () => {
+            if (active) {
+              setThumbnailUrl(url);
+              if (url.startsWith("blob:")) createdUrl = url;
+            }
+          });
         }
-      };
-      load();
-    } else {
-      setThumbnailUrl('');
-    }
+      } catch (e) {
+        // Silently ignore thumbnail errors or cancellations
+      }
+    };
+    load();
     return () => {
       active = false;
+      controller.abort();
       if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
-  }, [file.path, activeDrive, isImage]);
+  }, [isVisible, file.path, activeDrive, index]);
 
   // --- Long Press Logic ---
   const startPress = (e) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     setIsLongPress(false);
     pointerDownPos.current = { x: e.clientX, y: e.clientY };
     timerRef.current = setTimeout(() => {
@@ -124,7 +220,8 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
     if (timerRef.current && pointerDownPos.current) {
       const moveX = Math.abs(e.clientX - pointerDownPos.current.x);
       const moveY = Math.abs(e.clientY - pointerDownPos.current.y);
-      if (moveX > 10 || moveY > 10) { // Cancel if moved more than 10px
+      if (moveX > 10 || moveY > 10) {
+        // Cancel if moved more than 10px
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
@@ -138,13 +235,19 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
 
   const handleDragStart = (e) => {
     // Internal Move Logic
-    const itemsToMove = isSelected && selectedPaths.size > 0 ? Array.from(selectedPaths) : [fullPath];
-    e.dataTransfer.setData('application/json', JSON.stringify({ items: itemsToMove }));
+    const itemsToMove =
+      isSelected && selectedPaths.size > 0
+        ? Array.from(selectedPaths)
+        : [fullPath];
+    e.dataTransfer.setData(
+      "application/json",
+      JSON.stringify({ items: itemsToMove })
+    );
 
     // Electron Native Drag (Drag-Out)
     if (window.electron && window.electron.startDrag) {
       e.preventDefault();
-      window.electron.startDrag(itemsToMove, activeDrive || 'local');
+      window.electron.startDrag(itemsToMove, activeDrive || "local");
       return;
     }
 
@@ -152,7 +255,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
     if (!file.isDirectory) {
       // ... existing drag logic ...
     }
-    e.dataTransfer.effectAllowed = 'all';
+    e.dataTransfer.effectAllowed = "all";
   };
 
   const handleDragOver = (e) => {
@@ -173,7 +276,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
     e.preventDefault();
     e.stopPropagation();
     setIsDragOver(false);
-    const data = e.dataTransfer.getData('application/json');
+    const data = e.dataTransfer.getData("application/json");
     if (data) {
       try {
         const parsed = JSON.parse(data);
@@ -187,6 +290,7 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
 
   return (
     <motion.div
+      ref={itemRef}
       draggable
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
@@ -201,9 +305,17 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
       animate={{
         opacity: 1,
         y: 0,
-        scale: isDragOver ? 1.02 : (isSelected ? 0.98 : 1),
-        backgroundColor: isDragOver ? '#f1f5f9' : (isSelected ? '#f8fafc' : '#ffffff'), // Highlight selected bg slightly
-        borderColor: isDragOver ? '#cbd5e1' : (isSelected ? '#e2e8f0' : 'rgba(0, 0, 0, 0)') // Add border when selected
+        scale: isDragOver ? 1.02 : isSelected ? 0.98 : 1,
+        backgroundColor: isDragOver
+          ? "#f1f5f9"
+          : isSelected
+            ? "#f8fafc"
+            : "#ffffff", // Highlight selected bg slightly
+        borderColor: isDragOver
+          ? "#cbd5e1"
+          : isSelected
+            ? "#e2e8f0"
+            : "rgba(0, 0, 0, 0)", // Add border when selected
       }}
       whileHover={{ scale: isSelected ? 0.98 : 1.01 }}
       className={clsx(
@@ -214,47 +326,67 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
       )}
       onClick={(e) => {
         if (isLongPress) return;
-        if (isSelectionMode) toggleSelection(fullPath); // Click anywhere toggles if in selection mode
+        if (isSelectionMode)
+          toggleSelection(
+            fullPath
+          ); // Click anywhere toggles if in selection mode
         else {
           if (file.isDirectory) handleNavigate(file.path);
           else onPreview(file);
         }
       }}
     >
-      <div className={clsx(
-        "rounded-xl pointer-events-none flex items-center justify-center transition-transform group-hover:scale-110 duration-300 overflow-hidden relative",
-        isList ? "p-1.5 bg-slate-50 w-9 h-9" : "flex-1 w-full"
-      )}>
+      <div
+        className={clsx(
+          "rounded-xl pointer-events-none flex items-center justify-center transition-transform group-hover:scale-110 duration-300 overflow-hidden relative",
+          isList ? "p-1.5 bg-slate-50 w-9 h-9" : "flex-1 w-full"
+        )}
+      >
         {/* Default Icon / PDF Icon */}
         {isPDF ? (
-          <div className={clsx("flex flex-col items-center justify-center text-red-500", isList ? "" : "w-full h-full bg-red-50 rounded-lg")}>
+          <div
+            className={clsx(
+              "flex flex-col items-center justify-center text-red-500",
+              isList ? "" : "w-full h-full bg-red-50 rounded-lg"
+            )}
+          >
             <DocumentIcon className={clsx(isList ? "w-6 h-6" : "w-10 h-10")} />
             {!isList && <span className="text-[8px] font-bold mt-1">PDF</span>}
           </div>
+        ) : isList ? (
+          React.cloneElement(getFileIcon(file), { className: "w-6 h-6" })
         ) : (
-          isList
-            ? React.cloneElement(getFileIcon(file), { className: "w-6 h-6" })
-            : React.cloneElement(getFileIcon(file), { className: "w-12 h-12" })
+          React.cloneElement(getFileIcon(file), { className: "w-12 h-12" })
         )}
 
         {/* Safe Thumbnail Overlay */}
-        {isImage && thumbnailUrl && (
-          <img
+        {(isImage || isVideo) && thumbnailUrl && (
+          <motion.img
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.5 }}
             src={thumbnailUrl}
             alt=""
             loading="lazy"
             className="absolute inset-0 w-full h-full object-cover bg-white"
-            style={{ textIndent: '-10000px' }}
+            style={{ textIndent: "-10000px" }}
           />
         )}
       </div>
 
-      <div className={clsx("pointer-events-none w-full", isList ? "flex-1 min-w-0 flex items-center justify-between gap-4" : "")}>
+      <div
+        className={clsx(
+          "pointer-events-none w-full",
+          isList ? "flex-1 min-w-0 flex items-center justify-between gap-4" : ""
+        )}
+      >
         <div className={clsx("min-w-0 flex-1", isList ? "" : "px-1")}>
-          <h3 className={clsx(
-            "font-medium text-slate-500 truncate",
-            isList ? "text-sm" : "text-[11px] sm:text-xs"
-          )}>
+          <h3
+            className={clsx(
+              "font-medium text-slate-500 truncate",
+              isList ? "text-sm" : "text-[11px] sm:text-xs"
+            )}
+          >
             {file.name}
           </h3>
           {showPath && (
@@ -271,15 +403,22 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
 
         {isList && (
           <div className="flex flex-col items-end text-right shrink-0 leading-tight">
-            <span className="text-[10px] text-slate-500 tabular-nums">{itemInfo}</span>
-            <span className="text-[9px] text-slate-500 tabular-nums">{new Date(file.mtime).toLocaleDateString()}</span>
+            <span className="text-[10px] text-slate-500 tabular-nums">
+              {itemInfo}
+            </span>
+            <span className="text-[9px] text-slate-500 tabular-nums">
+              {new Date(file.mtime).toLocaleDateString()}
+            </span>
           </div>
         )}
       </div>
 
       {/* Checkbox Indicator */}
       <div
-        onClick={(e) => { e.stopPropagation(); toggleSelection(fullPath); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          toggleSelection(fullPath);
+        }}
         className={clsx(
           "rounded-full border-2 flex items-center justify-center transition-all shrink-0",
           isList ? "w-4 h-4" : "absolute top-2 right-2 w-5 h-5",
@@ -290,14 +429,21 @@ const FileItem = ({ file, selectedPaths, toggleSelection, handleNavigate, handle
               : "border-slate-200 opacity-0 md:group-hover:opacity-100 scale-75" // Hide otherwise, hover only on desktop
         )}
       >
-        {isSelected && <div className={clsx("bg-white rounded-full", isList ? "w-1.5 h-1.5" : "w-2 h-2")} />}
+        {isSelected && (
+          <div
+            className={clsx(
+              "bg-white rounded-full",
+              isList ? "w-1.5 h-1.5" : "w-2 h-2"
+            )}
+          />
+        )}
       </div>
     </motion.div>
   );
 };
 
 function App() {
-  const [currentPath, setCurrentPath] = useState('/');
+  const [currentPath, setCurrentPath] = useState("/");
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   // Removed simple uploading/progress state
@@ -305,26 +451,48 @@ function App() {
   const [transferDashboardOpen, setTransferDashboardOpen] = useState(false);
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [sharedFiles, setSharedFiles] = useState([]);
-  const [conflictModal, setConflictModal] = useState({ isOpen: false, fileName: '', resolve: null });
+  const [conflictModal, setConflictModal] = useState({
+    isOpen: false,
+    fileName: "",
+    resolve: null,
+  });
 
   const [isIslandExpanded, setIsIslandExpanded] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState(new Set());
   const [clipboard, setClipboard] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [viewMode, setViewMode] = useState('grid');
+  const [viewMode, setViewMode] = useState("grid");
   const [previewFile, setPreviewFile] = useState(null);
+  const isPreviewFullscreenRef = useRef(false);
+
   const [drives, setDrives] = useState(() => {
     try {
-      const cached = localStorage.getItem('cached_drives');
-      return cached ? JSON.parse(cached) : [{ id: 'local', name: 'Local Storage', type: 'local', quota: { used: 0, total: 100 * 1024 * 1024 * 1024 } }];
+      const cached = localStorage.getItem("cached_drives");
+      return cached
+        ? JSON.parse(cached)
+        : [
+          {
+            id: "local",
+            name: "Local Storage",
+            type: "local",
+            quota: { used: 0, total: 100 * 1024 * 1024 * 1024 },
+          },
+        ];
     } catch (e) {
-      return [{ id: 'local', name: 'Local Storage', type: 'local', quota: { used: 0, total: 100 * 1024 * 1024 * 1024 } }];
+      return [
+        {
+          id: "local",
+          name: "Local Storage",
+          type: "local",
+          quota: { used: 0, total: 100 * 1024 * 1024 * 1024 },
+        },
+      ];
     }
   });
-  const [activeDrive, setActiveDrive] = useState('local');
+  const [activeDrive, setActiveDrive] = useState("local");
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAddDriveOpen, setIsAddDriveOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState("");
   const [isGlobalSearch, setIsGlobalSearch] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -335,15 +503,15 @@ function App() {
     setIsGlobalSearch(true);
     try {
       if (api.searchItems) {
-        const results = await api.searchItems(searchQuery, activeDrive, '/');
+        const results = await api.searchItems(searchQuery, activeDrive, "/");
         setSearchResults(results);
       } else {
-        showAlert(t.globalSearchNotSupported, t.featureUnavailable, 'warning');
+        showAlert(t.globalSearchNotSupported, t.featureUnavailable, "warning");
         setIsGlobalSearch(false);
       }
     } catch (err) {
       console.error(err);
-      showAlert(t.searchFailed, t.failed, 'error');
+      showAlert(t.searchFailed, t.failed, "error");
       setIsGlobalSearch(false);
     } finally {
       setIsSearching(false);
@@ -357,52 +525,83 @@ function App() {
     }
   }, [searchQuery]);
   const [page, setPage] = useState(1);
-  const [sortConfig, setSortConfig] = useState({ key: 'type', direction: 'asc' });
+  const [sortConfig, setSortConfig] = useState({
+    key: "type",
+    direction: "asc",
+  });
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
-  const [inputModal, setInputModal] = useState({ isOpen: false, title: '', defaultValue: '', onConfirm: () => { } });
+  const [inputModal, setInputModal] = useState({
+    isOpen: false,
+    title: "",
+    defaultValue: "",
+    onConfirm: () => { },
+  });
   const [detailsModal, setDetailsModal] = useState(null);
-  const [confirmModal, setConfirmModal] = useState({ isOpen: false, title: '', message: '', type: 'info', onConfirm: () => { } });
-  const [alertModal, setAlertModal] = useState({ isOpen: false, title: '', message: '', type: 'error' });
+  const [confirmModal, setConfirmModal] = useState({
+    isOpen: false,
+    title: "",
+    message: "",
+    type: "info",
+    onConfirm: () => { },
+  });
+  const [alertModal, setAlertModal] = useState({
+    isOpen: false,
+    title: "",
+    message: "",
+    type: "error",
+  });
 
   // Loading Overlay State
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processingText, setProcessingText] = useState('');
+  const [processingText, setProcessingText] = useState("");
 
   // Language State
-  const [lang, setLang] = useState(() => localStorage.getItem('app_lang') || 'zh');
+  const [lang, setLang] = useState(
+    () => localStorage.getItem("app_lang") || "zh"
+  );
   const t = translations[lang];
 
-  const showAlert = useCallback((message, title, type = 'error') => {
-    setAlertModal({
-      isOpen: true,
-      title: title || (type === 'error' ? t.failed : 'Alert'),
-      message: message?.toString() || '',
-      type
-    });
-  }, [t]);
+  const showAlert = useCallback(
+    (message, title, type = "error") => {
+      setAlertModal({
+        isOpen: true,
+        title: title || (type === "error" ? t.failed : "Alert"),
+        message: message?.toString() || "",
+        type,
+      });
+    },
+    [t]
+  );
 
   // Global Error Handlers
   useEffect(() => {
     const handleUnhandledRejection = (event) => {
-      console.error('Unhandled Rejection:', event.reason);
-      showAlert(event.reason?.message || 'Unknown Async Error', 'System Error', 'error');
+      console.error("Unhandled Rejection:", event.reason);
+      showAlert(
+        event.reason?.message || "Unknown Async Error",
+        "System Error",
+        "error"
+      );
     };
     const handleError = (event) => {
-      console.error('Global Error:', event.error);
-      showAlert(event.message || 'Unknown Error', 'Application Error', 'error');
+      console.error("Global Error:", event.error);
+      showAlert(event.message || "Unknown Error", "Application Error", "error");
     };
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    window.addEventListener('error', handleError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    window.addEventListener("error", handleError);
     return () => {
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-      window.removeEventListener('error', handleError);
+      window.removeEventListener(
+        "unhandledrejection",
+        handleUnhandledRejection
+      );
+      window.removeEventListener("error", handleError);
     };
   }, [showAlert]);
 
   const toggleLang = () => {
-    const newLang = lang === 'en' ? 'zh' : 'en';
+    const newLang = lang === "en" ? "zh" : "en";
     setLang(newLang);
-    localStorage.setItem('app_lang', newLang);
+    localStorage.setItem("app_lang", newLang);
   };
 
   const PAGE_SIZE = 50;
@@ -414,10 +613,11 @@ function App() {
   const isMacDesktop = isElectron && isMac;
 
   const fetchDrives = () => {
-    api.getDrives()
-      .then(list => {
+    api
+      .getDrives()
+      .then((list) => {
         setDrives(list);
-        localStorage.setItem('cached_drives', JSON.stringify(list));
+        localStorage.setItem("cached_drives", JSON.stringify(list));
       })
       .catch(() => setDrives([]));
   };
@@ -427,12 +627,17 @@ function App() {
     if (api.requestPermissions) api.requestPermissions();
   }, []);
 
+  const activeDriveRef = useRef(activeDrive);
+  useEffect(() => {
+    activeDriveRef.current = activeDrive;
+  }, [activeDrive]);
+
   // Ref to keep handlers fresh
   const handleGoUpRef = useRef(null);
-  const setIsSidebarOpenRef = useRef(setIsSidebarOpen); // setIsSidebarOpen is state setter, likely hoisted or safe if from useState
+  const setIsSidebarOpenRef = useRef(setIsSidebarOpen);
   const isSidebarOpenRef = useRef(isSidebarOpen);
   const currentPathRef = useRef(currentPath);
-  const fetchFilesRef = useRef(null); // fetchFiles is defined later
+  const fetchFilesRef = useRef(null);
   const selectedPathsRef = useRef(selectedPaths);
   const previewFileRef = useRef(previewFile);
   const detailsModalRef = useRef(detailsModal);
@@ -442,26 +647,31 @@ function App() {
 
   // Note: specific useEffects to update these refs are moved to bottom of component to avoid TDZ
 
-
   // --- Global Gestures & Hardware Back Button ---
   useEffect(() => {
     // Hardware Back Button
-    const backListener = CapApp.addListener('backButton', ({ canGoBack }) => {
+    const backListener = CapApp.addListener("backButton", ({ canGoBack }) => {
       if (previewFileRef.current) {
+        if (isPreviewFullscreenRef.current) {
+          // If in fullscreen, let the escape key handler in PreviewModal handle it or 
+          // we could potentially trigger a custom event.
+          // For now, we just DON'T close the preview.
+          return;
+        }
         setPreviewFile(null);
       } else if (detailsModalRef.current) {
         setDetailsModal(null);
       } else if (confirmModalRef.current.isOpen) {
-        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        setConfirmModal((prev) => ({ ...prev, isOpen: false }));
       } else if (inputModalRef.current.isOpen) {
-        setInputModal(prev => ({ ...prev, isOpen: false }));
+        setInputModal((prev) => ({ ...prev, isOpen: false }));
       } else if (isAddDriveOpenRef.current) {
         setIsAddDriveOpen(false);
       } else if (isSidebarOpenRef.current) {
         setIsSidebarOpenRef.current(false);
       } else if (selectedPathsRef.current.size > 0) {
         setSelectedPaths(new Set());
-      } else if (currentPathRef.current !== '/') {
+      } else if (currentPathRef.current !== "/") {
         if (handleGoUpRef.current) handleGoUpRef.current();
       } else {
         CapApp.exitApp();
@@ -477,15 +687,20 @@ function App() {
       touchStartX = e.touches[0].clientX;
       touchStartY = e.touches[0].clientY;
 
-      const isAnyModalOpen = previewFileRef.current ||
+      const isAnyModalOpen =
+        previewFileRef.current ||
         detailsModalRef.current ||
         confirmModalRef.current.isOpen ||
         inputModalRef.current.isOpen ||
         isAddDriveOpenRef.current;
 
       // Check if we are at the top of the scroll container
-      const scrollContainer = document.getElementById('file-list-container');
-      if (!isAnyModalOpen && scrollContainer && scrollContainer.scrollTop === 0) {
+      const scrollContainer = document.getElementById("file-list-container");
+      if (
+        !isAnyModalOpen &&
+        scrollContainer &&
+        scrollContainer.scrollTop === 0
+      ) {
         isPulling = true;
       } else {
         isPulling = false;
@@ -505,7 +720,8 @@ function App() {
       const absDeltaX = Math.abs(deltaX);
       const absDeltaY = Math.abs(deltaY);
 
-      const isAnyModalOpen = previewFileRef.current ||
+      const isAnyModalOpen =
+        previewFileRef.current ||
         detailsModalRef.current ||
         confirmModalRef.current.isOpen ||
         inputModalRef.current.isOpen ||
@@ -515,10 +731,15 @@ function App() {
       if (absDeltaX > absDeltaY && absDeltaX > 50) {
         if (isAnyModalOpen) {
           // If modal is open, horizontal swipe closes it (acting as a back gesture)
-          if (previewFileRef.current) setPreviewFile(null);
+          if (previewFileRef.current) {
+            if (isPreviewFullscreenRef.current) return; // Don't close if fullscreen
+            setPreviewFile(null);
+          }
           else if (detailsModalRef.current) setDetailsModal(null);
-          else if (confirmModalRef.current.isOpen) setConfirmModal(prev => ({ ...prev, isOpen: false }));
-          else if (inputModalRef.current.isOpen) setInputModal(prev => ({ ...prev, isOpen: false }));
+          else if (confirmModalRef.current.isOpen)
+            setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+          else if (inputModalRef.current.isOpen)
+            setInputModal((prev) => ({ ...prev, isOpen: false }));
           else if (isAddDriveOpenRef.current) setIsAddDriveOpen(false);
           return;
         }
@@ -548,45 +769,46 @@ function App() {
         if (isAnyModalOpen) return; // Prevent refresh if modal is open
         // Trigger Refresh
         if (window.navigator.vibrate) window.navigator.vibrate(20);
-        if (fetchFilesRef.current) fetchFilesRef.current(currentPathRef.current);
+        if (fetchFilesRef.current)
+          fetchFilesRef.current(currentPathRef.current);
       }
     };
 
-    window.addEventListener('touchstart', handleTouchStart);
-    window.addEventListener('touchmove', handleTouchMove);
-    window.addEventListener('touchend', handleTouchEnd);
+    window.addEventListener("touchstart", handleTouchStart);
+    window.addEventListener("touchmove", handleTouchMove);
+    window.addEventListener("touchend", handleTouchEnd);
 
     // Check for initial launch URL (Cold Start)
-    CapApp.getLaunchUrl().then(data => {
-      if (data && data.url && data.url.includes('transfers')) {
-        console.log('[DeepLink] Initial Launch URL:', data.url);
+    CapApp.getLaunchUrl().then((data) => {
+      if (data && data.url && data.url.includes("transfers")) {
+        console.log("[DeepLink] Initial Launch URL:", data.url);
         setTransferDashboardOpen(true);
       }
     });
 
     // Native Bridge Fallback (Robustness) - Direct Window Event
     const handleDeepLink = () => {
-      console.log('[DeepLink] Window Event Fired');
+      console.log("[DeepLink] Window Event Fired");
       setTransferDashboardOpen(true);
     };
-    window.addEventListener('openTransferDeepLink', handleDeepLink);
+    window.addEventListener("openTransferDeepLink", handleDeepLink);
 
     // Deep Link Handler (Background -> Foreground)
-    const deepLinkListener = CapApp.addListener('appUrlOpen', (data) => {
-      console.log('[DeepLink] appUrlOpen fired:', JSON.stringify(data));
-      if (data.url && data.url.includes('transfers')) {
-        console.log('[DeepLink] Opening dashboard...');
+    const deepLinkListener = CapApp.addListener("appUrlOpen", (data) => {
+      console.log("[DeepLink] appUrlOpen fired:", JSON.stringify(data));
+      if (data.url && data.url.includes("transfers")) {
+        console.log("[DeepLink] Opening dashboard...");
         setTransferDashboardOpen(true);
       }
     });
 
     // Fallback: Check state change (Warm Start)
-    const appStateListener = CapApp.addListener('appStateChange', (state) => {
+    const appStateListener = CapApp.addListener("appStateChange", (state) => {
       if (state.isActive) {
-        CapApp.getLaunchUrl().then(data => {
-          console.log('[DeepLink] Resume Launch URL:', JSON.stringify(data));
-          if (data && data.url && data.url.includes('transfers')) {
-            console.log('[DeepLink] State Change URL Match');
+        CapApp.getLaunchUrl().then((data) => {
+          console.log("[DeepLink] Resume Launch URL:", JSON.stringify(data));
+          if (data && data.url && data.url.includes("transfers")) {
+            console.log("[DeepLink] State Change URL Match");
             setTransferDashboardOpen(true);
           }
         });
@@ -594,77 +816,134 @@ function App() {
     });
 
     return () => {
-      backListener.then(h => h.remove());
-      deepLinkListener.then(h => h.remove());
-      appStateListener.then(h => h.remove());
-      window.removeEventListener('touchstart', handleTouchStart);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleTouchEnd);
-      window.removeEventListener('openTransferDeepLink', handleDeepLink);
+      backListener.then((h) => h.remove());
+      deepLinkListener.then((h) => h.remove());
+      appStateListener.then((h) => h.remove());
+      window.removeEventListener("touchstart", handleTouchStart);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", handleTouchEnd);
+      window.removeEventListener("openTransferDeepLink", handleDeepLink);
     };
   }, []);
 
-  const handleSharedUpload = (files, driveId, path) => {
+  const handleSharedUpload = (files, driveId, path, overwrite = true) => {
     // 1. Prepare files for API
-    const uploadFiles = files.map(f => ({
+    const uploadFiles = files.map((f) => ({
       name: f.name,
       size: f.size,
       uri: f.uri,
       mimeType: f.mimeType,
       isShared: true,
-      taskId: 'upload_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)
+      taskId:
+        "upload_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+      rawFile: f,
     }));
 
     // 2. Add to Dashboard Tasks
-    const newTasks = uploadFiles.map(f => ({
+    const newTasks = uploadFiles.map((f) => ({
       id: f.taskId,
       name: f.name,
-      status: 'pending',
+      status: "pending",
       progress: 0,
       speed: 0,
       currentBytes: 0,
-      totalBytes: f.size
+      totalBytes: f.size,
+      type: "shared_upload",
+      rawFile: f.rawFile,
+      targetDriveId: driveId,
+      targetPath: path,
     }));
 
-    setTasks(prev => [...prev, ...newTasks]);
+    setTasks((prev) => [...prev, ...newTasks]);
     setTransferDashboardOpen(true);
 
     // 3. Call API
-    api.uploadFiles(path, uploadFiles, driveId, (idx, total, name, speed, uploaded, totalBytes) => {
-      setTasks(prev => prev.map(t => {
-        if (t.name === name && t.status !== 'done' && t.status !== 'error') {
-          return {
-            ...t,
-            status: 'running',
-            speed,
-            currentBytes: uploaded,
-            totalBytes: totalBytes,
-            progress: totalBytes > 0 ? (uploaded / totalBytes) * 100 : 0
-          };
+    api
+      .uploadFiles(
+        path,
+        uploadFiles,
+        driveId,
+        (idx, total, name, speed, uploaded, totalBytes) => {
+          setTasks((prev) =>
+            prev.map((t) => {
+              if (
+                t.name === name &&
+                t.status !== "done" &&
+                t.status !== "error"
+              ) {
+                return {
+                  ...t,
+                  status: "active",
+                  speed,
+                  currentBytes: uploaded,
+                  totalBytes: totalBytes,
+                  progress: totalBytes > 0 ? (uploaded / totalBytes) * 100 : 0,
+                };
+              }
+              return t;
+            })
+          );
+        },
+        (name) => {
+          setTasks((prev) =>
+            prev.map((t) =>
+              t.name === name
+                ? {
+                  ...t,
+                  status: "done",
+                  progress: 100,
+                  currentBytes: t.totalBytes,
+                }
+                : t
+            )
+          );
+          // Optional: Refresh file list if current folder matches
+          if (driveId === activeDrive && currentPath === path) {
+            fetchFiles(path);
+          }
+        },
+        overwrite
+      )
+      .catch((err) => {
+        console.error("Shared upload failed", err);
+        if (err.response && err.response.status === 409) {
+          setConfirmModal({
+            isOpen: true,
+            title: t.fileAlreadyExists,
+            message: t.confirmOverwriteSingle, // "Target file exists. Overwrite?"
+            type: "warning",
+            confirmText: t.overwrite,
+            onConfirm: () => {
+              // Remove the failed tasks before retrying
+              setTasks((prev) =>
+                prev.filter((t) => !newTasks.find((nt) => nt.id === t.id))
+              );
+              handleSharedUpload(files, driveId, path, true);
+            },
+          });
+        } else {
+          showAlert("Upload failed", err.message || t.failed, "error");
+          setTasks((prev) =>
+            prev.map((t) =>
+              newTasks.some((nt) => nt.id === t.id) &&
+                (t.status === "active" || t.status === "pending")
+                ? { ...t, status: "error", speed: 0 }
+                : t
+            )
+          );
         }
-        return t;
-      }));
-    }, (name) => {
-      setTasks(prev => prev.map(t => t.name === name ? { ...t, status: 'done', progress: 100 } : t));
-      // Optional: Refresh file list if current folder matches
-      if (driveId === activeDrive && currentPath === path) {
-        fetchFiles(path);
-      }
-    }).catch(err => {
-      console.error("Shared upload failed", err);
-    });
+      });
   };
-
 
   // --- Share Target Listener ---
   useEffect(() => {
     const handleShareIntent = (e) => {
-      console.log('App received appSendIntentReceived:', e.detail);
+      console.log("App received appSendIntentReceived:", e.detail);
       const items = e.detail?.items || [];
       if (items.length > 0) {
         // Transform items if necessary, or pass raw
         // Items from Android: { uri, name, mimeType, size }
-        // We might need to process them before upload? 
+        // We might need to process them before upload?
         // handleUpload expects File objects usually, but we modified it to take fileWithId?
         // Actually handleUpload takes `acceptedFiles` (Array of File).
         // For shared files, we don't have File objects yet. We have URIs.
@@ -674,22 +953,23 @@ function App() {
         // Current `api.js` likely uses pure JS `webdav` library or `fetch`.
         // If we are in Capacitor, we can't easily upload `content://` URIs via JS `fetch` without reading them first.
 
-        // Strategy: 
+        // Strategy:
         // Pass these special "File-like" objects to a modified handleUpload or ShareReceiver handles it.
         // Let's pass them to ShareReceiver, and ShareReceiver calls a SPECIAL upload function or we adapt handleUpload.
         setSharedFiles(items);
         setShareModalOpen(true);
       }
     };
-    window.addEventListener('appSendIntentReceived', handleShareIntent);
-    return () => window.removeEventListener('appSendIntentReceived', handleShareIntent);
+    window.addEventListener("appSendIntentReceived", handleShareIntent);
+    return () =>
+      window.removeEventListener("appSendIntentReceived", handleShareIntent);
   }, []);
 
   // Filtered files
   const filesToDisplay = isGlobalSearch ? searchResults : files;
   const filteredFiles = useMemo(() => {
     if (isGlobalSearch) return filesToDisplay;
-    return filesToDisplay.filter(f =>
+    return filesToDisplay.filter((f) =>
       f.name.toLowerCase().includes(searchQuery.toLowerCase())
     );
   }, [filesToDisplay, searchQuery, isGlobalSearch]);
@@ -705,25 +985,30 @@ function App() {
 
       let res = 0;
       switch (sortConfig.key) {
-        case 'name':
+        case "name":
           res = a.name.localeCompare(b.name);
           break;
-        case 'date':
+        case "date":
           res = new Date(a.mtime) - new Date(b.mtime);
           break;
-        case 'type':
-          const extA = a.name.includes('.') ? a.name.split('.').pop().toLowerCase() : '';
-          const extB = b.name.includes('.') ? b.name.split('.').pop().toLowerCase() : '';
+        case "type":
+          const extA = a.name.includes(".")
+            ? a.name.split(".").pop().toLowerCase()
+            : "";
+          const extB = b.name.includes(".")
+            ? b.name.split(".").pop().toLowerCase()
+            : "";
           res = extA.localeCompare(extB);
           break;
-        case 'size':
+        case "size":
           res = a.size - b.size;
           break;
-        default: break;
+        default:
+          break;
       }
 
       // Apply direction (for Date, desc usually means newest first)
-      if (sortConfig.direction === 'desc') res = -res;
+      if (sortConfig.direction === "desc") res = -res;
 
       return res;
     });
@@ -731,66 +1016,99 @@ function App() {
   }, [filteredFiles, sortConfig]);
 
   // Reset pagination on search/sort
-  useEffect(() => { setPage(1); }, [searchQuery, sortConfig]);
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, sortConfig]);
 
   // Infinite Scroll Handler
   const handleScroll = (e) => {
     const { scrollTop, scrollHeight, clientHeight } = e.target;
     if (scrollTop + clientHeight >= scrollHeight - 100) {
       if (sortedFiles.length > page * PAGE_SIZE) {
-        setPage(prev => prev + 1);
+        setPage((prev) => prev + 1);
       }
     }
   };
 
   const handleSort = (key) => {
-    setSortConfig(prev => ({
+    setSortConfig((prev) => ({
       key,
-      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+      direction: prev.key === key && prev.direction === "asc" ? "desc" : "asc",
     }));
     setIsSortMenuOpen(false);
   };
 
   const fetchFiles = async (path) => {
+    const driveAtStart = activeDriveRef.current;
     setLoading(true);
     try {
-      const files = await api.getFiles(path, activeDrive);
-      setFiles(files);
-      setPage(1); // Reset page on new load
-      setSelectedPaths(new Set());
-      setRefreshKey(prev => prev + 1);
+      const result = await api.getFiles(path, driveAtStart);
+
+      // [RACE CHECK] Ensure we are still looking at the same drive and path
+      if (driveAtStart === activeDriveRef.current && path === currentPathRef.current) {
+        setFiles(result);
+        setPage(1); // Reset page on new load
+        setSelectedPaths(new Set());
+        setRefreshKey((prev) => prev + 1);
+      } else {
+        console.warn(`[RaceCondition] Dropping stale result for ${driveAtStart}:${path}`);
+      }
     } catch (err) {
       console.error(err);
-      const msg = err.message || 'Failed to load files';
-      // alert(`Debug Error: ${msg}`); // Optional debug
+      if (driveAtStart === activeDriveRef.current && path === currentPathRef.current) {
+        // Only show error if we haven't navigated away
+        const msg = err.message || "Failed to load files";
+      }
     } finally {
-      setLoading(false);
+      if (driveAtStart === activeDriveRef.current && path === currentPathRef.current) {
+        setLoading(false);
+      }
     }
   };
 
-  useEffect(() => { fetchFiles(currentPath); }, [currentPath, activeDrive]);
+  useEffect(() => {
+    clearRevealQueue();
+    fetchFiles(currentPath);
+  }, [currentPath, activeDrive]);
 
   // --- Keyboard Shortcuts (Esc) ---
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        if (inputModal.isOpen) setInputModal(prev => ({ ...prev, isOpen: false }));
+      if (e.key === "Escape") {
+        if (inputModal.isOpen)
+          setInputModal((prev) => ({ ...prev, isOpen: false }));
         else if (previewFile) setPreviewFile(null);
         else if (isAddDriveOpen) setIsAddDriveOpen(false);
         else if (isIslandExpanded) setIsIslandExpanded(false);
         else if (selectedPaths.size > 0) setSelectedPaths(new Set());
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [previewFile, isAddDriveOpen, isIslandExpanded, selectedPaths, inputModal.isOpen]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    previewFile,
+    isAddDriveOpen,
+    isIslandExpanded,
+    selectedPaths,
+    inputModal.isOpen,
+  ]);
 
   // Handle activeDrive persistence
   const handleDriveChange = (id) => {
+    if (activeDrive === id) return;
+
+    // [FIX] Deep cleanup when switching drives to prevent ghosting
+    setLoading(true);
+    setFiles([]); // Clear list immediately
+    setSearchQuery(""); // Reset search
+    setIsGlobalSearch(false);
+    setSearchResults([]);
+    setSelectedPaths(new Set()); // Reset selection
+
     setActiveDrive(id);
-    localStorage.setItem('last_drive', id);
-    setCurrentPath('/');
-    localStorage.setItem('last_path', '/');
+    localStorage.setItem("last_drive", id);
+    setCurrentPath("/");
+    localStorage.setItem("last_path", "/");
     setIsSidebarOpen(false);
   };
 
@@ -799,26 +1117,29 @@ function App() {
     setLoading(true);
     setFiles([]);
     setCurrentPath(path);
-    localStorage.setItem('last_path', path);
-    setSearchQuery('');
+    localStorage.setItem("last_path", path);
+    setSearchQuery("");
     setIsGlobalSearch(false);
     setSearchResults([]);
   };
 
   const handleGoUp = () => {
-    if (currentPath === '/') return;
-    const parent = currentPath.split('/').slice(0, -1).join('/') || '/';
+    if (currentPath === "/") return;
+    const parent = currentPath.split("/").slice(0, -1).join("/") || "/";
     setCurrentPath(parent);
-    localStorage.setItem('last_path', parent);
+    localStorage.setItem("last_path", parent);
   };
 
   const handleUpload = (acceptedFiles) => {
     if (acceptedFiles.length === 0) return;
 
     // Duplicate Check
-    const duplicates = acceptedFiles.filter(file => files.some(existing => existing.name === file.name));
+    const duplicates = acceptedFiles.filter((file) =>
+      files.some((existing) => existing.name === file.name)
+    );
     if (duplicates.length > 0) {
-      if (!confirm(t.confirmOverwrite.replace('{count}', duplicates.length))) return;
+      if (!confirm(t.confirmOverwrite.replace("{count}", duplicates.length)))
+        return;
     }
 
     setIsIslandExpanded(false);
@@ -828,15 +1149,15 @@ function App() {
       id: `upload_${batchId}_${i}`,
       name: f.name,
       size: f.size,
-      status: 'pending',
+      status: "pending",
       currentBytes: 0,
       totalBytes: f.size,
       speed: 0,
-      type: 'upload',
-      fileObj: f // Store file for retry
+      type: "upload",
+      fileObj: f, // Store file for retry
     }));
 
-    setTasks(prev => [...newTasks, ...prev]); // Add new tasks to top
+    setTasks((prev) => [...newTasks, ...prev]); // Add new tasks to top
 
     // 2. Start Non-blocking Upload
     // Map files to include their IDs for cancellation targeting
@@ -847,75 +1168,110 @@ function App() {
 
     const shouldOverwrite = duplicates.length > 0;
 
-    api.uploadFiles(
-      currentPath,
-      filesWithId,
-      activeDrive,
-      (index, total, name, speed, currentBytes, totalBytes) => {
-        // Update Task Progress
-        const taskIndex = index - 1;
-        if (taskIndex >= 0 && taskIndex < newTasks.length) {
-          const taskId = newTasks[taskIndex].id;
+    api
+      .uploadFiles(
+        currentPath,
+        filesWithId,
+        activeDrive,
+        (index, total, name, speed, currentBytes, totalBytes) => {
+          // Update Task Progress
+          const taskIndex = index - 1;
+          if (taskIndex >= 0 && taskIndex < newTasks.length) {
+            const taskId = newTasks[taskIndex].id;
 
-          setTasks(prev => prev.map(t => {
-            if (t.id === taskId) {
-              if (t.status === 'error') return t; // Ignore if cancelled/failed
-              const isDone = currentBytes === totalBytes && totalBytes > 0;
-              return {
-                ...t,
-                status: isDone ? 'done' : 'active',
-                currentBytes,
-                totalBytes,
-                speed,
-              };
-            }
-            if (newTasks.some(nt => nt.id === t.id) && newTasks.indexOf(newTasks.find(nt => nt.id === t.id)) < taskIndex) {
-              if (t.status !== 'done') return { ...t, status: 'done', currentBytes: t.totalBytes };
+            setTasks((prev) =>
+              prev.map((t) => {
+                if (t.id === taskId) {
+                  if (t.status === "error") return t; // Ignore if cancelled/failed
+                  const isDone = currentBytes === totalBytes && totalBytes > 0;
+                  return {
+                    ...t,
+                    status: isDone ? "done" : "active",
+                    currentBytes,
+                    totalBytes,
+                    speed,
+                  };
+                }
+                if (
+                  newTasks.some((nt) => nt.id === t.id) &&
+                  newTasks.indexOf(newTasks.find((nt) => nt.id === t.id)) <
+                  taskIndex
+                ) {
+                  if (t.status !== "done")
+                    return { ...t, status: "done", currentBytes: t.totalBytes };
+                }
+                return t;
+              })
+            );
+          }
+        },
+        (finishedFileName) => {
+          const task = newTasks.find((t) => t.name === finishedFileName);
+          if (task) {
+            setTasks((prev) =>
+              prev.map((t) =>
+                t.id === task.id
+                  ? { ...t, status: "done", currentBytes: t.totalBytes }
+                  : t
+              )
+            );
+          }
+
+          // Live Refresh
+          if (currentPathRef.current === currentPath) {
+            fetchFilesRef.current(currentPath);
+          }
+        },
+        shouldOverwrite
+      )
+      .catch((err) => {
+        console.error("[Upload] api.uploadFiles CRITICAL Error:", err);
+        const errorMsg =
+          err.response?.data?.error || err.message || "Unknown Error";
+        // Mark remaining pending tasks as error
+        setTasks((prev) =>
+          prev.map((t) => {
+            if (newTasks.some((nt) => nt.id === t.id) && t.status !== "done") {
+              return { ...t, status: "error" };
             }
             return t;
-          }));
-        }
-      },
-      (finishedFileName) => {
-        const task = newTasks.find(t => t.name === finishedFileName);
-        if (task) {
-          setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
-        }
-
-        // Live Refresh
-        if (currentPathRef.current === currentPath) {
-          fetchFilesRef.current(currentPath);
-        }
-      },
-      shouldOverwrite
-    ).catch(err => {
-      console.error("[Upload] api.uploadFiles CRITICAL Error:", err);
-      const errorMsg = err.response?.data?.error || err.message || "Unknown Error";
-      // Mark remaining pending tasks as error
-      setTasks(prev => prev.map(t => {
-        if (newTasks.some(nt => nt.id === t.id) && t.status !== 'done') {
-          return { ...t, status: 'error' };
-        }
-        return t;
-      }));
-      showAlert(`${t.uploadFailed}: ${errorMsg}`, t.failed, 'error');
-    });
+          })
+        );
+        showAlert(`${t.uploadFailed}: ${errorMsg}`, t.failed, "error");
+      });
   };
 
-  const onDrop = useCallback(acceptedFiles => { handleUpload(acceptedFiles); }, [currentPath, activeDrive, files, t]); // Add files/t dependency
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop, noClick: true, noKeyboard: true });
+  const onDrop = useCallback(
+    (acceptedFiles) => {
+      handleUpload(acceptedFiles);
+    },
+    [currentPath, activeDrive, files, t]
+  ); // Add files/t dependency
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    noClick: true,
+    noKeyboard: true,
+  });
 
-  const toggleSelection = (path) => { const newSet = new Set(selectedPaths); if (newSet.has(path)) newSet.delete(path); else newSet.add(path); setSelectedPaths(newSet); };
+  const toggleSelection = (path) => {
+    const newSet = new Set(selectedPaths);
+    if (newSet.has(path)) newSet.delete(path);
+    else newSet.add(path);
+    setSelectedPaths(newSet);
+  };
 
   const handleDelete = () => {
-    const selectedItems = files.filter(f => selectedPaths.has(f.path));
-    const folders = selectedItems.filter(f => f.isDirectory);
+    const selectedItems = files.filter((f) => selectedPaths.has(f.path));
+    const folders = selectedItems.filter((f) => f.isDirectory);
 
     const executeDelete = async () => {
       // Clear selection immediately
       const itemsToDelete = Array.from(selectedPaths);
       const count = itemsToDelete.length;
-      const taskName = count === 1 ? itemsToDelete[0].split('/').pop() : t.items.replace('{count}', count);
+      const taskName =
+        count === 1
+          ? itemsToDelete[0].split("/").pop()
+          : t.items.replace("{count}", count);
 
       setSelectedPaths(new Set());
 
@@ -924,40 +1280,46 @@ function App() {
       const newTask = {
         id: taskId,
         name: taskName,
-        type: 'delete',
-        status: 'active',
+        type: "delete",
+        status: "active",
         currentBytes: 0,
         totalBytes: 0,
-        speed: 0
+        speed: 0,
       };
 
-      setTasks(prev => [newTask, ...prev]);
+      setTasks((prev) => [newTask, ...prev]);
       setTransferDashboardOpen(true); // Open dashboard to show progress
 
       try {
         await api.deleteItems(itemsToDelete, activeDrive);
         // Mark Done
-        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'done' } : t));
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, status: "done" } : t))
+        );
 
         // Refresh if we are still in the same view
         fetchFiles(currentPath);
       } catch (err) {
-        console.error('Delete failed:', err);
+        console.error("Delete failed:", err);
         // Verify if items are actually gone (SMB may return transient errors)
         try {
           const refreshed = await api.getFiles(currentPath, activeDrive);
-          const remaining = new Set(refreshed.map(f => f.path));
-          const allGone = itemsToDelete.every(p => !remaining.has(p));
+          const remaining = new Set(refreshed.map((f) => f.path));
+          const allGone = itemsToDelete.every((p) => !remaining.has(p));
           if (allGone) {
-            setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'done' } : t));
+            setTasks((prev) =>
+              prev.map((t) => (t.id === taskId ? { ...t, status: "done" } : t))
+            );
             fetchFiles(currentPath);
             return;
           }
         } catch (verifyErr) {
           // Fall through to error state
         }
-        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
-        showAlert(t.deleteFailed, t.failed, 'error');
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, status: "error" } : t))
+        );
+        showAlert(t.deleteFailed, t.failed, "error");
       }
     };
 
@@ -972,7 +1334,7 @@ function App() {
               break;
             }
           } catch (e) {
-            console.warn('Failed to check folder contents:', folder.path, e);
+            console.warn("Failed to check folder contents:", folder.path, e);
           }
         }
         if (hasNonEmptyFolder) {
@@ -980,8 +1342,8 @@ function App() {
             isOpen: true,
             title: t.delete,
             message: t.confirmDeleteNonEmptyFolder,
-            type: 'danger',
-            onConfirm: executeDelete
+            type: "danger",
+            onConfirm: executeDelete,
           });
           return;
         }
@@ -992,9 +1354,9 @@ function App() {
     setConfirmModal({
       isOpen: true,
       title: t.delete,
-      message: t.confirmDeleteItems.replace('{count}', selectedPaths.size),
-      type: 'danger',
-      onConfirm: checkFoldersAndConfirm
+      message: t.confirmDeleteItems.replace("{count}", selectedPaths.size),
+      type: "danger",
+      onConfirm: checkFoldersAndConfirm,
     });
   };
   const handleMove = async (items, destination) => {
@@ -1010,12 +1372,12 @@ function App() {
             isOpen: true,
             title: t.fileAlreadyExists,
             message: t.confirmOverwriteSingle, // "Target file exists. Overwrite?"
-            type: 'warning',
+            type: "warning",
             confirmText: t.overwrite,
-            onConfirm: () => executeMove(true) // Retry with overwrite
+            onConfirm: () => executeMove(true), // Retry with overwrite
           });
         } else {
-          showAlert(t.moveFailed, t.failed, 'error');
+          showAlert(t.moveFailed, t.failed, "error");
         }
       }
     };
@@ -1023,13 +1385,13 @@ function App() {
   };
 
   const handleCut = () => {
-    const selectedItems = files.filter(f => selectedPaths.has(f.path));
-    setClipboard({ mode: 'move', items: selectedItems, driveId: activeDrive });
+    const selectedItems = files.filter((f) => selectedPaths.has(f.path));
+    setClipboard({ mode: "move", items: selectedItems, driveId: activeDrive });
     setSelectedPaths(new Set());
   };
   const handleCopy = () => {
-    const selectedItems = files.filter(f => selectedPaths.has(f.path));
-    setClipboard({ mode: 'copy', items: selectedItems, driveId: activeDrive });
+    const selectedItems = files.filter((f) => selectedPaths.has(f.path));
+    setClipboard({ mode: "copy", items: selectedItems, driveId: activeDrive });
     setSelectedPaths(new Set());
   };
 
@@ -1039,8 +1401,8 @@ function App() {
     // Check if cross-drive
     const sourceDrive = clipboard.driveId || activeDrive;
     const destDrive = activeDrive;
-    const isMove = clipboard.mode === 'move';
-    const targetPath = currentPath.replace(/\/+$/, '') || '/'; // Sanitize trailing slashes
+    const isMove = clipboard.mode === "move";
+    const targetPath = currentPath.replace(/\/+$/, "") || "/"; // Sanitize trailing slashes
     const items = clipboard.items;
 
     setClipboard(null);
@@ -1052,17 +1414,17 @@ function App() {
       const path = item.path || item; // Handle object or string
       return {
         id: `transfer_${batchId}_${i}`,
-        name: path.split('/').pop(),
-        status: 'pending',
+        name: path.split("/").pop(),
+        status: "pending",
         currentBytes: 0,
         totalBytes: item.size || 0, // Use pre-known size
         speed: 0,
-        type: isMove ? 'move' : 'copy',
+        type: isMove ? "move" : "copy",
         isDirectory: item.isDirectory || false,
         subName: null, // Current sub-file being processed (for folders)
       };
     });
-    setTasks(prev => [...newTasks, ...prev]);
+    setTasks((prev) => [...newTasks, ...prev]);
 
     // 2. Process Queue Logic
     let globalConflictPolicy = null; // null | 'overwrite' | 'skip'
@@ -1074,46 +1436,59 @@ function App() {
           isOpen: true,
           fileName,
           resolve: (action, applyToAll) => {
-            setConflictModal(prev => ({ ...prev, isOpen: false }));
+            setConflictModal((prev) => ({ ...prev, isOpen: false }));
             resolve({ action, applyToAll });
-          }
+          },
         });
       });
     };
 
     // Helper: Update Task Status
     const updateTask = (id, updates) => {
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+      setTasks((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, ...updates } : t))
+      );
     };
 
     // Helper: Progress Callback
-    const onProgress = (taskId) => (index, total, name, speed, currentBytes, totalBytes) => {
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          if (t.status === 'error' || t.status === 'done') return t; // Ignore if finalized
-          const isDone = currentBytes === totalBytes && totalBytes > 0;
-          return {
-            ...t,
-            status: isDone ? 'done' : 'active',
-            currentBytes,
-            totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
-            speed,
-            subName: name || t.subName, // Track current sub-file for folder progress
-          };
-        }
-        return t;
-      }));
-    };
+    const onProgress =
+      (taskId) => (index, total, name, speed, currentBytes, totalBytes) => {
+        setTasks((prev) =>
+          prev.map((t) => {
+            if (t.id === taskId) {
+              if (t.status === "error" || t.status === "done") return t; // Ignore if finalized
+              const isDone = currentBytes === totalBytes && totalBytes > 0;
+              return {
+                ...t,
+                status: isDone ? "done" : "active",
+                currentBytes,
+                totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+                speed,
+                subName: name || t.subName, // Track current sub-file for folder progress
+              };
+            }
+            return t;
+          })
+        );
+      };
 
     const onComplete = (taskId) => {
       // Force completion even if progress didn't reach 100%
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return { ...t, status: 'done', currentBytes: t.totalBytes, speed: 0 };
-        }
-        return t;
-      }));
-      if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id === taskId) {
+            return {
+              ...t,
+              status: "done",
+              currentBytes: t.totalBytes,
+              speed: 0,
+            };
+          }
+          return t;
+        })
+      );
+      if (currentPathRef.current === targetPath)
+        fetchFilesRef.current(targetPath);
     };
 
     // 3. Iterate and Transfer
@@ -1121,39 +1496,51 @@ function App() {
       const itemObj = items[i];
       const itemPath = itemObj.path || itemObj;
       const taskId = newTasks[i].id;
-      const itemName = itemPath.split('/').pop();
-      const itemsWithId = [{ path: itemPath, id: taskId, isDirectory: itemObj.isDirectory || false }];
+      const itemName = itemPath.split("/").pop();
+      const itemsWithId = [
+        {
+          path: itemPath,
+          id: taskId,
+          isDirectory: itemObj.isDirectory || false,
+        },
+      ];
 
-      updateTask(taskId, { status: 'active' });
+      updateTask(taskId, { status: "active" });
 
       // First attempt: overwrite = false (unless global policy says overwrite)
-      let shouldOverwrite = (globalConflictPolicy === 'overwrite');
+      let shouldOverwrite = globalConflictPolicy === "overwrite";
 
-      if (globalConflictPolicy === 'skip') {
-        updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
+      if (globalConflictPolicy === "skip") {
+        updateTask(taskId, { status: "done", name: itemName + " (Skipped)" });
         continue;
       }
 
       // Check for same-folder collision
       let finalFileName = itemName;
-      const isSameDriveAndDir = (sourceDrive === destDrive) && (itemPath.substring(0, itemPath.lastIndexOf('/')) === targetPath || (targetPath === '/' && itemPath.lastIndexOf('/') === 0));
+      const isSameDriveAndDir =
+        sourceDrive === destDrive &&
+        (itemPath.substring(0, itemPath.lastIndexOf("/")) === targetPath ||
+          (targetPath === "/" && itemPath.lastIndexOf("/") === 0));
 
       // Same-folder MOVE is a no-op — skip entirely
       if (isMove && isSameDriveAndDir) {
-        updateTask(taskId, { status: 'done', name: itemName + ' (已跳过)' });
+        updateTask(taskId, { status: "done", name: itemName + " (已跳过)" });
         continue;
       }
 
       // Only auto-rename if it's a COPY and we are in the same folder
       if (!isMove && isSameDriveAndDir) {
         let suffix = 0;
-        const checkNameExists = (name) => files.some(f => f.name === name);
+        const checkNameExists = (name) => files.some((f) => f.name === name);
 
         while (checkNameExists(finalFileName)) {
           suffix++;
-          const extIndex = itemName.lastIndexOf('.');
+          const extIndex = itemName.lastIndexOf(".");
           if (extIndex > 0) {
-            finalFileName = `${itemName.substring(0, extIndex)}_副本${suffix}${itemName.substring(extIndex)}`;
+            finalFileName = `${itemName.substring(
+              0,
+              extIndex
+            )}_副本${suffix}${itemName.substring(extIndex)}`;
           } else {
             finalFileName = `${itemName}_副本${suffix}`;
           }
@@ -1162,69 +1549,111 @@ function App() {
 
       // Execute Transfer - defined OUTSIDE try so catch can access it
       const performTransfer = async (overwrite) => {
-        console.log(`[Paste] performTransfer called: item=${itemName}, overwrite=${overwrite}, finalFileName=${finalFileName}, isMove=${isMove}`);
+        console.log(
+          `[Paste] performTransfer called: item=${itemName}, overwrite=${overwrite}, finalFileName=${finalFileName}, isMove=${isMove}`
+        );
         if (finalFileName !== itemName) {
-          const fullDest = targetPath === '/' ? `/${finalFileName}` : `${targetPath}/${finalFileName}`;
-          console.log(`[Paste] Using direct API: copyFile/moveFile to ${fullDest}`);
+          const fullDest =
+            targetPath === "/"
+              ? `/${finalFileName}`
+              : `${targetPath}/${finalFileName}`;
+          console.log(
+            `[Paste] Using direct API: copyFile/moveFile to ${fullDest}`
+          );
           return isMove
             ? api.moveFile(itemPath, fullDest, sourceDrive, overwrite)
             : api.copyFile(itemPath, fullDest, sourceDrive, overwrite);
         }
 
-        console.log(`[Paste] Using crossDriveTransfer: src=${sourceDrive}, dst=${destDrive}, overwrite=${overwrite}`);
-        return (sourceDrive === destDrive)
-          ? (isMove
+        console.log(
+          `[Paste] Using crossDriveTransfer: src=${sourceDrive}, dst=${destDrive}, overwrite=${overwrite}`
+        );
+        return sourceDrive === destDrive
+          ? isMove
             ? api.moveItems([itemPath], targetPath, activeDrive, overwrite)
-            : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress(taskId), () => onComplete(taskId), overwrite))
-          : api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, isMove, onProgress(taskId), () => onComplete(taskId), overwrite);
+            : api.crossDriveTransfer(
+              itemsWithId,
+              sourceDrive,
+              targetPath,
+              destDrive,
+              false,
+              onProgress(taskId),
+              () => onComplete(taskId),
+              overwrite
+            )
+          : api.crossDriveTransfer(
+            itemsWithId,
+            sourceDrive,
+            targetPath,
+            destDrive,
+            isMove,
+            onProgress(taskId),
+            () => onComplete(taskId),
+            overwrite
+          );
       };
 
       try {
         if (finalFileName !== itemName) {
           await performTransfer(false);
           // Direct copy/move completed — mark task as done and refresh
-          updateTask(taskId, { status: 'done', name: finalFileName });
-          if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+          updateTask(taskId, { status: "done", name: finalFileName });
+          if (currentPathRef.current === targetPath)
+            fetchFilesRef.current(targetPath);
         } else {
           await performTransfer(shouldOverwrite);
           // For moveItems (same drive move), also mark done
           if (isMove && sourceDrive === destDrive) {
-            updateTask(taskId, { status: 'done' });
-            if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+            updateTask(taskId, { status: "done" });
+            if (currentPathRef.current === targetPath)
+              fetchFilesRef.current(targetPath);
           }
         }
-
       } catch (err) {
-        console.log(`[Paste] Caught error:`, err?.message, `status=${err?.response?.status}`);
+        console.log(
+          `[Paste] Caught error:`,
+          err?.message,
+          `status=${err?.response?.status}`
+        );
         // Check for Conflict (409)
         if (err.response && err.response.status === 409) {
-          console.log(`[Paste] 409 Conflict detected for ${itemName}, globalPolicy=${globalConflictPolicy}`);
-          if (globalConflictPolicy === 'skip') {
-            updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
+          console.log(
+            `[Paste] 409 Conflict detected for ${itemName}, globalPolicy=${globalConflictPolicy}`
+          );
+          if (globalConflictPolicy === "skip") {
+            updateTask(taskId, {
+              status: "done",
+              name: itemName + " (Skipped)",
+            });
             continue;
           }
 
-          if (globalConflictPolicy === 'overwrite') {
+          if (globalConflictPolicy === "overwrite") {
             console.log(`[Paste] Auto-overwriting (global policy)`);
             try {
               await performTransfer(true);
               console.log(`[Paste] Overwrite succeeded for ${itemName}`);
-              updateTask(taskId, { status: 'done' });
+              updateTask(taskId, { status: "done" });
             } catch (retryErr) {
               console.error(`[Paste] Overwrite retry failed:`, retryErr);
-              updateTask(taskId, { status: 'error' });
-              showAlert(`${itemName}: ${retryErr.message}`, t.failed, 'error');
+              updateTask(taskId, { status: "error" });
+              showAlert(`${itemName}: ${retryErr.message}`, t.failed, "error");
             }
             continue;
           }
 
           // Ask User
           const { action, applyToAll } = await resolveConflict(itemName);
-          console.log(`[Paste] User chose: action=${action}, applyToAll=${applyToAll}`);
+          console.log(
+            `[Paste] User chose: action=${action}, applyToAll=${applyToAll}`
+          );
 
-          if (action === 'cancel') {
+          if (action === "cancel") {
             for (let j = i; j < items.length; j++) {
-              updateTask(newTasks[j].id, { status: 'error', name: newTasks[j].name + ' (Cancelled)' });
+              updateTask(newTasks[j].id, {
+                status: "error",
+                name: newTasks[j].name + " (Cancelled)",
+              });
             }
             break;
           }
@@ -1233,53 +1662,63 @@ function App() {
             globalConflictPolicy = action;
           }
 
-          if (action === 'skip') {
-            updateTask(taskId, { status: 'done', name: itemName + ' (Skipped)' });
-          } else if (action === 'overwrite') {
+          if (action === "skip") {
+            updateTask(taskId, {
+              status: "done",
+              name: itemName + " (Skipped)",
+            });
+          } else if (action === "overwrite") {
             console.log(`[Paste] Retrying with overwrite=true for ${itemName}`);
             try {
               await performTransfer(true);
               console.log(`[Paste] Overwrite succeeded for ${itemName}`);
-              updateTask(taskId, { status: 'done' });
+              updateTask(taskId, { status: "done" });
             } catch (retryErr) {
               console.error(`[Paste] Overwrite retry failed:`, retryErr);
-              updateTask(taskId, { status: 'error' });
+              updateTask(taskId, { status: "error" });
             }
           }
         } else {
           console.error("Transfer Error:", err);
-          updateTask(taskId, { status: 'error' });
+          updateTask(taskId, { status: "error" });
         }
       }
     }
 
     // Final Refresh
-    if (currentPathRef.current === targetPath) fetchFilesRef.current(targetPath);
+    if (currentPathRef.current === targetPath)
+      fetchFilesRef.current(targetPath);
   };
 
   const handleRename = () => {
     if (selectedPaths.size !== 1) return;
     const oldPath = Array.from(selectedPaths)[0];
-    const oldName = oldPath.split('/').pop();
+    const oldName = oldPath.split("/").pop();
 
     const performRename = async (newName, overwrite = false) => {
       try {
-        await api.renameItem(oldPath, newName, currentPath, activeDrive, overwrite);
+        await api.renameItem(
+          oldPath,
+          newName,
+          currentPath,
+          activeDrive,
+          overwrite
+        );
         fetchFiles(currentPath);
         setSelectedPaths(new Set());
-        setInputModal(prev => ({ ...prev, isOpen: false })); // Close input modal on success
+        setInputModal((prev) => ({ ...prev, isOpen: false })); // Close input modal on success
       } catch (err) {
         if (err.response && err.response.status === 409) {
           setConfirmModal({
             isOpen: true,
             title: t.fileAlreadyExists,
             message: t.confirmOverwriteSingle,
-            type: 'warning',
+            type: "warning",
             confirmText: t.overwrite,
-            onConfirm: () => performRename(newName, true)
+            onConfirm: () => performRename(newName, true),
           });
         } else {
-          showAlert(t.renameFailed, t.failed, 'error');
+          showAlert(t.renameFailed, t.failed, "error");
         }
       }
     };
@@ -1291,8 +1730,8 @@ function App() {
       onConfirm: async (newName) => {
         if (!newName || newName === oldName) return;
         // Pre-check for local list to avoid API call if obvious
-        if (files.some(f => f.name === newName)) {
-          // Ask immediately if seen in local list? 
+        if (files.some((f) => f.name === newName)) {
+          // Ask immediately if seen in local list?
           // Better to let API handle logic consistency or just warn.
           // Let's warn first, user can ignore? No, standard logic.
           // Let's rely on API logic for robust "Ask to Overwrite"
@@ -1300,14 +1739,14 @@ function App() {
           // Let's REMOVE the pre-check blocking and let performRename handle 409.
         }
         performRename(newName, false);
-      }
+      },
     });
   };
 
   const handleDetails = () => {
     if (selectedPaths.size !== 1) return;
     const path = Array.from(selectedPaths)[0];
-    const file = files.find(f => f.path === path);
+    const file = files.find((f) => f.path === path);
     if (file) setDetailsModal(file);
   };
 
@@ -1317,19 +1756,21 @@ function App() {
       isOpen: true,
       title: t.settings,
       message: t.confirmRemoveDrive,
-      type: 'danger',
+      type: "danger",
       onConfirm: async () => {
         try {
           await api.removeDrive(id);
           if (activeDrive === id) {
-            setActiveDrive('local');
-            localStorage.setItem('last_drive', 'local');
-            setCurrentPath('/');
-            localStorage.setItem('last_path', '/');
+            setActiveDrive("local");
+            localStorage.setItem("last_drive", "local");
+            setCurrentPath("/");
+            localStorage.setItem("last_path", "/");
           }
           fetchDrives();
-        } catch (err) { showAlert(t.removeDriveFailed, t.failed, 'error'); }
-      }
+        } catch (err) {
+          showAlert(t.removeDriveFailed, t.failed, "error");
+        }
+      },
     });
   };
 
@@ -1344,12 +1785,15 @@ function App() {
         if (!newName || newName === currentName) return;
         try {
           await api.updateDrive(id, { name: newName });
-          setDrives(prev => prev.map(d => d.id === id ? { ...d, name: newName } : d));
+          setDrives((prev) =>
+            prev.map((d) => (d.id === id ? { ...d, name: newName } : d))
+          );
         } catch (err) {
-          if (err.response?.status === 409) showAlert(t.nameTaken, t.failed, 'warning');
-          else showAlert(t.updateNameFailed, t.failed, 'error');
+          if (err.response?.status === 409)
+            showAlert(t.nameTaken, t.failed, "warning");
+          else showAlert(t.updateNameFailed, t.failed, "error");
         }
-      }
+      },
     });
   };
 
@@ -1358,28 +1802,30 @@ function App() {
     api.cancelTask(taskId);
 
     // 2. Update UI immediately
-    setTasks(prev => prev.map(t => {
-      if (t.id === taskId) {
-        return { ...t, status: 'error', name: t.name + ' (Cancelled)' };
-      }
-      return t;
-    }));
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id === taskId) {
+          return { ...t, status: "error", name: t.name + " (Cancelled)" };
+        }
+        return t;
+      })
+    );
   };
 
   const handleDownload = (file) => {
     // Logic for downloading file (WebDAV -> Local Download Folder)
     // This uses crossDriveTransfer (copy) from Active Drive -> Local (Default Download Dir or specific?)
     // For Mobile: usually 'Downloads' or 'Documents'.
-    // For now, let's assume downloading to the root of 'local' drive for simplicity in this manager, 
+    // For now, let's assume downloading to the root of 'local' drive for simplicity in this manager,
     // or we can implement a specific 'Download' action that saves to device public Downloads.
     // But based on the app structure, 'local' drive IS the device storage access.
 
     const sourceDrive = activeDrive;
-    const destDrive = 'local';
-    const targetPath = '/Download'; // Standard Download folder on Android/Local
+    const destDrive = "local";
+    const targetPath = "/Download"; // Standard Download folder on Android/Local
 
     // Ensure target folder exists (implicitly handled by transfer or manual check)
-    // Actually crossDriveTransfer doesn't auto-create parent dest folder if not recursive? 
+    // Actually crossDriveTransfer doesn't auto-create parent dest folder if not recursive?
     // It handles it for directories. For file, we assume targetPath is the FOLDER.
 
     // 1. Create Task
@@ -1389,40 +1835,55 @@ function App() {
       id: taskId,
       name: file.name,
       size: file.size,
-      status: 'pending',
+      status: "pending",
       currentBytes: 0,
       totalBytes: file.size,
       speed: 0,
-      type: 'download',
-      fullPath: file.path // Store path for retry
+      type: "download",
+      fullPath: file.path, // Store path for retry
     };
 
-    setTasks(prev => [newTask, ...prev]);
+    setTasks((prev) => [newTask, ...prev]);
 
     const itemsWithId = [{ path: file.path, id: taskId }];
 
     // 2. Start Transfer
-    const onProgress = (index, total, name, speed, currentBytes, totalBytes) => {
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          if (t.status === 'error') return t;
-          const isDone = currentBytes === totalBytes && totalBytes > 0;
-          return {
-            ...t,
-            status: isDone ? 'done' : 'active',
-            currentBytes,
-            totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
-            speed
-          };
-        }
-        return t;
-      }));
+    const onProgress = (
+      index,
+      total,
+      name,
+      speed,
+      currentBytes,
+      totalBytes
+    ) => {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id === taskId) {
+            if (t.status === "error") return t;
+            const isDone = currentBytes === totalBytes && totalBytes > 0;
+            return {
+              ...t,
+              status: isDone ? "done" : "active",
+              currentBytes,
+              totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+              speed,
+            };
+          }
+          return t;
+        })
+      );
     };
 
     const onComplete = (finishedItemName) => {
-      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'done', currentBytes: t.totalBytes } : t));
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId
+            ? { ...t, status: "done", currentBytes: t.totalBytes }
+            : t
+        )
+      );
       // If we are viewing the download folder, refresh
-      if (activeDrive === 'local' && currentPathRef.current === targetPath) {
+      if (activeDrive === "local" && currentPathRef.current === targetPath) {
         fetchFilesRef.current(targetPath);
       }
     };
@@ -1430,24 +1891,42 @@ function App() {
     // Ensure Download folder exists (Optional, but good practice)
     // We can fire-and-forget this check or do it inside api
 
-    api.crossDriveTransfer(itemsWithId, sourceDrive, targetPath, destDrive, false, onProgress, onComplete)
-      .catch(err => {
-        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'error' } : t));
-        showAlert(t.downloadFailed + ': ' + err.message, t.failed, 'error');
+    api
+      .crossDriveTransfer(
+        itemsWithId,
+        sourceDrive,
+        targetPath,
+        destDrive,
+        false,
+        onProgress,
+        onComplete
+      )
+      .catch((err) => {
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, status: "error" } : t))
+        );
+        showAlert(t.downloadFailed + ": " + err.message, t.failed, "error");
       });
   };
 
   const handleRetryTask = (task) => {
     // Remove old task
-    setTasks(prev => prev.filter(t => t.id !== task.id));
+    setTasks((prev) => prev.filter((t) => t.id !== task.id));
 
     // Re-trigger action
-    if (task.type === 'upload' && task.fileObj) {
+    if (task.type === "upload" && task.fileObj) {
       handleUpload([task.fileObj]);
-    } else if (task.type === 'download' && task.fullPath) {
+    } else if (task.type === "shared_upload" && task.rawFile) {
+      handleSharedUpload(
+        [task.rawFile],
+        task.targetDriveId,
+        task.targetPath,
+        false
+      );
+    } else if (task.type === "download" && task.fullPath) {
       handleDownload({ name: task.name, path: task.fullPath, size: task.size });
     } else {
-      showAlert(t.retryNotSupported, "Info", 'warning');
+      showAlert(t.retryNotSupported, "Info", "warning");
     }
   };
 
@@ -1455,71 +1934,97 @@ function App() {
   const hasClipboard = clipboard && clipboard.items.length > 0;
 
   // --- Moved UseEffects to avoid TDZ ---
-  useEffect(() => { handleGoUpRef.current = handleGoUp; }, [handleGoUp]);
-  useEffect(() => { setIsSidebarOpenRef.current = setIsSidebarOpen; }, [setIsSidebarOpen]);
-  useEffect(() => { isSidebarOpenRef.current = isSidebarOpen; }, [isSidebarOpen]);
-  useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
-  useEffect(() => { fetchFilesRef.current = fetchFiles; }, [fetchFiles]);
-  useEffect(() => { selectedPathsRef.current = selectedPaths; }, [selectedPaths]);
-  useEffect(() => { previewFileRef.current = previewFile; }, [previewFile]);
-  useEffect(() => { detailsModalRef.current = detailsModal; }, [detailsModal]);
-  useEffect(() => { isAddDriveOpenRef.current = isAddDriveOpen; }, [isAddDriveOpen]);
-  useEffect(() => { confirmModalRef.current = confirmModal; }, [confirmModal]);
-  useEffect(() => { inputModalRef.current = inputModal; }, [inputModal]);
+  useEffect(() => {
+    handleGoUpRef.current = handleGoUp;
+  }, [handleGoUp]);
+  useEffect(() => {
+    setIsSidebarOpenRef.current = setIsSidebarOpen;
+  }, [setIsSidebarOpen]);
+  useEffect(() => {
+    isSidebarOpenRef.current = isSidebarOpen;
+  }, [isSidebarOpen]);
+  useEffect(() => {
+    currentPathRef.current = currentPath;
+  }, [currentPath]);
+  useEffect(() => {
+    fetchFilesRef.current = fetchFiles;
+  }, [fetchFiles]);
+  useEffect(() => {
+    selectedPathsRef.current = selectedPaths;
+  }, [selectedPaths]);
+  useEffect(() => {
+    previewFileRef.current = previewFile;
+  }, [previewFile]);
+  useEffect(() => {
+    detailsModalRef.current = detailsModal;
+  }, [detailsModal]);
+  useEffect(() => {
+    isAddDriveOpenRef.current = isAddDriveOpen;
+  }, [isAddDriveOpen]);
+  useEffect(() => {
+    confirmModalRef.current = confirmModal;
+  }, [confirmModal]);
+  useEffect(() => {
+    inputModalRef.current = inputModal;
+  }, [inputModal]);
 
   return (
-
-    <div {...getRootProps()} className="flex h-screen bg-main-bg selection-none outline-none overflow-hidden font-sans">
-
+    <div
+      {...getRootProps()}
+      className="flex h-screen bg-main-bg selection-none outline-none overflow-hidden font-sans"
+    >
       <input {...getInputProps()} name="dropzone-file" id="dropzone-file" />
 
       <input
-
         type="file"
-
         name="manual-file-upload"
-
         id="manual-file-upload"
-
         multiple
-
         className="hidden"
-
         ref={fileInputRef}
-
         onChange={(e) => {
           const selectedFiles = Array.from(e.target.files);
           handleUpload(selectedFiles);
-          e.target.value = ''; // Reset to allow same file re-selection
+          e.target.value = ""; // Reset to allow same file re-selection
         }}
-
       />
 
       {/* --- Sidebar (Desktop: Floating Island, Mobile: Fixed/Drawer) --- */}
-      <div className={clsx(
-        "fixed z-50 bg-white/95 backdrop-blur-xl border border-white/40 shadow-2xl transition-all duration-300 ease-in-out md:shadow-2xl",
-        "m-4 rounded-[28px] h-[calc(100vh-2rem)] w-60",
-        "left-0 md:static md:w-64 md:translate-x-0 md:m-4",
-        isSidebarOpen ? "translate-x-0 opacity-100" : "-translate-x-[120%] opacity-0 md:translate-x-0 md:opacity-100 pointer-events-none md:pointer-events-auto"
-      )}
-        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      <div
+        className={clsx(
+          "fixed z-50 bg-white/95 backdrop-blur-xl border border-white/40 shadow-2xl transition-all duration-300 ease-in-out md:shadow-2xl",
+          "m-4 rounded-[28px] h-[calc(100vh-2rem)] w-60",
+          "left-0 md:static md:w-64 md:translate-x-0 md:m-4",
+          isSidebarOpen
+            ? "translate-x-0 opacity-100"
+            : "-translate-x-[120%] opacity-0 md:translate-x-0 md:opacity-100 pointer-events-none md:pointer-events-auto"
+        )}
+        style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
         <div className="flex flex-col h-full p-4">
-          <div className={clsx(
-            "flex flex-col items-center gap-3 px-2 py-4 mb-6",
-            isMacDesktop && "pt-10 app-drag" // Space for traffic lights
-          )}>
+          <div
+            className={clsx(
+              "flex flex-col items-center gap-3 px-2 py-4 mb-6",
+              isMacDesktop && "pt-10 app-drag" // Space for traffic lights
+            )}
+          >
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-100">
               <ServerStackIcon className="w-6 h-6" />
             </div>
-            <span className="text-lg font-bold text-slate-500 tracking-tight">{t.appTitle}</span>
+            <span className="text-lg font-bold text-slate-500 tracking-tight">
+              {t.appTitle}
+            </span>
           </div>
           <div className="flex-1 overflow-y-auto space-y-1">
-            <p className="px-3 text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">{t.drives}</p>
+            <p className="px-3 text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+              {t.drives}
+            </p>
             {drives.length === 0 && (
-              <div className="px-3 text-xs text-red-400 italic">{t.noDrives}</div>
+              <div className="px-3 text-xs text-red-400 italic">
+                {t.noDrives}
+              </div>
             )}
-            {(Array.isArray(drives) ? drives : []).map(drive => (
+            {(Array.isArray(drives) ? drives : []).map((drive) => (
               <div
                 key={drive.id}
                 onClick={() => handleDriveChange(drive.id)}
@@ -1531,30 +2036,50 @@ function App() {
                 )}
               >
                 <div className="shrink-0 pt-0.5">
-                  <ServerStackIcon className={clsx("w-5 h-5", activeDrive === drive.id ? "text-indigo-600" : "text-slate-500")} />
+                  <ServerStackIcon
+                    className={clsx(
+                      "w-5 h-5",
+                      activeDrive === drive.id
+                        ? "text-indigo-600"
+                        : "text-slate-500"
+                    )}
+                  />
                 </div>
 
                 <div className="flex-1 min-w-0 flex flex-col items-start gap-1">
                   <span className="truncate w-full text-left">
-                    {drive.id === 'local' ? t.localDriveName : drive.name}
+                    {drive.id === "local" ? t.localDriveName : drive.name}
                   </span>
 
                   {drive.quota && drive.quota.total > 0 && (
                     <div className="w-full">
                       <div className="flex justify-between items-center mb-0.5">
-                        <span className="text-[9px] opacity-70">{formatSize(drive.quota.used)} / {formatSize(drive.quota.total)}</span>
+                        <span className="text-[9px] opacity-70">
+                          {formatSize(drive.quota.used)} /{" "}
+                          {formatSize(drive.quota.total)}
+                        </span>
                       </div>
                       <div className="w-full h-1 bg-slate-200 rounded-full overflow-hidden">
                         <div
-                          className={clsx("h-full rounded-full", activeDrive === drive.id ? "bg-indigo-500" : "bg-slate-500")}
-                          style={{ width: `${Math.min((drive.quota.used / drive.quota.total) * 100, 100)}%` }}
+                          className={clsx(
+                            "h-full rounded-full",
+                            activeDrive === drive.id
+                              ? "bg-indigo-500"
+                              : "bg-slate-500"
+                          )}
+                          style={{
+                            width: `${Math.min(
+                              (drive.quota.used / drive.quota.total) * 100,
+                              100
+                            )}%`,
+                          }}
                         ></div>
                       </div>
                     </div>
                   )}
                 </div>
 
-                {drive.id !== 'local' && (
+                {drive.id !== "local" && (
                   <div className="flex items-center shrink-0 gap-1 opacity-0 group-hover:opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-all">
                     <button
                       onClick={(e) => handleEditDrive(drive.id, drive.name, e)}
@@ -1576,8 +2101,12 @@ function App() {
             ))}
           </div>
 
-          <button onClick={() => setIsAddDriveOpen(true)} className="mt-2 flex items-center justify-center gap-2 w-full py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
-            <PlusCircleIcon className="w-5 h-5" /><span>{t.addDrive}</span>
+          <button
+            onClick={() => setIsAddDriveOpen(true)}
+            className="mt-2 flex items-center justify-center gap-2 w-full py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+          >
+            <PlusCircleIcon className="w-5 h-5" />
+            <span>{t.addDrive}</span>
           </button>
 
           {/* Sidebar Footer Extras */}
@@ -1587,7 +2116,7 @@ function App() {
               className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 hover:text-indigo-600 transition-colors"
             >
               <GlobeAltIcon className="w-4 h-4 shrink-0" />
-              <span>{lang === 'en' ? '英' : '中'}</span>
+              <span>{lang === "en" ? "英" : "中"}</span>
             </button>
           </div>
         </div>
@@ -1604,14 +2133,19 @@ function App() {
       <div className="flex-1 flex flex-col h-full overflow-hidden relative">
         <div
           className="sticky top-0 z-10 bg-main-bg/80 backdrop-blur-md border-b border-slate-100 transition-all"
-          style={{ paddingTop: 'env(safe-area-inset-top)' }}
+          style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
           {isMacDesktop && <div className="w-full h-8 app-drag" />}
           {/* Top Row: Sidebar, Back, Search, Actions */}
           <div className="flex items-center gap-2 px-4 sm:px-8 py-3">
-            <button onClick={() => setIsSidebarOpen(true)} className="p-2 -ml-2 mr-1 hover:bg-white rounded-full md:hidden text-slate-600"><Bars3Icon className="w-6 h-6" /></button>
+            <button
+              onClick={() => setIsSidebarOpen(true)}
+              className="p-2 -ml-2 mr-1 hover:bg-white rounded-full md:hidden text-slate-600"
+            >
+              <Bars3Icon className="w-6 h-6" />
+            </button>
 
-            {currentPath !== '/' && (
+            {currentPath !== "/" && (
               <button
                 onClick={handleGoUp}
                 className="p-2 hover:bg-white rounded-full transition-colors shrink-0"
@@ -1622,7 +2156,9 @@ function App() {
 
             {/* Search Input */}
             <div className="flex-1 relative group mx-1">
-              <label htmlFor="search-files" className="sr-only">Search Files</label>
+              <label htmlFor="search-files" className="sr-only">
+                Search Files
+              </label>
               {isSearching ? (
                 <ArrowPathIcon className="w-5 h-5 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2 animate-spin" />
               ) : (
@@ -1635,7 +2171,7 @@ function App() {
                 placeholder={t.searchPlaceholder}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleGlobalSearch()}
+                onKeyDown={(e) => e.key === "Enter" && handleGlobalSearch()}
                 className="w-full bg-slate-100/50 hover:bg-slate-100 focus:bg-white border-none rounded-full py-2 pl-10 pr-4 text-sm outline-none ring-1 ring-transparent focus:ring-indigo-500/20 transition-all placeholder:text-xs placeholder:text-slate-400 text-slate-500"
               />
             </div>
@@ -1644,30 +2180,44 @@ function App() {
               {/* New Circular Progress */}
               <CircularProgress
                 progress={{
-                  current: tasks.filter(t => t.status !== 'done' && t.status !== 'error').reduce((acc, t) => acc + (t.currentBytes || 0), 0),
-                  total: tasks.filter(t => t.status !== 'done' && t.status !== 'error').reduce((acc, t) => acc + (t.totalBytes || 0), 0)
+                  current: tasks
+                    .filter((t) => t.status !== "done" && t.status !== "error")
+                    .reduce((acc, t) => acc + (t.currentBytes || 0), 0),
+                  total: tasks
+                    .filter((t) => t.status !== "done" && t.status !== "error")
+                    .reduce((acc, t) => acc + (t.totalBytes || 0), 0),
                 }}
-                activeCount={tasks.filter(t => t.status === 'active' || t.status === 'pending').length}
+                activeCount={
+                  tasks.filter(
+                    (t) => t.status === "active" || t.status === "pending"
+                  ).length
+                }
                 onClick={() => setTransferDashboardOpen(true)}
               />
 
               {isSelectionMode ? (
                 <button
                   onClick={() => {
-                    if (selectedPaths.size === sortedFiles.length) setSelectedPaths(new Set());
-                    else setSelectedPaths(new Set(sortedFiles.map(f => f.path)));
+                    if (selectedPaths.size === sortedFiles.length)
+                      setSelectedPaths(new Set());
+                    else
+                      setSelectedPaths(new Set(sortedFiles.map((f) => f.path)));
                   }}
                   className="text-sm text-indigo-600 font-medium px-2 sm:px-4"
                 >
-                  {selectedPaths.size === sortedFiles.length ? t.cancel : t.selectAll}
+                  {selectedPaths.size === sortedFiles.length
+                    ? t.cancel
+                    : t.selectAll}
                 </button>
               ) : hasClipboard ? (
-                <button onClick={() => setClipboard(null)} className="text-sm text-slate-400 font-medium px-2 sm:px-4">
+                <button
+                  onClick={() => setClipboard(null)}
+                  className="text-sm text-slate-400 font-medium px-2 sm:px-4"
+                >
                   {t.cancelMove}
                 </button>
               ) : (
                 <>
-
                   {/* Sort Menu */}
                   <div className="relative">
                     <button
@@ -1678,18 +2228,26 @@ function App() {
                     </button>
                     {isSortMenuOpen && (
                       <>
-                        <div className="fixed inset-0 z-10" onClick={() => setIsSortMenuOpen(false)} />
+                        <div
+                          className="fixed inset-0 z-10"
+                          onClick={() => setIsSortMenuOpen(false)}
+                        />
                         <div className="absolute right-0 top-full mt-2 w-32 bg-white rounded-xl shadow-xl border border-slate-100 z-20 overflow-hidden py-1">
-                          {['name', 'date', 'type', 'size'].map(key => (
+                          {["name", "date", "type", "size"].map((key) => (
                             <button
                               key={key}
                               onClick={() => handleSort(key)}
                               className="w-full text-left px-4 py-2 text-sm text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 flex items-center justify-between"
                             >
-                              <span className="capitalize">{t[key] || key}</span>
-                              {sortConfig.key === key && (
-                                sortConfig.direction === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />
-                              )}
+                              <span className="capitalize">
+                                {t[key] || key}
+                              </span>
+                              {sortConfig.key === key &&
+                                (sortConfig.direction === "asc" ? (
+                                  <ChevronUpIcon className="w-3 h-3" />
+                                ) : (
+                                  <ChevronDownIcon className="w-3 h-3" />
+                                ))}
                             </button>
                           ))}
                         </div>
@@ -1699,10 +2257,16 @@ function App() {
 
                   {/* View Mode Toggle */}
                   <button
-                    onClick={() => setViewMode(v => v === 'grid' ? 'list' : 'grid')}
+                    onClick={() =>
+                      setViewMode((v) => (v === "grid" ? "list" : "grid"))
+                    }
                     className="p-2 hover:bg-white rounded-full text-slate-500 transition-colors"
                   >
-                    {viewMode === 'grid' ? <QueueListIcon className="w-6 h-6" /> : <RectangleGroupIcon className="w-6 h-6" />}
+                    {viewMode === "grid" ? (
+                      <QueueListIcon className="w-6 h-6" />
+                    ) : (
+                      <RectangleGroupIcon className="w-6 h-6" />
+                    )}
                   </button>
                 </>
               )}
@@ -1713,36 +2277,42 @@ function App() {
           <div className="px-4 sm:px-8 pb-3 pt-0 flex overflow-x-auto no-scrollbar mask-linear-fade">
             <div className="flex items-center gap-1 whitespace-nowrap text-slate-500">
               <button
-                onClick={() => handleNavigate('/')}
+                onClick={() => handleNavigate("/")}
                 className={clsx(
                   "p-1 rounded-lg transition-colors flex items-center",
-                  currentPath === '/' ? "bg-indigo-50 text-indigo-700 font-bold" : "hover:bg-white hover:text-slate-700"
+                  currentPath === "/"
+                    ? "bg-indigo-50 text-indigo-700 font-bold"
+                    : "hover:bg-white hover:text-slate-700"
                 )}
               >
                 <HomeIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
 
-              {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((segment, index, arr) => {
-                const segmentPath = '/' + arr.slice(0, index + 1).join('/');
-                const isLast = index === arr.length - 1;
-                return (
-                  <div key={segmentPath} className="flex items-center">
-                    <span className="text-slate-300 mx-0.5 text-xs">/</span>
-                    <button
-                      onClick={() => !isLast && handleNavigate(segmentPath)}
-                      disabled={isLast}
-                      className={clsx(
-                        "px-1.5 py-0.5 rounded-lg transition-colors",
-                        isLast
-                          ? "font-bold text-slate-800 cursor-default text-xs sm:text-sm"
-                          : "hover:bg-white hover:text-indigo-600 font-medium text-xs sm:text-sm"
-                      )}
-                    >
-                      {segment}
-                    </button>
-                  </div>
-                );
-              })}
+              {currentPath !== "/" &&
+                currentPath
+                  .split("/")
+                  .filter(Boolean)
+                  .map((segment, index, arr) => {
+                    const segmentPath = "/" + arr.slice(0, index + 1).join("/");
+                    const isLast = index === arr.length - 1;
+                    return (
+                      <div key={segmentPath} className="flex items-center">
+                        <span className="text-slate-300 mx-0.5 text-xs">/</span>
+                        <button
+                          onClick={() => !isLast && handleNavigate(segmentPath)}
+                          disabled={isLast}
+                          className={clsx(
+                            "px-1.5 py-0.5 rounded-lg transition-colors",
+                            isLast
+                              ? "font-bold text-slate-800 cursor-default text-xs sm:text-sm"
+                              : "hover:bg-white hover:text-indigo-600 font-medium text-xs sm:text-sm"
+                          )}
+                        >
+                          {segment}
+                        </button>
+                      </div>
+                    );
+                  })}
             </div>
           </div>
         </div>
@@ -1752,28 +2322,47 @@ function App() {
           className="flex-1 overflow-y-auto p-4 sm:p-8 pb-32"
           onScroll={handleScroll}
         >
-          <div className={clsx("grid gap-3 transition-all", viewMode === 'grid' ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" : "grid-cols-1")}>
+          <div
+            className={clsx(
+              "grid gap-3 transition-all",
+              viewMode === "grid"
+                ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
+                : "grid-cols-1"
+            )}
+          >
             {loading && files.length === 0 ? (
-              <div className="col-span-full py-20 text-center text-slate-400">{t.loading}</div>
+              <div className="col-span-full py-20 text-center text-slate-400">
+                {t.loading}
+              </div>
             ) : !isGlobalSearch && files.length === 0 ? (
               <div className="col-span-full py-20 text-center flex flex-col items-center gap-3">
-                <div className="w-16 h-16 bg-white rounded-full shadow-island flex items-center justify-center"><FolderIcon className="w-8 h-8 text-slate-300" /></div>
+                <div className="w-16 h-16 bg-white rounded-full shadow-island flex items-center justify-center">
+                  <FolderIcon className="w-8 h-8 text-slate-300" />
+                </div>
                 <p className="text-slate-400">{t.emptyFolder}</p>
               </div>
             ) : sortedFiles.length === 0 ? (
-              <div className="col-span-full py-20 text-center text-slate-400">{t.noResults}</div>
+              <div className="col-span-full py-20 text-center text-slate-400">
+                {t.noResults}
+              </div>
             ) : (
-              <AnimatePresence mode='wait'>
+              <AnimatePresence mode="wait">
                 <motion.div
-                  key={refreshKey + searchQuery + sortConfig.key + sortConfig.direction}
+                  key={
+                    refreshKey +
+                    searchQuery +
+                    sortConfig.key +
+                    sortConfig.direction
+                  }
                   initial={{ opacity: 0.8, scale: 0.99 }}
                   animate={{ opacity: 1, scale: 1 }}
                   transition={{ duration: 0.2 }}
                   className="contents"
                 >
-                  {sortedFiles.slice(0, page * PAGE_SIZE).map(file => (
+                  {sortedFiles.slice(0, page * PAGE_SIZE).map((file, index) => (
                     <FileItem
                       key={file.path}
+                      index={index}
                       file={file}
                       selectedPaths={selectedPaths}
                       toggleSelection={toggleSelection}
@@ -1801,16 +2390,25 @@ function App() {
             transition={{
               type: "spring",
               stiffness: 400,
-              damping: 30
+              damping: 30,
             }}
             className={clsx(
               "shadow-[0_20px_50px_rgba(0,0,0,0.15)] glass-blur border border-white/40 pointer-events-auto flex items-center overflow-hidden",
-              isSelectionMode ? "glass-bg-select w-fit min-w-[150px] h-14 rounded-full px-2" : hasClipboard ? "glass-bg-clipboard w-52 h-14 rounded-full" : isIslandExpanded ? "glass-bg-expanded w-72 h-20 rounded-[40px]" : "glass-bg-default w-32 h-14 rounded-full"
+              isSelectionMode
+                ? "glass-bg-select w-fit min-w-[150px] h-14 rounded-full px-2"
+                : hasClipboard
+                  ? "glass-bg-clipboard w-52 h-14 rounded-full"
+                  : isIslandExpanded
+                    ? "glass-bg-expanded w-72 h-20 rounded-[40px]"
+                    : "glass-bg-default w-32 h-14 rounded-full"
             )}
           >
             {isSelectionMode ? (
               <div className="w-full h-full flex items-center justify-center gap-1 px-2">
-                <button onClick={handleDelete} className="text-red-500 font-medium text-xs hover:bg-red-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                <button
+                  onClick={handleDelete}
+                  className="text-red-500 font-medium text-xs hover:bg-red-100 px-2 py-1 rounded-lg whitespace-nowrap"
+                >
                   {t.delete} ({selectedPaths.size})
                 </button>
 
@@ -1818,46 +2416,74 @@ function App() {
 
                 {selectedPaths.size === 1 && (
                   <div className="flex items-center gap-2">
-                    <button onClick={handleRename} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                    <button
+                      onClick={handleRename}
+                      className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap"
+                    >
                       {t.rename}
                     </button>
                     <div className="w-px h-4 bg-slate-100 shrink-0"></div>
                   </div>
                 )}
 
-                <button onClick={handleCut} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                <button
+                  onClick={handleCut}
+                  className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap"
+                >
                   {t.move}
                 </button>
 
                 <div className="w-px h-4 bg-slate-100 shrink-0"></div>
 
-                <button onClick={handleCopy} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1">
+                <button
+                  onClick={handleCopy}
+                  className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap flex items-center gap-1"
+                >
                   {t.copy}
                 </button>
 
                 {selectedPaths.size === 1 && (
                   <div className="flex items-center gap-2">
                     <div className="w-px h-4 bg-slate-100 shrink-0"></div>
-                    <button onClick={handleDetails} className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap">
+                    <button
+                      onClick={handleDetails}
+                      className="text-slate-600 font-medium text-xs hover:bg-slate-100 px-2 py-1 rounded-lg whitespace-nowrap"
+                    >
                       {t.details}
                     </button>
                   </div>
                 )}
               </div>
             ) : hasClipboard ? (
-              <button onClick={handlePaste} className="w-full h-full flex items-center justify-center gap-2 font-semibold text-indigo-600 hover:bg-indigo-100/50">
+              <button
+                onClick={handlePaste}
+                className="w-full h-full flex items-center justify-center gap-2 font-semibold text-indigo-600 hover:bg-indigo-100/50"
+              >
                 <ClipboardDocumentCheckIcon className="w-5 h-5" />
-                <span>{t.paste} ({clipboard.items.length})</span>
+                <span>
+                  {t.paste} ({clipboard.items.length})
+                </span>
               </button>
             ) : (
               <>
                 {!isIslandExpanded && (
                   <div className="w-full flex justify-between px-4 items-center h-full">
-                    <button onClick={() => fetchFiles(currentPath)} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
-                      <ArrowPathIcon className={clsx("w-6 h-6", (loading) && "animate-spin text-indigo-500")} />
+                    <button
+                      onClick={() => fetchFiles(currentPath)}
+                      className="p-2 hover:bg-slate-100 rounded-full text-slate-500"
+                    >
+                      <ArrowPathIcon
+                        className={clsx(
+                          "w-6 h-6",
+                          loading && "animate-spin text-indigo-500"
+                        )}
+                      />
                     </button>
                     <div className="w-px h-6 bg-slate-200"></div>
-                    <button onClick={() => setIsIslandExpanded(true)} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
+                    <button
+                      onClick={() => setIsIslandExpanded(true)}
+                      className="p-2 hover:bg-slate-100 rounded-full text-slate-500"
+                    >
                       <PlusIcon className="w-6 h-6" />
                     </button>
                   </div>
@@ -1865,37 +2491,50 @@ function App() {
 
                 {isIslandExpanded && (
                   <div className="w-full flex justify-around px-4 items-center h-full">
-                    <button className="flex flex-col items-center gap-1 text-slate-500 hover:text-indigo-600 transition-colors"
+                    <button
+                      className="flex flex-col items-center gap-1 text-slate-500 hover:text-indigo-600 transition-colors"
                       onClick={async () => {
                         setInputModal({
                           isOpen: true,
                           title: t.folderNamePrompt,
-                          defaultValue: '',
+                          defaultValue: "",
                           onConfirm: async (name) => {
                             if (!name) return;
-                            if (files.some(f => f.name === name)) {
-                              showAlert(t.folderExists, t.failed, 'warning');
+                            if (files.some((f) => f.name === name)) {
+                              showAlert(t.folderExists, t.failed, "warning");
                               return;
                             }
                             try {
                               // Ensure clean path construction
-                              const cleanCurrent = currentPath.replace(/\/+$/, '') || '/';
-                              const newPath = cleanCurrent === '/' ? `/${name}` : `${cleanCurrent}/${name}`;
-                              console.log(`[CreateFolder] Creating: path=${newPath}, drive=${activeDrive}`);
+                              const cleanCurrent =
+                                currentPath.replace(/\/+$/, "") || "/";
+                              const newPath =
+                                cleanCurrent === "/"
+                                  ? `/${name}`
+                                  : `${cleanCurrent}/${name}`;
+                              console.log(
+                                `[CreateFolder] Creating: path=${newPath}, drive=${activeDrive}`
+                              );
                               await api.createFolder(newPath, activeDrive);
                               console.log(`[CreateFolder] Success: ${newPath}`);
                               fetchFiles(currentPath);
                               setIsIslandExpanded(false);
                             } catch (err) {
                               console.error(`[CreateFolder] Failed:`, err);
-                              showAlert(t.createFolderFailed, t.failed, 'error');
+                              showAlert(
+                                t.createFolderFailed,
+                                t.failed,
+                                "error"
+                              );
                             }
-                          }
+                          },
                         });
                       }}
                     >
                       <FolderIcon className="w-6 h-6" />
-                      <span className="text-[10px] font-medium">{t.folder}</span>
+                      <span className="text-[10px] font-medium">
+                        {t.folder}
+                      </span>
                     </button>
 
                     <button
@@ -1929,7 +2568,9 @@ function App() {
               title={inputModal.title}
               defaultValue={inputModal.defaultValue}
               onConfirm={inputModal.onConfirm}
-              onClose={() => setInputModal(prev => ({ ...prev, isOpen: false }))}
+              onClose={() =>
+                setInputModal((prev) => ({ ...prev, isOpen: false }))
+              }
               lang={lang}
             />
           )}
@@ -1943,20 +2584,35 @@ function App() {
               drive={activeDrive}
               lang={lang}
               onNext={() => {
-                const currentIndex = sortedFiles.findIndex(f => f.path === previewFile.path);
-                if (currentIndex !== -1 && currentIndex < sortedFiles.length - 1) {
+                const currentIndex = sortedFiles.findIndex(
+                  (f) => f.path === previewFile.path
+                );
+                if (
+                  currentIndex !== -1 &&
+                  currentIndex < sortedFiles.length - 1
+                ) {
                   setPreviewFile(sortedFiles[currentIndex + 1]);
                 }
               }}
               onPrev={() => {
-                const currentIndex = sortedFiles.findIndex(f => f.path === previewFile.path);
+                const currentIndex = sortedFiles.findIndex(
+                  (f) => f.path === previewFile.path
+                );
                 if (currentIndex > 0) {
                   setPreviewFile(sortedFiles[currentIndex - 1]);
                 }
               }}
-              hasNext={sortedFiles.findIndex(f => f.path === previewFile.path) < sortedFiles.length - 1}
-              hasPrev={sortedFiles.findIndex(f => f.path === previewFile.path) > 0}
+              hasNext={
+                sortedFiles.findIndex((f) => f.path === previewFile.path) <
+                sortedFiles.length - 1
+              }
+              hasPrev={
+                sortedFiles.findIndex((f) => f.path === previewFile.path) > 0
+              }
               onDownload={handleDownload} // Pass the download handler
+              onFullscreenChange={(isFS) => {
+                isPreviewFullscreenRef.current = isFS;
+              }}
             />
           )}
         </AnimatePresence>
@@ -1965,7 +2621,9 @@ function App() {
           {detailsModal && (
             <DetailsModal
               file={detailsModal}
-              driveName={drives.find(d => d.id === activeDrive)?.name || activeDrive}
+              driveName={
+                drives.find((d) => d.id === activeDrive)?.name || activeDrive
+              }
               onClose={() => setDetailsModal(null)}
               lang={lang}
             />
@@ -1976,7 +2634,9 @@ function App() {
           {confirmModal.isOpen && (
             <ConfirmModal
               {...confirmModal}
-              onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+              onClose={() =>
+                setConfirmModal((prev) => ({ ...prev, isOpen: false }))
+              }
               lang={lang}
             />
           )}
@@ -1986,7 +2646,9 @@ function App() {
           isOpen={conflictModal.isOpen}
           fileName={conflictModal.fileName}
           onResolve={conflictModal.resolve}
-          onCancel={() => conflictModal.resolve && conflictModal.resolve('cancel', false)}
+          onCancel={() =>
+            conflictModal.resolve && conflictModal.resolve("cancel", false)
+          }
           lang={lang}
         />
 
@@ -1995,7 +2657,7 @@ function App() {
           title={alertModal.title}
           message={alertModal.message}
           type={alertModal.type}
-          onClose={() => setAlertModal(prev => ({ ...prev, isOpen: false }))}
+          onClose={() => setAlertModal((prev) => ({ ...prev, isOpen: false }))}
           lang={lang}
         />
 
@@ -2010,27 +2672,46 @@ function App() {
             >
               <div className="bg-white/90 backdrop-blur-md p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4">
                 <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                <span className="text-slate-700 font-medium text-lg">{processingText}</span>
+                <span className="text-slate-700 font-medium text-lg">
+                  {processingText}
+                </span>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <AnimatePresence>{isAddDriveOpen && <div className="fixed inset-0 z-[60]"><AddDriveModal onClose={() => setIsAddDriveOpen(false)} onAdded={(newDrive) => {
-          if (newDrive) {
-            setDrives(prev => {
-              const next = [...prev, newDrive];
-              localStorage.setItem('cached_drives', JSON.stringify(next));
-              return next;
-            });
-          }
-        }} lang={lang} /></div>}</AnimatePresence>
+        <AnimatePresence>
+          {isAddDriveOpen && (
+            <div className="fixed inset-0 z-[60]">
+              <AddDriveModal
+                onClose={() => setIsAddDriveOpen(false)}
+                onAdded={(newDrive) => {
+                  if (newDrive) {
+                    setDrives((prev) => {
+                      const next = [...prev, newDrive];
+                      localStorage.setItem(
+                        "cached_drives",
+                        JSON.stringify(next)
+                      );
+                      return next;
+                    });
+                  }
+                }}
+                lang={lang}
+              />
+            </div>
+          )}
+        </AnimatePresence>
 
         <TransferDashboard
           isOpen={transferDashboardOpen}
           onClose={() => setTransferDashboardOpen(false)}
           tasks={tasks}
-          onClearCompleted={() => setTasks(prev => prev.filter(t => t.status !== 'done' && t.status !== 'error'))}
+          onClearCompleted={() =>
+            setTasks((prev) =>
+              prev.filter((t) => t.status !== "done" && t.status !== "error")
+            )
+          }
           onCancel={handleCancelTask}
           onRetry={handleRetryTask}
           lang={lang}
