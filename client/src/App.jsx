@@ -1110,6 +1110,9 @@ function App() {
     setCurrentPath("/");
     localStorage.setItem("last_path", "/");
     setIsSidebarOpen(false);
+
+    // Refresh drive statuses (quota/isOnline) on change - user request for on-demand check
+    fetchDrives();
   };
 
   const handleNavigate = (path) => {
@@ -1894,6 +1897,11 @@ function App() {
     if (isSaveAsPlatform) {
       const sourceDrive = activeDrive || "local";
       api.downloadFile(file, sourceDrive, { onProgress, onComplete })
+        .then((result) => {
+          if (result && result.cancelled) {
+            setTasks((prev) => prev.filter((t) => t.id !== taskId));
+          }
+        })
         .catch((err) => {
           setTasks((prev) =>
             prev.map((t) => (t.id === taskId ? { ...t, status: "error" } : t))
@@ -1901,6 +1909,7 @@ function App() {
           showAlert(t.downloadFailed + ": " + err.message, t.failed, "error");
         });
     } else {
+
       const sourceDrive = activeDrive || "local";
       const destDrive = "local";
       const targetPath = "Download/";
@@ -2048,23 +2057,35 @@ function App() {
                     : "text-slate-500 hover:bg-slate-100"
                 )}
               >
-                <div className="shrink-0 pt-0.5">
+                <div className="shrink-0 pt-0.5 relative">
                   <ServerStackIcon
                     className={clsx(
                       "w-5 h-5",
-                      activeDrive === drive.id
-                        ? "text-indigo-600"
-                        : "text-slate-500"
+                      drive.isOnline === false
+                        ? "text-red-400"
+                        : activeDrive === drive.id
+                          ? "text-indigo-600"
+                          : "text-slate-500"
                     )}
                   />
+                  {drive.isOnline === false && (
+                    <div className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full border border-white shadow-sm" />
+                  )}
                 </div>
 
                 <div className="flex-1 min-w-0 flex flex-col items-start gap-1">
-                  <span className="truncate w-full text-left">
-                    {drive.id === "local" ? t.localDriveName : drive.name}
-                  </span>
+                  <div className="flex items-center gap-1.5 w-full">
+                    <span className={clsx("truncate text-left", drive.isOnline === false && "text-slate-400")}>
+                      {drive.id === "local" ? t.localDriveName : drive.name}
+                    </span>
+                    {drive.isOnline === false && (
+                      <span className="text-[10px] text-red-400 font-medium shrink-0">
+                        {lang === "zh" ? "离线" : "Offline"}
+                      </span>
+                    )}
+                  </div>
 
-                  {drive.quota && drive.quota.total > 0 && (
+                  {drive.quota && drive.quota.total > 0 && drive.isOnline !== false && (
                     <div className="w-full">
                       <div className="flex justify-between items-center mb-0.5">
                         <span className="text-[9px] opacity-70">
@@ -2089,6 +2110,11 @@ function App() {
                         ></div>
                       </div>
                     </div>
+                  )}
+                  {drive.isOnline === false && (
+                    <span className="text-[9px] text-slate-400 italic">
+                      {lang === "zh" ? "无法连接到服务器" : "Cannot connect to server"}
+                    </span>
                   )}
                 </div>
 

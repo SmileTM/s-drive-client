@@ -2000,29 +2000,35 @@ const NativeAPI = {
                     if (drive.type === 'local') {
                         try {
                             const info = await WebDavNative.getStorageInfo();
-                            return { ...drive, quota: { used: info.used, total: info.total } };
+                            return { ...drive, quota: { used: info.used, total: info.total }, isOnline: true };
                         } catch (e) {
                             console.warn('[Native] Failed to get storage info:', e);
-                            return drive;
+                            return { ...drive, isOnline: true }; // Local is always "online" even if quota fails
                         }
                     }
 
-                    // WebDAV
+                    // WebDAV / SMB
                     try {
                         const client = getWebDAVClient(drive);
-                        // Timeout promise 2s
+                        // Timeout promise 3s for a bit more buffer
                         const quota = await Promise.race([
                             client.getQuota(),
-                            new Promise(resolve => setTimeout(() => resolve(null), 2000))
+                            new Promise(resolve => setTimeout(() => resolve('timeout'), 3000))
                         ]);
 
-                        if (quota) {
-                            return { ...drive, quota: { used: quota.used, total: quota.total } };
+                        if (quota === 'timeout') {
+                            console.warn(`[API] Quota timeout for drive: ${drive.name}`);
+                            return { ...drive, isOnline: false };
                         }
+
+                        if (quota) {
+                            return { ...drive, quota: { used: quota.used, total: quota.total }, isOnline: true };
+                        }
+                        return { ...drive, isOnline: true };
                     } catch (e) {
-                        // Ignore quota errors
+                        console.warn(`[API] Failed to connect/get quota for drive: ${drive.name}`, e);
+                        return { ...drive, isOnline: false };
                     }
-                    return drive;
                 }));
 
                 _drivesCache = drivesWithQuota;
@@ -2480,9 +2486,15 @@ const NativeAPI = {
                 downloadListener.remove();
             }
         } catch (err) {
+            const errMsg = err.message || String(err);
+            if (errMsg.includes('cancelled') || errMsg.includes('canceled')) {
+                console.log('[Native Download] User cancelled operation');
+                return { success: false, cancelled: true };
+            }
             console.error('[Native Download] Failed:', err);
             throw err;
         }
+
     }
 };
 

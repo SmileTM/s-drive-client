@@ -487,7 +487,15 @@ const PreviewModal = ({ file, onClose, drive = 'local', onNext, onPrev, hasNext,
         }
       });
 
+      if (result && result.cancelled) {
+        if (setTasks && taskId) {
+          setTasks(prev => prev.filter(t => t.id !== taskId));
+        }
+        return;
+      }
+
       if (result && result.success) {
+
         // Paths are now shown in the task list, so we don't necessarily need an alert
         // unless result.path is available and we want to confirm.
       }
