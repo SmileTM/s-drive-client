@@ -57,6 +57,18 @@ import android.os.PowerManager;
 
 import java.util.concurrent.ConcurrentHashMap;
 import okhttp3.Call;
+import android.media.MediaMetadataRetriever;
+import android.media.MediaDataSource;
+import android.media.ThumbnailUtils;
+import android.graphics.BitmapFactory;
+import android.graphics.Bitmap;
+import android.util.Size;
+import android.util.DisplayMetrics;
+import android.graphics.Matrix;
+import java.security.MessageDigest;
+import java.util.HashMap;
+import java.util.Map;
+import androidx.annotation.RequiresApi;
 
 // SMB Imports
 import jcifs.CIFSContext;
@@ -64,9 +76,9 @@ import jcifs.context.SingletonContext;
 import jcifs.smb.NtlmPasswordAuthenticator;
 import jcifs.smb.SmbFile;
 import jcifs.smb.SmbException;
+import jcifs.smb.SmbRandomAccessFile;
 import jcifs.config.PropertyConfiguration;
 import jcifs.context.BaseContext;
-import jcifs.smb.SmbRandomAccessFile;
 import android.net.wifi.WifiManager;
 
 @CapacitorPlugin(
@@ -88,11 +100,62 @@ public class WebDavPlugin extends Plugin {
     // [PERF] Shared pool for SMB metadata operations (list, delete, mkdir, etc.)
     // Limits concurrency to prevent 0xC000009A (Insufficient Resources)
     private static final ExecutorService smbMetadataExecutor = Executors.newFixedThreadPool(4);
+    private static final java.util.concurrent.Semaphore smbGlobalLimiter = new java.util.concurrent.Semaphore(8);
+    private static final java.util.concurrent.Semaphore smbTransferLimiter = new java.util.concurrent.Semaphore(2); // Limits total dedicated Tree Contexts to stop router exhaustion
+    private static final java.util.concurrent.atomic.AtomicInteger activeUploads = new java.util.concurrent.atomic.AtomicInteger(0); // [FIX] Track active uploads to block thumbnail SMB connections
+    private static final java.util.Set<String> failedThumbnails = java.util.Collections.synchronizedSet(new java.util.HashSet<>()); // [PERF] Skip retrying thumbnails that already failed
+    private static final ExecutorService thumbExecutor = Executors.newFixedThreadPool(4); // [FIX] Limit concurrent thumbnail generation to prevent app hanging
+    private static final java.util.concurrent.Semaphore webdavThumbLimiter = new java.util.concurrent.Semaphore(1); // [FIX] WebDAV (especially Jianguoyun) is very sensitive to concurrency
+    private static final ConcurrentHashMap<String, Long> driveCoolDowns = new ConcurrentHashMap<>(); // [FIX] Track throttled drives (HTTP 503)
 
+    // [PERF] Track both Future and Call for deep cancellation
+    private static class ThumbJob {
+        final java.util.concurrent.Future<?> future;
+        Call activeCall = null;
+        ThumbJob(java.util.concurrent.Future<?> future) { this.future = future; }
+    }
+    private final ConcurrentHashMap<String, ThumbJob> thumbTasks = new ConcurrentHashMap<>(); 
     // [PERF] Cache for the tuned CIFSContext
     private static CIFSContext tunedContext = null;
     private static final Object contextLock = new Object();
+    // Cache contexts by authentication hash to enforce connection reuse
+    private static final java.util.concurrent.ConcurrentHashMap<String, CIFSContext> authContextMap = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> smbFileLengthCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Object treeConnectLock = new Object();
+    
     private WifiManager.WifiLock wifiLock = null;
+    private final java.util.concurrent.atomic.AtomicInteger wifiLockCount = new java.util.concurrent.atomic.AtomicInteger(0);
+
+    private void acquireWifiLock() {
+        synchronized (this) {
+            if (wifiLockCount.getAndIncrement() == 0) {
+                if (wifiLock == null) {
+                    WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                    if (wm != null) {
+                        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "WebDavStreamingLock");
+                    }
+                }
+                if (wifiLock != null && !wifiLock.isHeld()) {
+                    wifiLock.acquire();
+                    android.util.Log.d("WebDavNative", "[LOCK] WifiLock acquired for streaming");
+                }
+            }
+        }
+    }
+
+    private void releaseWifiLock() {
+        synchronized (this) {
+            if (wifiLockCount.decrementAndGet() <= 0) {
+                wifiLockCount.set(0);
+                if (wifiLock != null && wifiLock.isHeld()) {
+                    wifiLock.release();
+                    android.util.Log.d("WebDavNative", "[LOCK] WifiLock released");
+                }
+            }
+        }
+    }
+
+    private OkHttpClient client;
 
     private void startTransfer() {
         int count = activeTransfers.getAndIncrement();
@@ -122,8 +185,6 @@ public class WebDavPlugin extends Plugin {
             manager.cancel(9999);
         }
     }
-
-    private OkHttpClient client;
 
     private void initClient() {
         try {
@@ -200,6 +261,438 @@ public class WebDavPlugin extends Plugin {
             localServer.start();
         } catch (Exception e) {
             e.printStackTrace();
+        }
+    }
+
+    @PluginMethod
+    public void getThumbnail(PluginCall call) {
+        String path = call.getString("path");
+        String storeType = call.getString("storeType", "local"); // local, smb, webdav
+        String fileType = call.getString("fileType", "image"); // image, video
+        JSObject config = call.getObject("config");
+
+        if (path == null) {
+            call.reject("Path is required");
+            return;
+        }
+
+        // [FIX] Block ALL SMB thumbnail requests during active uploads
+        // This prevents router resource exhaustion (0xC000009A) caused by thumbnail SMB connections
+        // competing with upload connections. Must be here (not in generateThumbnail) because
+        // the proxy fallback (Scheme 2) also opens SMB connections through the local HTTP server.
+        if ("smb".equals(storeType) && activeUploads.get() > 0) {
+            android.util.Log.d("WebDavNative", "[BLOCKED] Thumbnail request during active upload: " + path);
+            call.reject("Upload in progress");
+            return;
+        }
+
+        android.util.Log.d("WebDavNative", "getThumbnail: " + path + " (" + storeType + ", " + fileType + ")");
+
+        // [PERF] Check disk cache on calling thread — no need to spawn a thread for cache hits
+        // [FIX] Use drive ID for cache/fail key to prevent cross-drive collisions
+        String driveId = config.getString("id", storeType); 
+        
+        // [FIX] Check for drive-level cooldown (e.g. following a 503 error)
+        Long coolDownUntil = driveCoolDowns.get(driveId);
+        if (coolDownUntil != null) {
+            if (System.currentTimeMillis() < coolDownUntil) {
+                call.reject("Drive is cooling down due to rate limit");
+                return;
+            } else {
+                driveCoolDowns.remove(driveId);
+            }
+        }
+
+        String taskKey = driveId + ":" + path;
+        String cacheKey = md5(taskKey);
+        File cacheDir = new File(getContext().getExternalCacheDir(), "thumbnails");
+        if (!cacheDir.exists()) cacheDir.mkdirs();
+        File cacheFile = new File(cacheDir, cacheKey + ".jpg");
+
+        if (cacheFile.exists()) {
+            JSObject ret = new JSObject();
+            ret.put("url", "http://127.0.0.1:" + localServer.getPort() + "/cache/thumbnails/" + cacheKey + ".jpg");
+            call.resolve(ret);
+            return;
+        }
+
+        // [PERF] Skip thumbnails that already failed (e.g. unsupported codec like Dolby Vision)
+        if (failedThumbnails.contains(taskKey)) {
+            call.reject("Thumbnail previously failed");
+            return;
+        }
+
+        // Cache miss — use thread pool for actual generation from cloud
+        // [FIX] Using fixed thread pool instead of new Thread() to prevent hanging/OOM
+        // [PERF] Store job for deep cancellation (interruption + call.cancel)
+        long startTime = System.currentTimeMillis();
+        java.util.concurrent.Future<?> future = thumbExecutor.submit(() -> {
+            try {
+                // [FIX] Re-check cooldown after potentially sitting in the executor queue
+                Long againCool = driveCoolDowns.get(driveId);
+                if (againCool != null && System.currentTimeMillis() < againCool) {
+                    call.reject("Drive is cooling down");
+                    return;
+                }
+
+                Bitmap bitmap = generateThumbnail(path, storeType, fileType, config, taskKey);
+                if (bitmap != null) {
+                    saveBitmapToCache(bitmap, cacheFile);
+                    bitmap.recycle();
+                    android.util.Log.d("WebDavNative", "Thumbnail Generated & Cached: " + path);
+                    JSObject ret = new JSObject();
+                    ret.put("url", "http://127.0.0.1:" + localServer.getPort() + "/cache/thumbnails/" + cacheKey + ".jpg");
+                    call.resolve(ret);
+                } else {
+                    android.util.Log.w("WebDavNative", "Failed to generate bitmap for: " + path);
+                    failedThumbnails.add(taskKey); // Remember this failure
+                    call.reject("Failed to generate thumbnail");
+                }
+            } catch (Exception e) {
+                // Check if this was a 503 Throttling error
+                if (e.getMessage() != null && e.getMessage().contains("HTTP 503")) {
+                    android.util.Log.w("WebDavNative", "Throttled (503) by server for drive: " + driveId + ". Cooling down for 10s.");
+                    driveCoolDowns.put(driveId, System.currentTimeMillis() + 10000);
+                    call.reject("Throttled by server");
+                    return; // Don't add to failedThumbnails, allow retry later
+                }
+
+                // Check if this was a cancellation
+                if (Thread.currentThread().isInterrupted()) {
+                    android.util.Log.d("WebDavNative", "Thumbnail generation interrupted for " + path);
+                    // Don't reject or resolve, simply stop
+                } else {
+                    android.util.Log.e("WebDavNative", "getThumbnail error for " + path, e);
+                    call.reject(e.getMessage());
+                }
+            } finally {
+                thumbTasks.remove(taskKey);
+            }
+        });
+        
+        thumbTasks.put(taskKey, new ThumbJob(future));
+    }
+
+    @PluginMethod
+    public void cancelThumbnail(PluginCall call) {
+        String path = call.getString("path");
+        String driveId = call.getString("driveId");
+        if (path == null || driveId == null) {
+            call.reject("Path and DriveId are required");
+            return;
+        }
+        String taskKey = driveId + ":" + path;
+        ThumbJob job = thumbTasks.remove(taskKey);
+        if (job != null) {
+            job.future.cancel(true); // Interrupt the thread
+            if (job.activeCall != null) {
+                try { job.activeCall.cancel(); } catch (Exception ignored) {}
+            }
+            android.util.Log.d("WebDavNative", "Thumbnail request cancelled (Deep Abort): " + path);
+        }
+        call.resolve();
+    }
+
+    private Bitmap generateThumbnail(String path, String storeType, String fileType, JSObject config, String taskKey) throws Exception {
+        if ("local".equals(storeType)) {
+            if (path.startsWith("content://")) {
+                Uri uri = Uri.parse(path);
+                if ("video".equals(fileType)) {
+                    MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+                    try {
+                        android.content.Context ctx = getContext();
+                        android.content.res.AssetFileDescriptor afd = ctx.getContentResolver().openAssetFileDescriptor(uri, "r");
+                        if (afd != null) {
+                            retriever.setDataSource(afd.getFileDescriptor());
+                            Bitmap frame = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                            if (frame == null) frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                            if (frame == null) frame = retriever.getFrameAtTime(-1);
+                            afd.close();
+                            return frame;
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.e("WebDavNative", "Content URI video thumb failed", e);
+                    } finally {
+                        try { retriever.release(); } catch (Exception ignored) {}
+                    }
+                    return null;
+                } else {
+                    // Image content URI
+                    try (java.io.InputStream is = getContext().getContentResolver().openInputStream(uri)) {
+                        BitmapFactory.Options options = new BitmapFactory.Options();
+                        options.inJustDecodeBounds = true;
+                        // For streams we can't easily decode bounds then reset stream without wrapping or re-opening.
+                        // Since it's a thumbnail we'll just decode a reasonable size directly or reopen stream
+                        java.io.InputStream isBounds = getContext().getContentResolver().openInputStream(uri);
+                        if (isBounds != null) {
+                             BitmapFactory.decodeStream(isBounds, null, options);
+                             isBounds.close();
+                        }
+                        options.inSampleSize = calculateInSampleSize(options, 320, 240);
+                        options.inJustDecodeBounds = false;
+                        return BitmapFactory.decodeStream(is, null, options);
+                    } catch (Exception e) {
+                        android.util.Log.e("WebDavNative", "Content URI image thumb failed", e);
+                        return null;
+                    }
+                }
+            }
+
+            File root = Environment.getExternalStorageDirectory();
+            File file = new File(path); 
+            if (!file.exists()) {
+                file = new File(root, path.startsWith("/") ? path.substring(1) : path);
+            }
+            if (!file.exists()) {
+                 // Try one more common pattern
+                 if (path.contains("Download/")) {
+                     String sub = path.substring(path.indexOf("Download/"));
+                     file = new File(root, sub);
+                 }
+            }
+            if (!file.exists() && path.startsWith("/")) {
+                 // Might be in cache
+                 file = new File(getContext().getExternalCacheDir(), path.substring(1));
+            }
+            
+            if (!file.exists() || !file.canRead()) {
+                android.util.Log.w("WebDavNative", "Local file not found or unreadable: " + file.getAbsolutePath());
+                return null;
+            }
+
+            if ("video".equals(fileType)) {
+                android.util.Log.d("WebDavNative", "Local Video Thumb Attempt: " + file.getAbsolutePath());
+
+                
+                // 1. Try ThumbnailUtils first on Android Q+ (often more robust for system-supported formats)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    try {
+                        Bitmap b = ThumbnailUtils.createVideoThumbnail(file, new Size(320, 240), null);
+                        if (b != null) return b;
+                    } catch (Exception e) {
+                        android.util.Log.w("WebDavNative", "ThumbnailUtils failed, falling back to retriever");
+                    }
+                }
+
+                // 2. Fallback to MediaMetadataRetriever
+                MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+                try {
+                    retriever.setDataSource(file.getAbsolutePath());
+                    // Try 1s with OPTION_CLOSEST_SYNC
+                    Bitmap frame = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                    if (frame == null) frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                    if (frame == null) frame = retriever.getFrameAtTime(-1); // Let system pick representative frame
+                    return frame;
+                } catch (Exception e) {
+                    android.util.Log.e("WebDavNative", "Retriever failed for local video: " + file.getAbsolutePath(), e);
+                    return null;
+                } finally {
+                    try { retriever.release(); } catch (Exception ignored) {}
+                }
+            } else {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+                options.inSampleSize = calculateInSampleSize(options, 320, 240);
+                options.inJustDecodeBounds = false;
+                return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+            }
+        } else {
+            // SMB or WebDAV proxy URL
+            String proxyUrl;
+            if ("smb".equals(storeType)) {
+                proxyUrl = "http://127.0.0.1:" + localServer.getPort() + "/smb/stream?address=" + Uri.encode(config.getString("address"))
+                        + "&share=" + Uri.encode(config.getString("share"))
+                        + "&path=" + Uri.encode(path)
+                        + "&username=" + Uri.encode(config.getString("username"))
+                        + "&password=" + Uri.encode(config.getString("password"))
+                        + "&domain=" + Uri.encode(config.getString("domain", ""));
+            } else {
+                String baseUrl = config.getString("url", "");
+                String user = config.getString("username", "");
+                String pass = config.getString("password", "");
+                proxyUrl = "http://127.0.0.1:" + localServer.getPort() + "/webdav/stream?url=" + Uri.encode(baseUrl)
+                        + "&path=" + Uri.encode(path)
+                        + "&username=" + Uri.encode(user)
+                        + "&password=" + Uri.encode(pass);
+            }
+
+            if ("video".equals(fileType)) {
+                MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+                boolean dataSourceSuccess = false;
+                boolean acquiredLimiter = false;
+                try {
+                    // Scheme 1: Custom MediaDataSource (Lower overhead, direct protocol)
+                    if ("smb".equals(storeType)) {
+                        smbGlobalLimiter.acquire();
+                        acquiredLimiter = true;
+                        android.util.Log.d("WebDavNative", "Video Thumb Scheme 1 (SmbDS): " + path);
+                        String smbUrl = buildSmbUrl(config.getString("address"), config.getString("share"), path);
+                        retriever.setDataSource(new SmbMediaDataSource(smbUrl, config.getString("username"), config.getString("password"), config.getString("domain", "")));
+                        dataSourceSuccess = true;
+                    } else if ("webdav".equals(storeType)) {
+                        android.util.Log.d("WebDavNative", "Video Thumb Scheme 1 (WebDavDS): " + path);
+                        String fullUrl = buildWebDavUrl(config.getString("url", ""), path);
+                        retriever.setDataSource(new WebDavMediaDataSource(fullUrl, config.getString("username", ""), config.getString("password", "")));
+                        dataSourceSuccess = true;
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("WebDavNative", "Scheme 1 (DataSource) failed: " + e.getMessage() + ", falling back to Scheme 2 (Proxy)");
+                } finally {
+                    if (acquiredLimiter && !dataSourceSuccess) {
+                        smbGlobalLimiter.release();
+                        acquiredLimiter = false;
+                    }
+                }
+
+                try {
+                    // Scheme 2: HTTP Proxy Fallback
+                    // [PERF] For SMB, skip proxy fallback - it opens another SMB connection
+                    // and usually fails for the same reason (unsupported codec)
+                    if (!dataSourceSuccess && !"smb".equals(storeType)) {
+                        android.util.Log.d("WebDavNative", "Video Thumb Scheme 2 (Proxy): " + proxyUrl);
+                        retriever.setDataSource(proxyUrl, new HashMap<>());
+                    }
+                    
+                    Bitmap frame = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                    if (frame == null) frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                    if (frame == null) frame = retriever.getFrameAtTime(-1);
+                    return frame;
+                } catch (Exception e) {
+                    android.util.Log.e("WebDavNative", "Video Thumb ALL schemes failed for " + path, e);
+                    return null;
+                } finally {
+                    if (acquiredLimiter) {
+                        smbGlobalLimiter.release();
+                    }
+                    try { retriever.release(); } catch (Exception ignored) {}
+                }
+            } else {
+                // Scheme 3: Direct Remote Image Download (Bypass Loopback Proxy for large images)
+                try {
+                    File tempFile = File.createTempFile("thumb_tmp", ".dat", getContext().getCacheDir());
+                    try {
+                        try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                            if ("smb".equals(storeType)) {
+                                smbGlobalLimiter.acquire();
+                                try {
+                                    android.util.Log.d("WebDavNative", "Direct Smb Download for image: " + path);
+                                    CIFSContext ctx = getCifsContext(config.getString("username"), config.getString("password"), config.getString("domain", ""));
+                                    String smbUrl = buildSmbUrl(config.getString("address"), config.getString("share"), path);
+                                    try (SmbRandomAccessFile sraf = new SmbRandomAccessFile(new SmbFile(smbUrl, ctx), "r")) {
+                                        byte[] buf = new byte[128 * 1024];
+                                        int r;
+                                        while ((r = sraf.read(buf)) != -1) {
+                                            fos.write(buf, 0, r);
+                                        }
+                                    }
+                                } finally {
+                                    smbGlobalLimiter.release();
+                                }
+                            } else {
+                                // [FIX] Use strict concurrency (1) AND pacing (400ms) for WebDAV
+                                webdavThumbLimiter.acquire();
+                                try {
+                                    // [FIX] Pulse mitigation: wait a bit to separate requested bursts
+                                    // This is critical for Jianguoyun's "BlockedTemporarily" 503s
+                                    Thread.sleep(400); 
+
+                                    // [FIX] Check for cooldown again inside the lock
+                                    String driveId = config.getString("id", "webdav");
+                                    Long cool = driveCoolDowns.get(driveId);
+                                    if (cool != null && System.currentTimeMillis() < cool) {
+                                        throw new IOException("HTTP 503 (Cooling Down)");
+                                    }
+
+                                    android.util.Log.d("WebDavNative", "Direct WebDav Download for image: " + path);
+                                    String fullUrl = buildWebDavUrl(config.getString("url", ""), path);
+                                    Request.Builder rb = new Request.Builder().url(fullUrl);
+                                    String user = config.getString("username", "");
+                                    String pass = config.getString("password", "");
+                                    if (user != null && !user.isEmpty()) {
+                                        String credentials = user + ":" + pass;
+                                        String basic = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(), android.util.Base64.NO_WRAP);
+                                        rb.addHeader("Authorization", basic);
+                                    }
+
+                                    // Store call for deep abortion
+                                    ThumbJob job = thumbTasks.get(taskKey);
+                                    Call networkCall = client.newCall(rb.build());
+                                    if (job != null) job.activeCall = networkCall;
+
+                                    try (Response response = networkCall.execute()) {
+                                        if (!response.isSuccessful() || response.body() == null) {
+                                            throw new IOException("HTTP " + response.code());
+                                        }
+                                        try (InputStream is = response.body().byteStream()) {
+                                            byte[] buf = new byte[65536];
+                                            int r;
+                                            while ((r = is.read(buf)) != -1) {
+                                                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                                                fos.write(buf, 0, r);
+                                            }
+                                        }
+                                    } finally {
+                                        if (job != null) job.activeCall = null;
+                                    }
+                                } finally {
+                                    webdavThumbLimiter.release();
+                                }
+                            }
+                        }
+                        
+                        BitmapFactory.Options options = new BitmapFactory.Options();
+                        options.inJustDecodeBounds = true;
+                        BitmapFactory.decodeFile(tempFile.getAbsolutePath(), options);
+                        options.inSampleSize = calculateInSampleSize(options, 320, 240);
+                        options.inJustDecodeBounds = false;
+                        Bitmap bitmap = BitmapFactory.decodeFile(tempFile.getAbsolutePath(), options);
+                        return bitmap;
+                    } finally {
+                        if (tempFile.exists()) tempFile.delete();
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e("WebDavNative", "Direct image download failed for " + path, e);
+                    return null;
+                }
+            }
+        }
+    }
+
+    private void saveBitmapToCache(Bitmap bitmap, File cacheFile) throws IOException {
+        try (FileOutputStream out = new FileOutputStream(cacheFile)) {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out);
+        }
+    }
+
+    private int calculateInSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
+        final int height = options.outHeight;
+        final int width = options.outWidth;
+        int inSampleSize = 1;
+        if (height > reqHeight || width > reqWidth) {
+            final int halfHeight = height / 2;
+            final int halfWidth = width / 2;
+            while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
+                inSampleSize *= 2;
+            }
+        }
+        return inSampleSize;
+    }
+
+    private String md5(String s) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("MD5");
+            digest.update(s.getBytes());
+            byte[] messageDigest = digest.digest();
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : messageDigest) {
+                String h = Integer.toHexString(0xFF & b);
+                while (h.length() < 2) h = "0" + h;
+                hexString.append(h);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            return String.valueOf(s.hashCode());
         }
     }
 
@@ -326,7 +819,7 @@ public class WebDavPlugin extends Plugin {
             if (tunedContext == null) {
                 int cores = getCpuCores();
                 long totalMem = getTotalMemory();
-                boolean isHighEnd = cores >= 6 && totalMem >= 7L * 1024 * 1024 * 1024; // 6 cores & 7GB+ RAM
+                boolean isHighEnd = cores >= 6 && totalMem >= 8L * 1024 * 1024 * 1024; // 6 cores & 8GB+ RAM
                 
                 android.util.Log.i("WebDavNative", "PERF: Hardware Profile - Cores: " + cores + ", RAM: " + (totalMem / (1024*1024)) + "MB, HighEnd: " + isHighEnd);
 
@@ -334,11 +827,11 @@ public class WebDavPlugin extends Plugin {
                 java.util.Properties prop = new java.util.Properties();
                 prop.put("jcifs.smb.client.minVersion", "SMB202");
                 prop.put("jcifs.smb.client.maxVersion", "SMB311");
-                prop.put("jcifs.smb.client.readSize", "8388608"); // 8MB read size for Hyper-Turbo
-                prop.put("jcifs.smb.client.writeSize", "8388608"); 
+                prop.put("jcifs.smb.client.readSize", "2097152"); // 2MB read size (safe for routers)
+                prop.put("jcifs.smb.client.writeSize", "2097152"); // 2MB write size (safe for routers) 
                 
                 // Dynamic Buffer & Window Sizes
-                String bufSize = isHighEnd ? "67108864" : "33554432"; // 64MB if high-end, else 32MB
+                String bufSize = isHighEnd ? "262144" : "131072"; // 256KB if high-end, else 128KB (Native memory safety)
                 prop.put("jcifs.smb.client.rcv_buf_size", bufSize);
                 prop.put("jcifs.smb.client.snd_buf_size", bufSize);
                 prop.put("jcifs.smb.client.maximumBufferSize", bufSize);
@@ -347,8 +840,9 @@ public class WebDavPlugin extends Plugin {
                 prop.put("jcifs.smb.client.socketSendBufferSize", bufSize);
 
                 prop.put("jcifs.smb.client.useLargeReadWrite", "true");
-                prop.put("jcifs.smb.client.maxMpxCount", isHighEnd ? "2048" : "1024");
-                prop.put("jcifs.smb.client.maximumCredits", isHighEnd ? "16384" : "8192"); 
+                prop.put("jcifs.smb.client.maxMpxCount", isHighEnd ? "128" : "64"); 
+                prop.put("jcifs.smb.client.maximumCredits", isHighEnd ? "512" : "256"); 
+                prop.put("jcifs.smb.client.maximumBufferSize", isHighEnd ? "262144" : "131072");
                 
                 prop.put("jcifs.smb.client.signingPreferred", "false");
                 prop.put("jcifs.smb.client.signingEnforced", "false");
@@ -357,9 +851,9 @@ public class WebDavPlugin extends Plugin {
                 prop.put("jcifs.smb.client.disableSpnegoIntegrity", "true");
                 prop.put("jcifs.smb.client.disableSpnegoSgn", "true");
                 prop.put("jcifs.smb.client.encryptionPreferred", "false");
-                prop.put("jcifs.smb.client.useSessKeepalive", "true");
-                prop.put("jcifs.smb.client.dfs.disabled", "true");
                 prop.put("jcifs.smb.client.useBatching", "true");
+                prop.put("jcifs.smb.client.connTimeout", "2000"); // 2s connection timeout
+                prop.put("jcifs.smb.client.soTimeout", "10000"); // 10s socket timeout
                 prop.put("jcifs.resolveOrder", "DNS");
                 
                 try {
@@ -374,11 +868,46 @@ public class WebDavPlugin extends Plugin {
         }
 
         if (username != null && !username.isEmpty()) {
-            NtlmPasswordAuthenticator auth = new NtlmPasswordAuthenticator(domain, username, password);
-            return tunedContext.withCredentials(auth);
+            String cacheKey = (domain == null ? "" : domain) + ":" + username + ":" + password;
+            return authContextMap.computeIfAbsent(cacheKey, k -> {
+                NtlmPasswordAuthenticator auth = new NtlmPasswordAuthenticator(domain, username, password);
+                return tunedContext.withCredentials(auth);
+            });
         }
-        return tunedContext.withGuestCrendentials();
+        return authContextMap.computeIfAbsent("guest", k -> tunedContext.withGuestCrendentials());
     }
+
+    private void clearCifsContextCache(String username, String password, String domain) {
+        if (username != null && !username.isEmpty()) {
+            String cacheKey = (domain == null ? "" : domain) + ":" + username + ":" + password;
+            authContextMap.remove(cacheKey);
+        } else {
+            authContextMap.remove("guest");
+        }
+    }
+    
+    private boolean isConnectionError(Exception e) {
+        if (e == null) return false;
+        String msg = e.getMessage();
+        if (msg == null) return false;
+        
+        // Only classify severe network or session dropped errors as connection errors
+        // specifically avoiding general "Access is denied" which could just be a permission issue on a single file
+        // or during an upload
+        boolean isSevere = msg.contains("Descriptor is no longer valid") 
+                        || msg.contains("0xC000009A")
+                        || msg.contains("STATUS_INSUFFICIENT_RESOURCES")
+                        || msg.contains("Disconnected tree")
+                        || msg.contains("Transport") 
+                        || msg.contains("Socket");
+        
+        // "Access is denied" is tricky. JCIFS often throws it randomly when sessions drop.
+        // We will only treat it as a connection error if it comes from the readAt/getSize or stream loops,
+        // which means the file was openable but suddenly became denied. 
+        // We'll manage this by keeping it here but we'll remove it if it causes too many false positives.
+        return isSevere || msg.contains("Access is denied");
+    }
+
     private String buildSmbUrl(String host, String share, String path) {
         StringBuilder sb = new StringBuilder("smb://");
         sb.append(host);
@@ -440,13 +969,16 @@ public class WebDavPlugin extends Plugin {
         }
 
         smbMetadataExecutor.execute(() -> {
+          for (int retry = 0; retry < 3; retry++) {
             try {
-                CIFSContext ctx = getCifsContext(username, password, domain);
-                String url = buildSmbUrl(address, share, path);
-                if (!url.endsWith("/")) url += "/"; // List requires dir
-                
-                SmbFile dir = new SmbFile(url, ctx);
-                SmbFile[] files = dir.listFiles();
+                smbGlobalLimiter.acquire();
+                try {
+                    CIFSContext ctx = getCifsContext(username, password, domain);
+                    String url = buildSmbUrl(address, share, path);
+                    if (!url.endsWith("/")) url += "/"; // List requires dir
+                    
+                    SmbFile dir = new SmbFile(url, ctx);
+                    SmbFile[] files = dir.listFiles();
                 
                 com.getcapacitor.JSArray results = new com.getcapacitor.JSArray();
                 if (files != null) {
@@ -479,9 +1011,21 @@ public class WebDavPlugin extends Plugin {
                 JSObject ret = new JSObject();
                 ret.put("items", results);
                 call.resolve(ret);
-            } catch (Exception e) {
-                call.reject("SMB List Failed: " + e.getMessage());
+                return; // Success, exit
+            } finally {
+                smbGlobalLimiter.release();
             }
+        } catch (Exception e) {
+            if (retry < 2 && isConnectionError(e)) {
+                android.util.Log.w("WebDavNative", "SMB List failed (connection error), retrying in 1s...", e);
+                clearCifsContextCache(username, password, domain);
+                try { Thread.sleep(1000); } catch (Exception ignored) {}
+            } else {
+                call.reject("SMB List Failed: " + e.getMessage());
+                return;
+            }
+        }
+          }
         });
     }
 
@@ -500,38 +1044,48 @@ public class WebDavPlugin extends Plugin {
         }
 
         smbMetadataExecutor.execute(() -> {
-            try {
-                CIFSContext ctx = getCifsContext(username, password, domain);
-                String url = buildSmbUrl(address, share, path);
-                SmbFile f = new SmbFile(url, ctx);
-                
-                // If not found, try appending '/' to treat as directory
-                if (!f.exists()) {
-                    if (!url.endsWith("/")) {
-                        String dirUrl = url + "/";
-                        SmbFile dirF = new SmbFile(dirUrl, ctx);
-                        if (dirF.exists()) {
-                            f = dirF;
+            for (int retry = 0; retry < 3; retry++) {
+                try {
+                    CIFSContext ctx = getCifsContext(username, password, domain);
+                    String url = buildSmbUrl(address, share, path);
+                    SmbFile f = new SmbFile(url, ctx);
+                    
+                    // If not found, try appending '/' to treat as directory
+                    if (!f.exists()) {
+                        if (!url.endsWith("/")) {
+                            String dirUrl = url + "/";
+                            SmbFile dirF = new SmbFile(dirUrl, ctx);
+                            if (dirF.exists()) {
+                                f = dirF;
+                            } else {
+                                call.reject("SMB Delete Failed: The system cannot find the file specified.");
+                                return;
+                            }
                         } else {
-                            call.reject("SMB Delete Failed: The system cannot find the file specified.");
-                            return;
+                             call.reject("SMB Delete Failed: The system cannot find the file specified.");
+                             return;
                         }
+                    }
+
+                    if (f.isDirectory()) {
+                        android.util.Log.d("WebDavNative", "Deleting directory recursive: " + f.getPath());
+                        deleteRecursive(f);
                     } else {
-                         call.reject("SMB Delete Failed: The system cannot find the file specified.");
-                         return;
+                        f.delete();
+                    }
+                    call.resolve();
+                    return; // Success, exit
+                } catch (Exception e) {
+                    if (retry < 2 && isConnectionError(e)) {
+                        android.util.Log.w("WebDavNative", "SMB Delete failed (connection error), retrying in 1s...", e);
+                        clearCifsContextCache(username, password, domain);
+                        try { Thread.sleep(1000); } catch (Exception ignored) {}
+                    } else {
+                        android.util.Log.e("WebDavNative", "SMB Delete Error", e);
+                        call.reject("SMB Delete Failed: " + e.getMessage());
+                        return;
                     }
                 }
-
-                if (f.isDirectory()) {
-                    android.util.Log.d("WebDavNative", "Deleting directory recursive: " + f.getPath());
-                    deleteRecursive(f);
-                } else {
-                    f.delete();
-                }
-                call.resolve();
-            } catch (Exception e) {
-                android.util.Log.e("WebDavNative", "SMB Delete Error", e);
-                call.reject("SMB Delete Failed: " + e.getMessage());
             }
         });
     }
@@ -590,19 +1144,29 @@ public class WebDavPlugin extends Plugin {
         }
 
         smbMetadataExecutor.execute(() -> {
-            try {
-                CIFSContext ctx = getCifsContext(username, password, domain);
-                String url = buildSmbUrl(address, share, path);
-                // Ensure trailing slash for directory URL in jcifs
-                if (!url.endsWith("/")) url += "/";
-                
-                SmbFile f = new SmbFile(url, ctx);
-                if (!f.exists()) {
-                    f.mkdirs();
+            for (int retry = 0; retry < 3; retry++) {
+                try {
+                    CIFSContext ctx = getCifsContext(username, password, domain);
+                    String url = buildSmbUrl(address, share, path);
+                    // Ensure trailing slash for directory URL in jcifs
+                    if (!url.endsWith("/")) url += "/";
+                    
+                    SmbFile f = new SmbFile(url, ctx);
+                    if (!f.exists()) {
+                        f.mkdirs();
+                    }
+                    call.resolve();
+                    return;
+                } catch (Exception e) {
+                    if (retry < 2 && isConnectionError(e)) {
+                        android.util.Log.w("WebDavNative", "SMB Mkdir failed (connection error), retrying in 1s...", e);
+                        clearCifsContextCache(username, password, domain);
+                        try { Thread.sleep(1000); } catch (Exception ignored) {}
+                    } else {
+                        call.reject("SMB Mkdir Failed: " + e.getMessage());
+                        return;
+                    }
                 }
-                call.resolve();
-            } catch (Exception e) {
-                call.reject("SMB Mkdir Failed: " + e.getMessage());
             }
         });
     }
@@ -623,45 +1187,55 @@ public class WebDavPlugin extends Plugin {
         }
 
         smbMetadataExecutor.execute(() -> {
-            try {
-                CIFSContext ctx = getCifsContext(username, password, domain);
-                String oldUrl = buildSmbUrl(address, share, oldPath);
-                String newUrl = buildSmbUrl(address, share, newPath);
-                Boolean overwrite = call.getBoolean("overwrite", false);
-                
-                SmbFile f = new SmbFile(oldUrl, ctx);
-                
-                // For directories, ensure URLs end with /
-                boolean isSourceDir = f.isDirectory();
-                if (isSourceDir) {
-                    if (!oldUrl.endsWith("/")) oldUrl += "/";
-                    if (!newUrl.endsWith("/")) newUrl += "/";
-                    f = new SmbFile(oldUrl, ctx);
-                }
-                
-                SmbFile dest = new SmbFile(newUrl, ctx);
-                
-                if (dest.exists()) {
-                    if (!overwrite) {
-                        call.reject("File exists");
+            for (int retry = 0; retry < 3; retry++) {
+                try {
+                    CIFSContext ctx = getCifsContext(username, password, domain);
+                    String oldUrl = buildSmbUrl(address, share, oldPath);
+                    String newUrl = buildSmbUrl(address, share, newPath);
+                    Boolean overwrite = call.getBoolean("overwrite", false);
+                    
+                    SmbFile f = new SmbFile(oldUrl, ctx);
+                    
+                    // For directories, ensure URLs end with /
+                    boolean isSourceDir = f.isDirectory();
+                    if (isSourceDir) {
+                        if (!oldUrl.endsWith("/")) oldUrl += "/";
+                        if (!newUrl.endsWith("/")) newUrl += "/";
+                        f = new SmbFile(oldUrl, ctx);
+                    }
+                    
+                    SmbFile dest = new SmbFile(newUrl, ctx);
+                    
+                    if (dest.exists()) {
+                        if (!overwrite) {
+                            call.reject("File exists");
+                            return;
+                        }
+                        // For directories, need recursive delete
+                        try {
+                            if (dest.isDirectory()) {
+                                deleteRecursive(dest);
+                            } else {
+                                dest.delete();
+                            }
+                        } catch (Exception delErr) {
+                            android.util.Log.w("WebDavNative", "Failed to delete for overwrite: " + delErr.getMessage());
+                        }
+                    }
+                    
+                    f.renameTo(dest);
+                    call.resolve();
+                    return;
+                } catch (Exception e) {
+                    if (retry < 2 && isConnectionError(e)) {
+                        android.util.Log.w("WebDavNative", "SMB Rename failed (connection error), retrying in 1s...", e);
+                        clearCifsContextCache(username, password, domain);
+                        try { Thread.sleep(1000); } catch (Exception ignored) {}
+                    } else {
+                        call.reject("SMB Rename Failed: " + e.getMessage());
                         return;
                     }
-                    // For directories, need recursive delete
-                    try {
-                        if (dest.isDirectory()) {
-                            deleteRecursive(dest);
-                        } else {
-                            dest.delete();
-                        }
-                    } catch (Exception delErr) {
-                        android.util.Log.w("WebDavNative", "Failed to delete for overwrite: " + delErr.getMessage());
-                    }
                 }
-                
-                f.renameTo(dest);
-                call.resolve();
-            } catch (Exception e) {
-                call.reject("SMB Rename Failed: " + e.getMessage());
             }
         });
     }
@@ -683,42 +1257,47 @@ public class WebDavPlugin extends Plugin {
 
         new Thread(() -> {
             try {
-                CIFSContext ctx = getCifsContext(username, password, domain);
-                String url = buildSmbUrl(address, share, path);
-                String newUrl = buildSmbUrl(address, share, newPath);
-                Boolean overwrite = call.getBoolean("overwrite", false);
+                smbGlobalLimiter.acquire();
+                try {
+                    CIFSContext ctx = getCifsContext(username, password, domain);
+                    String url = buildSmbUrl(address, share, path);
+                    String newUrl = buildSmbUrl(address, share, newPath);
+                    Boolean overwrite = call.getBoolean("overwrite", false);
 
-                SmbFile f = new SmbFile(url, ctx);
-                
-                // For directories, ensure URLs end with / to avoid "paths overlap" error
-                if (f.isDirectory()) {
-                    if (!url.endsWith("/")) url += "/";
-                    if (!newUrl.endsWith("/")) newUrl += "/";
-                    f = new SmbFile(url, ctx);
-                }
-                
-                android.util.Log.d("WebDavNative", "SMB Copy: " + url + " -> " + newUrl + " (overwrite=" + overwrite + ")");
+                    SmbFile f = new SmbFile(url, ctx);
+                    
+                    // For directories, ensure URLs end with / to avoid "paths overlap" error
+                    if (f.isDirectory()) {
+                        if (!url.endsWith("/")) url += "/";
+                        if (!newUrl.endsWith("/")) newUrl += "/";
+                        f = new SmbFile(url, ctx);
+                    }
+                    
+                    android.util.Log.d("WebDavNative", "SMB Copy: " + url + " -> " + newUrl + " (overwrite=" + overwrite + ")");
 
-                SmbFile dest = new SmbFile(newUrl, ctx);
+                    SmbFile dest = new SmbFile(newUrl, ctx);
 
-                if (dest.exists()) {
-                     if (!overwrite) {
-                         call.reject("File exists");
-                         return;
-                     }
-                     try {
-                         if (dest.isDirectory()) {
-                             deleteRecursive(dest);
-                         } else {
-                             dest.delete();
+                    if (dest.exists()) {
+                         if (!overwrite) {
+                             call.reject("File exists");
+                             return;
                          }
-                     } catch (Exception ignore) {
-                         android.util.Log.w("WebDavNative", "Failed to delete existing destination: " + ignore.getMessage());
-                     }
+                         try {
+                             if (dest.isDirectory()) {
+                                 deleteRecursive(dest);
+                             } else {
+                                 dest.delete();
+                             }
+                         } catch (Exception ignore) {
+                             android.util.Log.w("WebDavNative", "Failed to delete existing destination: " + ignore.getMessage());
+                         }
+                    }
+                    
+                    f.copyTo(dest);
+                    call.resolve();
+                } finally {
+                    smbGlobalLimiter.release();
                 }
-                
-                f.copyTo(dest);
-                call.resolve();
             } catch (Exception e) {
                 android.util.Log.e("WebDavNative", "SMB Copy Error", e);
                 call.reject("SMB Copy Failed: " + e.getMessage());
@@ -747,14 +1326,18 @@ public class WebDavPlugin extends Plugin {
         }
 
         new Thread(() -> {
+            boolean acquiredLimiter = false;
+            CIFSContext ctx = null;
             try {
+                smbTransferLimiter.acquire();
+                acquiredLimiter = true;
                 // [FIX] Immediate notification to eliminate delay
-                boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
-                String fileNameInit = remotePath.contains("/") ? remotePath.substring(remotePath.lastIndexOf('/') + 1) : remotePath;
-                doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
+                    boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
+                    String fileNameInit = remotePath.contains("/") ? remotePath.substring(remotePath.lastIndexOf('/') + 1) : remotePath;
+                    doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
 
-                CIFSContext ctx = getCifsContext(username, password, domain);
+                ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, remotePath);
                 SmbFile smbFile = new SmbFile(url, ctx);
 
@@ -811,16 +1394,18 @@ public class WebDavPlugin extends Plugin {
                 if (mi.lowMemory) {
                     threadCount = 4;
                 } else if (fileSize > 100 * 1024 * 1024) {
-                    threadCount = isHighEnd ? 20 : 12; // 20 threads: Optimal for Wi-Fi & CPU switching
+                    threadCount = isHighEnd ? 8 : 4; // Reduced from 20/12 to prevent resource exhaustion
                 } else if (fileSize > 50 * 1024 * 1024) {
-                    threadCount = 8;
-                } else {
                     threadCount = 4;
+                } else {
+                    threadCount = 2;
                 }
                 
                 final int bufferSize = 4194304; // 4MB: Sweet spot for stability + throughput
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
                 android.util.Log.i("WebDavNative", "Starting V9.6 SMOOTH-HYPER: " + threadCount + " threads, Buffer 4MB");
+
+                final CIFSContext finalCtx = ctx;
 
                 for (int i = 0; i < threadCount; i++) {
                     final int threadIndex = i;
@@ -830,7 +1415,7 @@ public class WebDavPlugin extends Plugin {
                         long end = (threadIndex == totalThreads - 1) ? fileSize - 1 : (threadIndex + 1) * (fileSize / totalThreads) - 1;
                         if (start > end) { latch.countDown(); return; }
 
-                        try (jcifs.smb.SmbFile sf = new jcifs.smb.SmbFile(url, ctx);
+                        try (jcifs.smb.SmbFile sf = new jcifs.smb.SmbFile(url, finalCtx);
                              jcifs.smb.SmbRandomAccessFile sraf = new jcifs.smb.SmbRandomAccessFile(sf, "r");
                              java.io.RandomAccessFile raf = new java.io.RandomAccessFile(localFile, "rw")) {
                             
@@ -917,8 +1502,14 @@ public class WebDavPlugin extends Plugin {
                     call.reject("SMB Download Error: " + e.getMessage());
                 }
             } finally {
+                if (acquiredLimiter) smbTransferLimiter.release();
                 if (callbackId != null) cancelledSmbTasks.remove(callbackId);
                 endTransfer();
+                try {
+                     if (ctx instanceof java.io.Closeable) {
+                          ((java.io.Closeable) ctx).close();
+                     }
+                } catch (Exception ignored) {}
             }
         }).start();
     }
@@ -936,6 +1527,9 @@ public class WebDavPlugin extends Plugin {
         String username = call.getString("username");
         String password = call.getString("password");
         String domain = call.getString("domain");
+        int fileIndex = call.getInt("fileIndex", 1);
+        int fileTotal = call.getInt("fileTotal", 1);
+        String fileProgress = fileTotal > 1 ? " " + fileIndex + "/" + fileTotal : "";
 
         if (address == null || share == null || remotePath == null || sourcePath == null) {
             call.reject("Missing parameters");
@@ -944,12 +1538,17 @@ public class WebDavPlugin extends Plugin {
         }
 
         new Thread(() -> {
+            activeUploads.incrementAndGet(); // Signal thumbnail system IMMEDIATELY before anything else
+            boolean acquiredLimiter = false;
+            CIFSContext ctx = null;
             try {
+                smbTransferLimiter.acquire();
+                acquiredLimiter = true;
                 // [FIX] Immediate notification to eliminate delay
-                boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
-                String titleInit = isZhInit ? "正在连接 SMB..." : "Connecting SMB...";
-                String fileNameInit = sourcePath.contains("/") ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1) : sourcePath;
-                doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
+                    boolean isZhInit = java.util.Locale.getDefault().getLanguage().equals("zh");
+                    String titleInit = isZhInit ? "正在连接 SMB..." + fileProgress : "Connecting SMB..." + fileProgress;
+                    String fileNameInit = sourcePath.contains("/") ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1) : sourcePath;
+                    doUpdateNotification(9999, titleInit, fileNameInit, 0, 0, "");
 
                 final boolean isContentUri = sourcePath.startsWith("content://");
                 final File localFile;
@@ -1007,15 +1606,27 @@ public class WebDavPlugin extends Plugin {
                     sourceName = localFile.getName();
                 }
 
-                // Overwrite check (logic remains same for remote dest)
                 Boolean overwrite = call.getBoolean("overwrite", false);
-                CIFSContext ctx = getCifsContext(username, password, domain);
+                ctx = getCifsContext(username, password, domain);
                 String url = buildSmbUrl(address, share, remotePath);
+                
+                // [FIX] Avoid treeConnect stampede by forcing single-file pre-connection
+                synchronized (treeConnectLock) {
+                     boolean exists = false;
+                     try {
+                          SmbFile smbFileCheck = new SmbFile(url, ctx);
+                          exists = smbFileCheck.exists();
+                     } catch(Exception e) {}
+                     if (exists && !overwrite) {
+                          call.reject("File exists");
+                          return;
+                     }
+                }
+                
                 SmbFile smbFile = new SmbFile(url, ctx);
-
-                if (smbFile.exists() && !overwrite) {
-                    call.reject("File exists");
-                    return;
+                
+                if (fileSize == 0) {
+                     android.util.Log.w("WebDavNative", "Uploading 0 byte file: " + remotePath);
                 }
 
                 try {
@@ -1030,81 +1641,166 @@ public class WebDavPlugin extends Plugin {
                 long lastUpdate = 0;
                 long lastBytes = 0;
                 
-                InputStream in = null;
-                try {
-                     if (isContentUri) {
-                         in = getContext().getContentResolver().openInputStream(Uri.parse(sourcePath));
-                     } else {
-                         in = new java.io.FileInputStream(localFile);
-                     }
-                     
-                     if (in == null) throw new IOException("Failed to open input stream");
-                     
-                     try (java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(smbFile.getOutputStream(), 2097152)) {
-                        byte[] buffer = new byte[8388608]; // [PERF] 8MB buffer
-                        int read;
-                        
-                        // Initial notification update
-                        String threadTitle = isZhInit ? "正在上传" : "Uploading";
-                        doUpdateNotification(9999, threadTitle, sourceName, 0, (int)(fileSize/1024), "");
+                boolean uploadSuccess = false;
+                int uploadRetries = 0;
+                int maxUploadRetries = 3; // Retry for genuine network issues only
+                
+                while (!uploadSuccess && uploadRetries < maxUploadRetries) {
+                    if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                        throw new IOException("Cancelled");
+                    }
+                    InputStream in = null;
+                    try {
+                         if (isContentUri) {
+                             in = getContext().getContentResolver().openInputStream(Uri.parse(sourcePath));
+                         } else {
+                             in = new java.io.FileInputStream(localFile);
+                         }
+                         
+                         if (in == null) throw new IOException("Failed to open input stream");
+                         
+                         // Determine remote file size to resume exactly from where it broke
+                         // ONLY resume on retry attempts; first attempt always starts fresh
+                         long serverLen = 0;
+                         if (uploadRetries > 0) {
+                             try {
+                                 SmbFile remoteFile = new SmbFile(url, ctx);
+                                 if (remoteFile.exists()) {
+                                     serverLen = remoteFile.length();
+                                     android.util.Log.d("WebDavNative", "Resuming upload from byte " + serverLen);
+                                 }
+                             } catch (Exception e) {
+                                 android.util.Log.w("WebDavNative", "Failed to get remote start length, assuming 0", e);
+                             }
+                         }
 
-                        while ((read = in.read(buffer)) != -1) {
-                            if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
-                                throw new IOException("Cancelled");
+                         long skipRemaining = serverLen;
+                         while (skipRemaining > 0) {
+                             long skipped = in.skip(skipRemaining);
+                             if (skipped <= 0) break;
+                             skipRemaining -= skipped;
+                         }
+                         
+                         uploaded = serverLen;
+                         
+                         try (jcifs.smb.SmbRandomAccessFile sraf = new jcifs.smb.SmbRandomAccessFile(new SmbFile(url, ctx), "rw")) {
+                            if (serverLen > 0) {
+                                sraf.seek(serverLen);
                             }
-                            out.write(buffer, 0, read);
-                            uploaded += read;
+                            
+                            byte[] buffer = new byte[8388608]; // [PERF] 8MB buffer
+                            int read;
+                            
+                            // Initial notification update
+                            String threadTitle = isZhInit ? (uploadRetries > 0 ? "正在恢复上传..." + fileProgress : "正在上传" + fileProgress) : (uploadRetries > 0 ? "Resuming upload..." + fileProgress : "Uploading" + fileProgress);
+                            doUpdateNotification(9999, threadTitle, sourceName, (int)(uploaded/1024), (int)(fileSize/1024), "");
     
-                            long now = System.currentTimeMillis();
-                            if (now - lastUpdate > 1000) {
-                                if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
-    
-                                JSObject ret = new JSObject();
-                                ret.put("uploaded", uploaded);
-                                ret.put("total", fileSize);
-                                
-                                long diffBytes = uploaded - lastBytes;
-                                long diffTime = now - lastUpdate;
-                                long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
-                                
-                                ret.put("speed", speed);
-                                if (callbackId != null) ret.put("id", callbackId);
-                                notifyListeners("uploadProgress", ret);
-    
-                                String speedStr = formatSpeed(speed);
-                                
-                                boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
-                                String title = isZh ? "正在上传" : "Uploading";
-                                
-                                doUpdateNotification(9999, title, sourceName, (int)(uploaded/1024), (int)(fileSize/1024), speedStr);
-                                
-                                lastUpdate = now;
-                                lastBytes = uploaded;
+                            while ((read = in.read(buffer)) != -1) {
+                                if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                                    throw new IOException("Cancelled");
+                                }
+                                sraf.write(buffer, 0, read);
+                                uploaded += read;
+        
+                                long now = System.currentTimeMillis();
+                                if (now - lastUpdate > 1000) {
+                                    if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) throw new IOException("Cancelled");
+        
+                                    JSObject ret = new JSObject();
+                                    ret.put("uploaded", uploaded);
+                                    ret.put("total", fileSize);
+                                    
+                                    long diffBytes = uploaded - lastBytes;
+                                    long diffTime = now - lastUpdate;
+                                    long speed = diffTime > 0 ? (diffBytes * 1000 / diffTime) : 0;
+                                    
+                                    ret.put("speed", speed);
+                                    if (callbackId != null) ret.put("id", callbackId);
+                                    notifyListeners("uploadProgress", ret);
+        
+                                    String speedStr = formatSpeed(speed);
+                                    
+                                    boolean isZh = java.util.Locale.getDefault().getLanguage().equals("zh");
+                                    String title = isZh ? "正在上传" + fileProgress : "Uploading" + fileProgress;
+                                    
+                                    doUpdateNotification(9999, title, sourceName, (int)(uploaded/1024), (int)(fileSize/1024), speedStr);
+                                    
+                                    lastUpdate = now;
+                                    lastBytes = uploaded;
+                                }
                             }
-                        }
-                        out.flush();
-                        
-                        // Force 100% notification on completion
-                        boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
-                        String titleFinal = isZhFinal ? "上传完成" : "Upload Complete";
-                        doUpdateNotification(9999, titleFinal, sourceName, (int)(fileSize/1024), (int)(fileSize/1024), "");
-                     }
-                } finally {
-                     if (in != null) try { in.close(); } catch (IOException e) {}
+                            uploadSuccess = true;
+                         }
+                    } catch (Exception loopError) {
+                         if (callbackId != null && Boolean.TRUE.equals(cancelledSmbTasks.get(callbackId))) {
+                             throw new IOException("Cancelled");
+                         }
+                         if (isConnectionError(loopError) || (loopError.getMessage() != null && loopError.getMessage().contains("Descriptor is no longer valid"))) {
+                             uploadRetries++;
+                             android.util.Log.w("WebDavNative", "Upload interrupted, retrying (" + uploadRetries + "/" + maxUploadRetries + ")...", loopError);
+                             try { Thread.sleep(5000); } catch (Exception ignored) {}
+                             clearCifsContextCache(username, password, domain);
+                             ctx = getCifsContext(username, password, domain);
+                         } else {
+                             throw loopError;
+                         }
+                    } finally {
+                         if (in != null) try { in.close(); } catch (IOException e) {}
+                    }
                 }
+                
+                if (!uploadSuccess) {
+                     throw new IOException("Upload failed after " + maxUploadRetries + " retries");
+                }
+                
+                // Force 100% notification on completion
+                boolean isZhFinal = java.util.Locale.getDefault().getLanguage().equals("zh");
+                String titleFinal = isZhFinal ? "上传完成" + fileProgress : "Upload Complete" + fileProgress;
+                doUpdateNotification(9999, titleFinal, sourceName, (int)(fileSize/1024), (int)(fileSize/1024), "");
+                
+                // [FIX] Clear thumbnail blacklist for this path (in case file was overwritten with a new format)
+                failedThumbnails.remove("smb:" + remotePath);
+                
                 call.resolve();
 
             } catch (Exception e) {
+                // Delete partial file on failure to prevent "File exists" on retry
+                try {
+                     // Try to use the existing context to keep it fast, unless it's strictly a connection error
+                     CIFSContext cleanCtx = getCifsContext(username, password, domain);
+                     String cleanUrl = buildSmbUrl(address, share, remotePath);
+                     SmbFile cleanSmb = new SmbFile(cleanUrl, cleanCtx);
+                     if (cleanSmb.exists()) {
+                         cleanSmb.delete();
+                         android.util.Log.w("WebDavNative", "Deleted partial file after failed upload: " + remotePath);
+                     }
+                } catch (Exception ignored) {
+                     android.util.Log.w("WebDavNative", "Cleanup failed: " + ignored.getMessage());
+                }
+
                 if (e.getMessage() != null && e.getMessage().equals("Cancelled")) {
                     android.util.Log.d("WebDavNative", "SMB Upload Cancelled");
                     call.reject("Cancelled");
+                } else if (e.getMessage() != null && e.getMessage().equals("File exists")) {
+                     JSObject errObj = new JSObject();
+                     errObj.put("status", 409);
+                     call.reject("File exists", "409", errObj);
                 } else {
                     android.util.Log.e("WebDavNative", "SMB Upload Error", e);
                     call.reject("SMB Upload Error: " + e.getMessage());
                 }
             } finally {
+                if (acquiredLimiter) {
+                    smbTransferLimiter.release();
+                }
+                activeUploads.decrementAndGet(); // Always decrement, paired with increment at thread start
                 if (callbackId != null) cancelledSmbTasks.remove(callbackId);
                 endTransfer();
+                try {
+                     if (ctx instanceof java.io.Closeable) {
+                          ((java.io.Closeable) ctx).close();
+                     }
+                } catch (Exception ignored) {}
             }
         }).start();
     }
@@ -1163,6 +1859,7 @@ public class WebDavPlugin extends Plugin {
                 long contentLength = -1;
                 long rangeStart = 0;
                 long rangeEnd = -1;
+                boolean hasRangeHeader = false;
 
                 String line;
                 while ((line = readLine(in)) != null && !line.isEmpty()) {
@@ -1170,6 +1867,7 @@ public class WebDavPlugin extends Plugin {
                     if (lower.startsWith("content-length:")) {
                         contentLength = Long.parseLong(line.substring(15).trim());
                     } else if (lower.startsWith("range:")) {
+                        hasRangeHeader = true;
                         Pattern p = Pattern.compile("bytes=(\\d+)-(\\d*)");
                         Matcher m = p.matcher(lower);
                         if (m.find()) {
@@ -1186,8 +1884,13 @@ public class WebDavPlugin extends Plugin {
                     if ("OPTIONS".equals(method)) {
                         out.write("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Range, Content-Type\r\nAccess-Control-Max-Age: 86400\r\n\r\n".getBytes());
                     } else {
-                        handleSmbStream(parts[1], rangeStart, rangeEnd, out);
+                        handleSmbStream(parts[1], rangeStart, rangeEnd, hasRangeHeader, out);
                     }
+                    return;
+                }
+
+                if (path.startsWith("/webdav")) {
+                    handleWebDavStream(parts[1], rangeStart, rangeEnd, hasRangeHeader, out);
                     return;
                 }
 
@@ -1245,15 +1948,29 @@ public class WebDavPlugin extends Plugin {
                     }
 
                     long fileLength = file.length();
+                    boolean hasRange = hasRangeHeader;
                     if (rangeEnd == -1) rangeEnd = fileLength - 1;
                     long finalLength = rangeEnd - rangeStart + 1;
 
+                    String contentType = "application/octet-stream";
+                    if (file.getName().toLowerCase().endsWith(".jpg") || file.getName().toLowerCase().endsWith(".jpeg")) {
+                        contentType = "image/jpeg";
+                    } else if (file.getName().toLowerCase().endsWith(".png")) {
+                        contentType = "image/png";
+                    } else if (file.getName().toLowerCase().endsWith(".mp4")) {
+                        contentType = "video/mp4";
+                    }
+
                     StringBuilder headers = new StringBuilder();
-                    headers.append("HTTP/1.1 206 Partial Content\r\n");
-                    headers.append("Content-Type: application/octet-stream\r\n"); 
+                    if (hasRange) {
+                        headers.append("HTTP/1.1 206 Partial Content\r\n");
+                        headers.append("Content-Range: bytes ").append(rangeStart).append("-").append(rangeEnd).append("/").append(fileLength).append("\r\n");
+                    } else {
+                        headers.append("HTTP/1.1 200 OK\r\n");
+                    }
+                    headers.append("Content-Type: ").append(contentType).append("\r\n"); 
                     headers.append("Accept-Ranges: bytes\r\n");
                     headers.append("Content-Length: ").append(finalLength).append("\r\n");
-                    headers.append("Content-Range: bytes ").append(rangeStart).append("-").append(rangeEnd).append("/").append(fileLength).append("\r\n");
                     headers.append("Access-Control-Allow-Origin: *\r\n");
                     headers.append("\r\n");
                     out.write(headers.toString().getBytes());
@@ -1278,9 +1995,11 @@ public class WebDavPlugin extends Plugin {
             }
         }
 
-        public void handleSmbStream(String uri, long rangeStart, long rangeEnd, OutputStream out) {
+        public void handleSmbStream(String uri, long rangeStart, long rangeEnd, boolean hasRangeHeader, OutputStream out) {
+            acquireWifiLock(); // [FIX] Use lightweight WifiLock instead of startTransfer() to avoid ForegroundService crash
             SmbRandomAccessFile raf = null;
             final int streamId = activeStreams.incrementAndGet();
+            boolean acquiredLimiter = false;
             
             try {
                 android.util.Log.d("WebDavNative", "handleSmbStream: " + uri);
@@ -1314,36 +2033,67 @@ public class WebDavPlugin extends Plugin {
                     return;
                 }
 
-                // [PERF] Seek-first strategy:
-                // For small range requests (common when dragging progress bar), prefer
-                // single-lane low-latency streaming over high-throughput multi-lane mode.
-                final int CHUNK_SIZE = 2 * 1024 * 1024;
-                final BytePool bytePool = BytePool.getInstance(CHUNK_SIZE);
+                // [PERF] Removed smbGlobalLimiter.acquire() for streaming to prevent queueing behind thumbnails
+                // We rely on activeStreams and bufferPermits for resource control instead.
                 
                 CIFSContext ctx = getCifsContext(user, pass, domain);
                 String url = buildSmbUrl(address, share, path);
                 final SmbFile smbFile = new SmbFile(url, ctx);
                 
-                raf = new SmbRandomAccessFile(smbFile, "r");
-                long fileLength = raf.length();
+                // [PERF] Metadata Warp: Use cached length to skip extra RTT on Seek/Range requests
+                Long cachedLength = smbFileLengthCache.get(url);
+                long fileLength = -1;
+                
+                if (cachedLength != null) {
+                    fileLength = cachedLength;
+                }
+                
+                // Open the main raf - retry on 0xC000009A
+                int retries = 3;
+                while (retries > 0) {
+                    try {
+                        raf = new SmbRandomAccessFile(smbFile, "r");
+                        if (fileLength == -1) {
+                            fileLength = raf.length();
+                            smbFileLengthCache.put(url, fileLength);
+                            // Clear cache if too big
+                            if (smbFileLengthCache.size() > 512) smbFileLengthCache.clear();
+                        }
+                        break;
+                    } catch (jcifs.smb.SmbException e) {
+                        if (e.getMessage() != null && e.getMessage().contains("0xC000009A")) {
+                            retries--;
+                            if (retries == 0) throw e;
+                            android.util.Log.w("WebDavNative", "[RETRY] Encountered 0xC000009A on stream start, retrying in 1s...");
+                            try { Thread.sleep(1000); } catch (Exception ignored) {}
+                        } else {
+                            throw e;
+                        }
+                    }
+                }
 
                 if (rangeEnd == -1) rangeEnd = fileLength - 1;
                 long contentLength = rangeEnd - rangeStart + 1;
                 
                 // Headers
                 StringBuilder headers = new StringBuilder();
-                headers.append("HTTP/1.1 206 Partial Content\r\n");
+                if (hasRangeHeader) {
+                    headers.append("HTTP/1.1 206 Partial Content\r\n");
+                    headers.append("Content-Range: bytes ").append(rangeStart).append("-").append(rangeEnd).append("/").append(fileLength).append("\r\n");
+                } else {
+                    headers.append("HTTP/1.1 200 OK\r\n");
+                }
                 headers.append("Content-Type: video/mp4\r\n"); 
                 headers.append("Accept-Ranges: bytes\r\n");
                 headers.append("Content-Length: ").append(contentLength).append("\r\n");
-                headers.append("Content-Range: bytes ").append(rangeStart).append("-").append(rangeEnd).append("/").append(fileLength).append("\r\n");
                 headers.append("Access-Control-Allow-Origin: *\r\n");
                 headers.append("\r\n");
                 out.write(headers.toString().getBytes());
+                out.flush(); // [PERF] Flush headers immediately so player can start processing metadata
 
+                // [PERF] Low-latency path for seek (small range requests from progress bar drag)
                 final boolean hasExplicitRange = (rangeStart > 0) || (rangeEnd < fileLength - 1);
                 if (hasExplicitRange && contentLength <= 8L * 1024L * 1024L) {
-                    // Low-latency path for frequent seek operations.
                     BufferedOutputStream bout = new BufferedOutputStream(out, 64 * 1024);
                     byte[] buffer = new byte[256 * 1024];
                     long remaining = contentLength;
@@ -1358,10 +2108,17 @@ public class WebDavPlugin extends Plugin {
                     bout.flush();
                     return;
                 }
+
+                final int CHUNK_SIZE = 2 * 1024 * 1024;
+                final BytePool bytePool = BytePool.getInstance(CHUNK_SIZE);
                 
-                final int THREAD_COUNT = 3;
+                // [PERF] V2: Adaptive Multi-Lane Acceleration
+                int cores = getCpuCores();
+                long totalMem = getTotalMemory();
+                boolean isHighEnd = cores >= 6 && totalMem >= 5L * 1024 * 1024 * 1024;
+                final int THREAD_COUNT = isHighEnd ? 4 : 2; 
+                final java.util.concurrent.Semaphore bufferPermits = new java.util.concurrent.Semaphore(isHighEnd ? 24 : 16); // 48MB if high-end, 32MB else
                 final ConcurrentHashMap<Long, SMBChunk> bufferMap = new ConcurrentHashMap<>();
-                final java.util.concurrent.Semaphore bufferPermits = new java.util.concurrent.Semaphore(16); // 32MB Buffer
                 final java.util.concurrent.atomic.AtomicLong nextReadOffset = new java.util.concurrent.atomic.AtomicLong(rangeStart);
                 final java.util.concurrent.atomic.AtomicBoolean streamRunning = new java.util.concurrent.atomic.AtomicBoolean(true);
                 final java.util.concurrent.atomic.AtomicReference<Throwable> workerError = new java.util.concurrent.atomic.AtomicReference<>(null);
@@ -1371,13 +2128,19 @@ public class WebDavPlugin extends Plugin {
                 final long finalContentLength = contentLength;
                 final long finalRangeStart = rangeStart;
 
+                final String finalUser = user;
+                final String finalPass = pass;
+                final String finalDomain = domain;
+
                 // --- Start Workers ---
+                final SmbRandomAccessFile mainRaf = raf; // Worker 0 reuses this
                 for (int i = 0; i < THREAD_COUNT; i++) {
                     final int workerId = i;
                     Thread worker = new Thread(() -> {
                         SmbRandomAccessFile myRaf = null;
+                        boolean ownsRaf = (workerId != 0); // Worker 0 borrows mainRaf, doesn't close it
                         try {
-                             myRaf = new SmbRandomAccessFile(smbFile, "r");
+                             myRaf = (workerId == 0) ? mainRaf : new SmbRandomAccessFile(smbFile, "r");
                             while (streamRunning.get()) {
                                 bufferPermits.acquire(); 
                                 long myOffset = nextReadOffset.getAndAdd(CHUNK_SIZE);
@@ -1394,27 +2157,44 @@ public class WebDavPlugin extends Plugin {
                                      break;
                                 }
 
-                                myRaf.seek(myOffset);
-                                long t0 = System.currentTimeMillis();
-                                int read = myRaf.read(buf, 0, toRead);
-                                long cost = System.currentTimeMillis() - t0;
+                                try {
+                                    myRaf.seek(myOffset);
+                                    long t0 = System.currentTimeMillis();
+                                    int read = myRaf.read(buf, 0, toRead);
+                                    long cost = System.currentTimeMillis() - t0;
 
-                                if (cost > 500) {
-                                    android.util.Log.w("WebDavNative", "[TRACE] [Lane#" + workerId + "] [IO_SLOW] Cost: " + cost + "ms, Offset: " + myOffset);
-                                }
+                                    if (cost > 500) {
+                                        android.util.Log.w("WebDavNative", "[TRACE] [Lane#" + workerId + "] [IO_SLOW] Cost: " + cost + "ms, Offset: " + myOffset);
+                                    }
 
-                                if (read <= 0) {
-                                    bytePool.release(buf);
-                                    bufferPermits.release();
-                                    break;
+                                    if (read <= 0) {
+                                        bytePool.release(buf);
+                                        bufferPermits.release();
+                                        break;
+                                    }
+                                    bufferMap.put(myOffset, new SMBChunk(buf, read));
+                                    synchronized(notifyLock) { notifyLock.notify(); }
+                                } catch (SmbException se) {
+                                    if (isConnectionError(se) && streamRunning.get()) {
+                                        android.util.Log.w("WebDavNative", "[Lane#" + workerId + "] Connection error, reopening SMB file...");
+                                        try { myRaf.close(); } catch (Exception ignored) {}
+                                        clearCifsContextCache(finalUser, finalPass, finalDomain);
+                                        CIFSContext newCtx = getCifsContext(finalUser, finalPass, finalDomain);
+                                        myRaf = new SmbRandomAccessFile(new SmbFile(url, newCtx), "r");
+                                        myRaf.seek(myOffset);
+                                        int read = myRaf.read(buf, 0, toRead);
+                                        if (read <= 0) throw se;
+                                        bufferMap.put(myOffset, new SMBChunk(buf, read));
+                                        synchronized(notifyLock) { notifyLock.notify(); }
+                                    } else {
+                                        throw se;
+                                    }
                                 }
-                                bufferMap.put(myOffset, new SMBChunk(buf, read));
-                                synchronized(notifyLock) { notifyLock.notify(); }
                             }
                         } catch (Exception e) {
                             if (streamRunning.get()) workerError.set(e);
                         } finally {
-                            if (myRaf != null) try { myRaf.close(); } catch (Exception e) {}
+                            if (ownsRaf && myRaf != null) try { myRaf.close(); } catch (Exception e) {}
                         }
                     }, "SMB-Lane-" + i);
                     workers.add(worker);
@@ -1501,6 +2281,8 @@ public class WebDavPlugin extends Plugin {
             } finally {
                 activeStreams.decrementAndGet();
                 if (raf != null) try { raf.close(); } catch (Exception e) {}
+                // if (acquiredLimiter) smbGlobalLimiter.release(); // Removed as per Optimization 
+                releaseWifiLock(); // [FIX] Release lightweight lock
             }
         }
 
@@ -1523,6 +2305,69 @@ public class WebDavPlugin extends Plugin {
                 cur = cur.getCause();
             }
             return false;
+        }
+
+        public void handleWebDavStream(String uri, long rangeStart, long rangeEnd, boolean hasRangeHeader, OutputStream out) {
+            try {
+                int qIndex = uri.indexOf('?');
+                if (qIndex == -1) return;
+                
+                String query = uri.substring(qIndex + 1);
+                String[] pairs = query.split("&");
+                String baseUrl = null, path = null, user = "", pass = "";
+                
+                for (String pair : pairs) {
+                    int idx = pair.indexOf('=');
+                    if (idx > 0) {
+                        String key = java.net.URLDecoder.decode(pair.substring(0, idx), "UTF-8");
+                        String val = java.net.URLDecoder.decode(pair.substring(idx + 1), "UTF-8");
+                        if (key.equals("url")) baseUrl = val;
+                        else if (key.equals("path")) path = val;
+                        else if (key.equals("username")) user = val;
+                        else if (key.equals("password")) pass = val;
+                    }
+                }
+
+                if (baseUrl == null || path == null) return;
+                
+                String fullUrl = buildWebDavUrl(baseUrl, path);
+                
+                android.util.Log.d("WebDavNative", "WebDAV Full URL (Proxy): " + fullUrl);
+                Request.Builder rb = new Request.Builder().url(fullUrl);
+                
+                if (!user.isEmpty() || !pass.isEmpty()) {
+                    String credentials = user + ":" + pass;
+                    String basic = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(), android.util.Base64.NO_WRAP);
+                    rb.addHeader("Authorization", basic);
+                }
+                
+                if (rangeStart > 0 || rangeEnd != -1) {
+                    String range = "bytes=" + rangeStart + "-" + (rangeEnd == -1 ? "" : rangeEnd);
+                    rb.addHeader("Range", range);
+                }
+
+                try (Response response = client.newCall(rb.build()).execute()) {
+                    if (response.body() == null) return;
+                    
+                    StringBuilder respHeaders = new StringBuilder();
+                    respHeaders.append("HTTP/1.1 ").append(response.code()).append(" ").append(response.message()).append("\r\n");
+                    for (String name : response.headers().names()) {
+                        respHeaders.append(name).append(": ").append(response.header(name)).append("\r\n");
+                    }
+                    respHeaders.append("Access-Control-Allow-Origin: *\r\n");
+                    respHeaders.append("\r\n");
+                    out.write(respHeaders.toString().getBytes());
+                    
+                    InputStream in = response.body().byteStream();
+                    byte[] buffer = new byte[65536];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, read);
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -2321,6 +3166,187 @@ public class WebDavPlugin extends Plugin {
             this.data = data;
             this.actualLength = actualLength;
         }
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.M)
+    private class SmbMediaDataSource extends MediaDataSource {
+        private final String smbUrl;
+        private final String username;
+        private final String password;
+        private final String domain;
+        private SmbRandomAccessFile raf;
+
+        public SmbMediaDataSource(String smbUrl, String username, String password, String domain) {
+            this.smbUrl = smbUrl;
+            this.username = username;
+            this.password = password;
+            this.domain = domain;
+        }
+
+        @Override
+        public synchronized int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
+            for (int retry = 0; retry < 3; retry++) {
+                try {
+                    if (raf == null) {
+                        CIFSContext ctx = getCifsContext(username, password, domain);
+                        raf = new SmbRandomAccessFile(new SmbFile(smbUrl, ctx), "r");
+                    }
+                    if (raf.getFilePointer() != position) {
+                        raf.seek(position);
+                    }
+                    return raf.read(buffer, offset, size);
+                } catch (Exception e) {
+                    if (retry < 2 && isConnectionError(e)) {
+                        android.util.Log.w("WebDavNative", "SmbMediaDataSource readAt failed (Connection Error), retrying in 1s...");
+                        try { Thread.sleep(1000); } catch (Exception ignored) {}
+                        if (raf != null) {
+                            try { raf.close(); } catch (Exception ignored) {}
+                            raf = null;
+                        }
+                        clearCifsContextCache(username, password, domain);
+                        continue;
+                    }
+                    android.util.Log.e("WebDavNative", "SmbMediaDataSource readAt failed", e);
+                    throw (e instanceof IOException) ? (IOException) e : new IOException(e);
+                }
+            }
+            return -1;
+        }
+
+        @Override
+        public synchronized long getSize() throws IOException {
+             for (int retry = 0; retry < 3; retry++) {
+                try {
+                    if (raf == null) {
+                        CIFSContext ctx = getCifsContext(username, password, domain);
+                        raf = new SmbRandomAccessFile(new SmbFile(smbUrl, ctx), "r");
+                    }
+                    return raf.length();
+                } catch (Exception e) {
+                     if (retry < 2 && isConnectionError(e)) {
+                        android.util.Log.w("WebDavNative", "SmbMediaDataSource getSize failed (Connection Error), retrying in 1s...");
+                        try { Thread.sleep(1000); } catch (Exception ignored) {}
+                        if (raf != null) {
+                            try { raf.close(); } catch (Exception ignored) {}
+                            raf = null;
+                        }
+                        clearCifsContextCache(username, password, domain);
+                        continue;
+                    }
+                    throw (e instanceof IOException) ? (IOException) e : new IOException(e);
+                }
+             }
+             return -1;
+        }
+
+        @Override
+        public synchronized void close() throws IOException {
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Exception ignored) {}
+                raf = null;
+            }
+        }
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.M)
+    private class WebDavMediaDataSource extends MediaDataSource {
+        private final String url;
+        private final String user;
+        private final String pass;
+        private byte[] cache;
+        private long cachePos = -1;
+        private int cacheLen = 0;
+        private long size = -1;
+
+        public WebDavMediaDataSource(String url, String user, String pass) {
+            this.url = url;
+            this.user = user;
+            this.pass = pass;
+        }
+
+        @Override
+        public synchronized int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
+            // Simple cache for small reads/metadata
+            if (cachePos != -1 && position >= cachePos && (position + size) <= (cachePos + cacheLen)) {
+                System.arraycopy(cache, (int)(position - cachePos), buffer, offset, size);
+                return size;
+            }
+
+            // Fetch a bigger chunk (128KB) to satisfy potential subsequent small reads
+            int fetchSize = Math.max(size, 128 * 1024);
+            Request.Builder rb = new Request.Builder()
+                .url(url)
+                .addHeader("Range", "bytes=" + position + "-" + (position + fetchSize - 1));
+            
+            if (user != null && !user.isEmpty()) {
+                String credentials = user + ":" + pass;
+                String basic = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(), android.util.Base64.NO_WRAP);
+                rb.addHeader("Authorization", basic);
+            }
+            
+            try (Response response = client.newCall(rb.build()).execute()) {
+                if (!response.isSuccessful() || response.body() == null) return -1;
+                byte[] data = response.body().bytes();
+                if (data.length == 0) return -1;
+
+                // Update cache
+                cache = data;
+                cachePos = position;
+                cacheLen = data.length;
+
+                int toCopy = Math.min(size, data.length);
+                System.arraycopy(data, 0, buffer, offset, toCopy);
+                return toCopy;
+            } catch (Exception e) {
+                return -1;
+            }
+        }
+
+        @Override
+        public synchronized long getSize() throws IOException {
+            if (size != -1) return size;
+            Request.Builder rb = new Request.Builder().url(url).head();
+            if (user != null && !user.isEmpty()) {
+                String credentials = user + ":" + pass;
+                String basic = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(), android.util.Base64.NO_WRAP);
+                rb.addHeader("Authorization", basic);
+            }
+            try (Response response = client.newCall(rb.build()).execute()) {
+                if (response.isSuccessful()) {
+                    String cl = response.header("Content-Length");
+                    if (cl != null) {
+                        size = Long.parseLong(cl);
+                        return size;
+                    }
+                }
+            } catch (Exception e) {}
+            return -1;
+        }
+
+        @Override
+        public synchronized void close() throws IOException {
+            cache = null;
+        }
+    }
+
+    private String buildWebDavUrl(String baseUrl, String path) {
+        if (baseUrl == null) return path;
+        String cleanBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        
+        try {
+            Uri baseUri = Uri.parse(cleanBase);
+            String baseUriPath = baseUri.getPath();
+            if (baseUriPath != null && baseUriPath.endsWith("/")) baseUriPath = baseUriPath.substring(0, baseUriPath.length() - 1);
+            
+            if (baseUriPath != null && !baseUriPath.isEmpty() && path.startsWith(baseUriPath)) {
+                String relativePath = path.substring(baseUriPath.length());
+                return cleanBase + (relativePath.startsWith("/") ? relativePath : "/" + relativePath);
+            }
+        } catch (Exception e) {}
+        
+        return cleanBase + (path.startsWith("/") ? path : "/" + path);
     }
 
     private static class BytePool {

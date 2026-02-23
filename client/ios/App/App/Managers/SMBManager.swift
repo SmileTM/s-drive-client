@@ -26,6 +26,11 @@ class SMBManager: NSObject {
         let user: String
     }
     private var connectionCache: [ConnectionKey: AMSMB2.SMB2Manager] = [:]
+    private var transferConnectionCache: [ConnectionKey: AMSMB2.SMB2Manager] = [:]
+    
+    // Transfer concurrency limiter (2 concurrent max across all SMB)
+    private let transferSemaphore = DispatchSemaphore(value: 2)
+    private let limitQueue = DispatchQueue(label: "SMBManager.LimitQueue", attributes: .concurrent)
     
     // File Attribute Cache: Stores file sizes to avoid redundant network round-trips during Seeking
     private var fileSizeCache: [String: Int64] = [:]
@@ -73,15 +78,47 @@ class SMBManager: NSObject {
     
     /// Connect to share, perform operation, then clean up
     private func withConnection(_ call: CAPPluginCall, operation: @escaping (AMSMB2.SMB2Manager) -> Void) {
+        withConnectionHelper(call, isTransfer: false, operation: operation)
+    }
+
+    private func withTransferConnection(_ call: CAPPluginCall, operation: @escaping (AMSMB2.SMB2Manager) -> Void) {
+        withConnectionHelper(call, isTransfer: true, operation: operation)
+    }
+
+    private func withConnectionHelper(_ call: CAPPluginCall, isTransfer: Bool, operation: @escaping (AMSMB2.SMB2Manager) -> Void) {
+        guard let address = call.getString("address"),
+              let share = call.getString("share") else {
+            call.reject("Missing address or share")
+            return
+        }
+        
+        let username = call.getString("username") ?? "guest"
+        let key = ConnectionKey(address: address, share: share, user: username)
+        
+        cacheLock.lock()
+        let cached = isTransfer ? transferConnectionCache[key] : connectionCache[key]
+        cacheLock.unlock()
+        
+        if let client = cached {
+            operation(client)
+            return
+        }
+        
         guard let client = createClient(from: call) else { return }
-        let share = call.getString("share") ?? ""
         
         client.connectShare(name: share) { error in
             if let error = error {
                 print("\(self.TAG) Connect failed: \(error)")
                 call.reject("SMB Connection Failed: \(error.localizedDescription)")
             } else {
-                print("\(self.TAG) Connect success: \(share)")
+                print("\(self.TAG) Connect success: \(share) [Transfer: \(isTransfer)]")
+                self.cacheLock.lock()
+                if isTransfer {
+                    self.transferConnectionCache[key] = client
+                } else {
+                    self.connectionCache[key] = client
+                }
+                self.cacheLock.unlock()
                 operation(client)
             }
         }
@@ -318,13 +355,22 @@ class SMBManager: NSObject {
             return true
         }
         
-        withConnection(call) { client in
+        withTransferConnection(call) { client in
             if self.isCancelled(id: callbackId) {
                 call.reject("Cancelled")
                 return
             }
             let task = Task { [weak self] in
                 guard let self = self else { return }
+                
+                await withCheckedContinuation { continuation in
+                    self.limitQueue.async {
+                        self.transferSemaphore.wait()
+                        continuation.resume(returning: ())
+                    }
+                }
+                defer { self.transferSemaphore.signal() }
+                
                 do {
                     try await client.downloadItem(atPath: cleanPath, to: localURL, progress: progressHandler)
                     if self.isCancelled(id: callbackId) || Task.isCancelled {
@@ -403,13 +449,22 @@ class SMBManager: NSObject {
             return true
         }
         
-        withConnection(call) { client in
+        withTransferConnection(call) { client in
             if self.isCancelled(id: callbackId) {
                 call.reject("Cancelled")
                 return
             }
             let task = Task { [weak self] in
                 guard let self = self else { return }
+                
+                await withCheckedContinuation { continuation in
+                    self.limitQueue.async {
+                        self.transferSemaphore.wait()
+                        continuation.resume(returning: ())
+                    }
+                }
+                defer { self.transferSemaphore.signal() }
+                
                 do {
                     if overwrite {
                         try? await client.removeItem(atPath: cleanPath)

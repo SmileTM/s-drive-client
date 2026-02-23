@@ -79,6 +79,57 @@ if (typeof window !== 'undefined') {
 // --- Cancellation System ---
 const cancellationMap = {}; // taskId -> { cancelled: true, nativeId: string }
 
+// --- Thumbnail Persistent Cache ---
+// Persists to localStorage so cached thumbnails survive app restart.
+// Stores URL paths only (port-independent) for cross-session validity.
+const THUMB_CACHE_KEY = '__thumb_cache_v2__';
+const thumbnailCache = new Map(); // cacheKey -> full URL (runtime)
+const thumbnailInflight = new Map(); // cacheKey -> Promise (dedup concurrent requests)
+let _thumbPort = 0; // Current local server port — discovered from first native call
+
+// Hydrate: load path-portion entries, reconstruct full URLs once port is known
+let _pendingHydration = []; // [{key, path}] — waiting for port
+try {
+    const stored = localStorage.getItem(THUMB_CACHE_KEY);
+    if (stored) {
+        _pendingHydration = JSON.parse(stored); // [{key, path}]
+        console.log(`[ThumbCache] ${_pendingHydration.length} entries pending hydration`);
+    }
+} catch (e) { /* ignore corrupt data */ }
+
+// --- Drives Configuration Cache ---
+let _drivesCache = null;
+let _drivesInflight = null;
+
+function hydrateWithPort(port) {
+    if (_thumbPort || !port) return;
+    _thumbPort = port;
+    for (const { key, path } of _pendingHydration) {
+        if (!thumbnailCache.has(key)) {
+            thumbnailCache.set(key, `http://127.0.0.1:${port}${path}`);
+        }
+    }
+    console.log(`[ThumbCache] Hydrated ${_pendingHydration.length} entries with port ${port}`);
+    _pendingHydration = [];
+}
+
+// Persist helper — debounced, stores path portions only
+let _thumbSaveTimer = null;
+function persistThumbCache() {
+    clearTimeout(_thumbSaveTimer);
+    _thumbSaveTimer = setTimeout(() => {
+        try {
+            const entries = [];
+            for (const [key, url] of thumbnailCache) {
+                // Extract path portion: /cache/thumbnails/xxx.jpg
+                const match = url.match(/(\/cache\/thumbnails\/[^?]+)/);
+                if (match) entries.push({ key, path: match[1] });
+            }
+            localStorage.setItem(THUMB_CACHE_KEY, JSON.stringify(entries));
+        } catch (e) { /* quota exceeded etc */ }
+    }, 1000);
+}
+
 // --- Custom Native WebDAV Client (Bypasses CORS & CapacitorHttp) ---
 class NativeWebDAVClient {
     // ... existing methods ...
@@ -298,13 +349,22 @@ class NativeWebDAVClient {
             'X-Capacitor-Id': id // Backup ID
         };
         console.log(`[NativeWebDAV] streamUploadFile calling native upload with id: ${id}`);
-        await WebDavNative.upload({
-            url: fullUrl,
-            method: 'PUT',
-            headers: headers,
-            sourcePath: sourcePath,
-            id: id
-        });
+        try {
+            await WebDavNative.upload({
+                url: fullUrl,
+                method: 'PUT',
+                headers: headers,
+                sourcePath: sourcePath,
+                id: id
+            });
+        } catch (e) {
+            if (e.message && e.message.includes("File exists")) {
+                const err = new Error("File exists");
+                err.response = { status: 409 };
+                throw err;
+            }
+            throw e;
+        }
     }
 
     async streamDownloadFile(remotePath, localPath, id) {
@@ -487,7 +547,7 @@ class NativeSMBClient {
         }
     }
 
-    async streamUploadFile(path, sourcePath, id, overwrite = false) {
+    async streamUploadFile(path, sourcePath, id, overwrite = false, fileIndex = 1, fileTotal = 1) {
         try {
             await WebDavNative.smbUpload({
                 address: this.config.address,
@@ -498,7 +558,9 @@ class NativeSMBClient {
                 password: this.config.password,
                 domain: this.config.domain,
                 overwrite: overwrite,
-                id: id
+                id: id,
+                fileIndex: fileIndex,
+                fileTotal: fileTotal
             });
         } catch (e) {
             if (e.message && e.message.includes("File exists")) {
@@ -1583,7 +1645,7 @@ const NativeAPI = {
         }
     },
 
-    uploadFiles: async (path, files, driveId, onProgress, onItemComplete) => {
+    uploadFiles: async (path, files, driveId, onProgress, onItemComplete, overwrite = false) => {
         const NOTIFY_ID = 9999;
         let transferredBytes = 0; // Bytes fully completed from previous files
         const startTime = Date.now();
@@ -1761,7 +1823,7 @@ const NativeAPI = {
                         // Stream Upload
                         const remotePath = `${path}/${file.name}`.replace('//', '/');
                         console.log(`[NativeAPI] Calling client.streamUploadFile: id=${uploadId}, remotePath=${remotePath}, tempPath=${temp.path}`);
-                        await client.streamUploadFile(remotePath, temp.path, uploadId);
+                        await client.streamUploadFile(remotePath, temp.path, uploadId, overwrite, i + 1, files.length);
 
                         reportFinished(file.size);
                         if (onItemComplete) onItemComplete(file.name); // Notify item complete
@@ -1881,65 +1943,87 @@ const NativeAPI = {
         }
     },
 
-    getDrives: async () => {
-        // Persist drives in Capacitor Preferences instead of JSON file
-        const { value } = await Preferences.get({ key: 'drives' });
-        let drives = value ? JSON.parse(value) : [];
+    getDrives: async (refreshQuota = true) => {
+        // [PERF] If we have a cache and don't need quotas, return it immediately
+        if (!refreshQuota && _drivesCache) return _drivesCache;
 
-        // Always ensure Local is there
-        if (!drives.find(d => d.id === 'local')) {
-            drives.unshift({ id: 'local', name: 'On My Phone', type: 'local', path: '/' });
-        }
+        // [PERF] Deduplicate concurrent requests
+        if (_drivesInflight) return _drivesInflight;
 
-        // Fetch Quota for WebDAV drives in parallel
-        const drivesWithQuota = await Promise.all(drives.map(async (drive) => {
-            if (drive.type === 'local') {
-                try {
-                    const info = await WebDavNative.getStorageInfo();
-                    return { ...drive, quota: { used: info.used, total: info.total } };
-                } catch (e) {
-                    console.warn('[Native] Failed to get storage info:', e);
-                    return drive;
-                }
-            }
-
-            // WebDAV
+        _drivesInflight = (async () => {
             try {
-                const client = getWebDAVClient(drive);
-                // Timeout promise 2s
-                const quota = await Promise.race([
-                    client.getQuota(),
-                    new Promise(resolve => setTimeout(() => resolve(null), 2000))
-                ]);
+                // Persist drives in Capacitor Preferences instead of JSON file
+                const { value } = await Preferences.get({ key: 'drives' });
+                let drives = value ? JSON.parse(value) : [];
 
-                if (quota) {
-                    return { ...drive, quota: { used: quota.used, total: quota.total } };
+                // Always ensure Local is there
+                if (!drives.find(d => d.id === 'local')) {
+                    drives.unshift({ id: 'local', name: 'On My Phone', type: 'local', path: '/' });
                 }
-            } catch (e) {
-                // Ignore quota errors
-            }
-            return drive;
-        }));
 
-        return drivesWithQuota;
+                if (!refreshQuota) {
+                    _drivesCache = drives;
+                    return drives;
+                }
+
+                // Fetch Quota for WebDAV drives in parallel
+                const drivesWithQuota = await Promise.all(drives.map(async (drive) => {
+                    if (drive.type === 'local') {
+                        try {
+                            const info = await WebDavNative.getStorageInfo();
+                            return { ...drive, quota: { used: info.used, total: info.total } };
+                        } catch (e) {
+                            console.warn('[Native] Failed to get storage info:', e);
+                            return drive;
+                        }
+                    }
+
+                    // WebDAV
+                    try {
+                        const client = getWebDAVClient(drive);
+                        // Timeout promise 2s
+                        const quota = await Promise.race([
+                            client.getQuota(),
+                            new Promise(resolve => setTimeout(() => resolve(null), 2000))
+                        ]);
+
+                        if (quota) {
+                            return { ...drive, quota: { used: quota.used, total: quota.total } };
+                        }
+                    } catch (e) {
+                        // Ignore quota errors
+                    }
+                    return drive;
+                }));
+
+                _drivesCache = drivesWithQuota;
+                return drivesWithQuota;
+            } finally {
+                _drivesInflight = null;
+            }
+        })();
+
+        return _drivesInflight;
     },
 
     addDrive: async (drive) => {
-        const drives = await NativeAPI.getDrives();
+        const drives = await NativeAPI.getDrives(false);
         // Encrypt password before storage
         const encryptedPassword = encrypt(drive.password);
         const newDrive = { ...drive, password: encryptedPassword, id: crypto.randomUUID() };
         drives.push(newDrive);
         await Preferences.set({ key: 'drives', value: JSON.stringify(drives) });
+        _drivesCache = null; // Invalidate cache
         return newDrive;
     },
 
     updateDrive: async (id, data) => {
-        let drives = await NativeAPI.getDrives();
+        let drives = await NativeAPI.getDrives(false);
         const index = drives.findIndex(d => d.id === id);
         if (index !== -1) {
             drives[index] = { ...drives[index], ...data };
             await Preferences.set({ key: 'drives', value: JSON.stringify(drives) });
+            _drivesCache = null; // Invalidate cache
         }
     },
 
@@ -2083,13 +2167,96 @@ const NativeAPI = {
         }
     },
 
-    getThumbnailUrl: async (path, driveId) => {
-        // Optimization: Disable remote thumbnails to prevent OOM
-        // Downloading full files for list thumbnails is too heavy for memory
-        if (driveId !== 'local') return null;
+    getThumbnailUrl: async (path, driveId, signal) => {
+        // [PERF] In-memory cache: avoid redundant native calls during re-renders
+        const cacheKey = `${driveId}:${path}`;
+        if (thumbnailCache.has(cacheKey)) {
+            return thumbnailCache.get(cacheKey);
+        }
 
-        // For now, fallback to full file URL (Native rendering)
-        return NativeAPI.getFileUrl(path, driveId);
+        // Dedup inflight requests: if the same thumbnail is already being fetched, wait for it
+        if (thumbnailInflight.has(cacheKey)) {
+            return thumbnailInflight.get(cacheKey);
+        }
+
+        const promise = (async () => {
+            if (Capacitor.getPlatform() === 'android') {
+                try {
+                    // [PERF] Handle request cancellation
+                    if (signal) {
+                        if (signal.aborted) return null;
+                        signal.addEventListener('abort', () => {
+                            WebDavNative.cancelThumbnail({ path, driveId: driveId || 'local' });
+                        }, { once: true });
+                    }
+
+                    if (!driveId) {
+                        driveId = 'local';
+                    }
+
+                    let storeType = 'local';
+                    let config = {};
+                    if (driveId !== 'local') {
+                        // [PERF] Use cached drive config without quota refresh for speed
+                        const drives = await NativeAPI.getDrives(false);
+
+                        const drive = drives.find(d => d.id === driveId);
+                        if (drive) {
+                            storeType = drive.type; // smb or webdav
+                            config = { ...drive };
+                            if (config.password) config.password = decrypt(config.password);
+                        } else {
+                            return null;
+                        }
+                    }
+
+                    const isVideo = /\.(mp4|mkv|mov|avi|wmv|flv|webm|m4v|3gp|mpeg|mpg)$/i.test(path);
+                    const fileType = isVideo ? 'video' : 'image';
+
+                    const res = await WebDavNative.getThumbnail({
+                        path,
+                        storeType,
+                        fileType,
+                        config
+                    });
+                    const url = res.url;
+                    if (url) {
+                        // Discover port from first native response and hydrate persisted cache
+                        const portMatch = url.match(/:([0-9]+)\//);
+
+                        if (portMatch) hydrateWithPort(portMatch[1]);
+                        thumbnailCache.set(cacheKey, url);
+                        persistThumbCache();
+                    }
+                    return url;
+                } catch (e) {
+                    console.error('[Thumbnail] EXCEPTION:', e);
+                    return null;
+                }
+            }
+
+            // Fallback for non-android native platforms
+            if (driveId !== 'local') return null;
+            const url = await NativeAPI.getFileUrl(path, driveId);
+            if (url) {
+                thumbnailCache.set(cacheKey, url);
+                persistThumbCache();
+            }
+            return url;
+        })();
+
+        thumbnailInflight.set(cacheKey, promise);
+        try {
+            return await promise;
+        } finally {
+            thumbnailInflight.delete(cacheKey);
+        }
+    },
+
+    cancelThumbnail: async (path, driveId) => {
+        if (Capacitor.getPlatform() === 'android') {
+            await WebDavNative.cancelThumbnail({ path, driveId: driveId || 'local' });
+        }
     },
 
     getFileBlob: async (path, driveId) => {

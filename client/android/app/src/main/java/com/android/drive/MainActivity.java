@@ -12,6 +12,8 @@ import android.webkit.WebSettings;
 
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSObject;
+import android.os.Handler;
+import android.os.Looper;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -20,6 +22,10 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 
 public class MainActivity extends BridgeActivity {
+    
+    private JSONArray pendingIntentData = null;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
@@ -108,14 +114,30 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        JSObject ret = new JSObject();
-        ret.put("items", items);
-        
         // Use notifyListeners if implemented in a plugin, or triggerWindowJSEvent
         // triggerWindowJSEvent is simplest for global listeners
         // We'll dispatch a custom window event that the React app listens for.
+        pendingIntentData = items;
+        tryDispatchIntent();
+    }
+
+    private void tryDispatchIntent() {
+        if (pendingIntentData == null) return;
+        if (getBridge() == null || getBridge().getWebView() == null || getBridge().getWebView().getProgress() < 100) {
+            // WebView not fully ready, retry in 500ms
+            handler.postDelayed(this::tryDispatchIntent, 500);
+            return;
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("items", pendingIntentData);
         final String safeJson = ret.toString();
-        getBridge().eval("window.dispatchEvent(new CustomEvent('appSendIntentReceived', { detail: " + safeJson + " }));", x -> {});
+        
+        // Also ensure the window dispatch actually executes by checking a flag or just sending
+        getBridge().eval("window.dispatchEvent(new CustomEvent('appSendIntentReceived', { detail: " + safeJson + " }));", x -> {
+             // Clear pending data after sending
+             pendingIntentData = null;
+        });
     }
 
     private String getFileName(Uri uri) {

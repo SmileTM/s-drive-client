@@ -139,7 +139,7 @@ const TransferDashboard = ({ tasks, isOpen, onClose, onClearCompleted, onCancel,
                                 <div>
                                     <h3 className="font-semibold text-slate-800 dark:text-slate-100">{t.transfers}</h3>
                                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                                        {t.transfersStatus.replace('{active}', activeCount).replace('{completed}', tasks.length - activeCount)}
+                                        {t.transfersStatus.replace('{active}', activeCount).replace('{completed}', tasks.filter(t => t.status === 'done').length)}
                                     </p>
                                 </div>
                             </div>
