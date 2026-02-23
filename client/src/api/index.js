@@ -2010,7 +2010,21 @@ const NativeAPI = {
                     // WebDAV / SMB
                     try {
                         const client = getWebDAVClient(drive);
-                        // Timeout promise 3s for a bit more buffer
+
+                        // SMB: getQuota() returns null (unsupported), so use a light connectivity test instead
+                        if (drive.type === 'smb') {
+                            const result = await Promise.race([
+                                client.getDirectoryContents('/').then(() => 'ok'),
+                                new Promise(resolve => setTimeout(() => resolve('timeout'), 3000))
+                            ]);
+                            if (result === 'timeout') {
+                                console.warn(`[API] SMB connectivity timeout for drive: ${drive.name}`);
+                                return { ...drive, isOnline: false };
+                            }
+                            return { ...drive, isOnline: true };
+                        }
+
+                        // WebDAV: use getQuota() for both connectivity and quota info
                         const quota = await Promise.race([
                             client.getQuota(),
                             new Promise(resolve => setTimeout(() => resolve('timeout'), 3000))

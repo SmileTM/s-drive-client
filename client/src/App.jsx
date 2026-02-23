@@ -2080,7 +2080,7 @@ function App() {
                     </span>
                     {drive.isOnline === false && (
                       <span className="text-[10px] text-red-400 font-medium shrink-0">
-                        {lang === "zh" ? "离线" : "Offline"}
+                        {t.offline}
                       </span>
                     )}
                   </div>
@@ -2110,11 +2110,6 @@ function App() {
                         ></div>
                       </div>
                     </div>
-                  )}
-                  {drive.isOnline === false && (
-                    <span className="text-[9px] text-slate-400 italic">
-                      {lang === "zh" ? "无法连接到服务器" : "Cannot connect to server"}
-                    </span>
                   )}
                 </div>
 
@@ -2370,16 +2365,56 @@ function App() {
             )}
           >
             {loading && files.length === 0 ? (
-              <div className="col-span-full py-20 text-center text-slate-400">
-                {t.loading}
-              </div>
-            ) : !isGlobalSearch && files.length === 0 ? (
-              <div className="col-span-full py-20 text-center flex flex-col items-center gap-3">
-                <div className="w-16 h-16 bg-white rounded-full shadow-island flex items-center justify-center">
-                  <FolderIcon className="w-8 h-8 text-slate-300" />
+              drives.find(d => d.id === activeDrive)?.isOnline === false ? (
+                <div className="col-span-full py-20 text-center flex flex-col items-center gap-4">
+                  <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
+                    <ServerStackIcon className="w-8 h-8 text-red-300" />
+                  </div>
+                  <p className="text-red-400 font-medium">
+                    {t.cannotConnect.replace("{name}", drives.find(d => d.id === activeDrive)?.name || activeDrive)}
+                  </p>
+                  <p className="text-slate-400 text-sm">
+                    {t.checkNetwork}
+                  </p>
+                  <button
+                    onClick={() => { fetchDrives(); fetchFiles(currentPath); }}
+                    className="mt-2 px-4 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 rounded-xl hover:bg-indigo-100 transition-colors"
+                  >
+                    {t.retryConnect}
+                  </button>
                 </div>
-                <p className="text-slate-400">{t.emptyFolder}</p>
-              </div>
+              ) : (
+                <div className="col-span-full py-20 text-center text-slate-400">
+                  {t.loading}
+                </div>
+              )
+            ) : !isGlobalSearch && files.length === 0 ? (
+              drives.find(d => d.id === activeDrive)?.isOnline === false ? (
+                <div className="col-span-full py-20 text-center flex flex-col items-center gap-4">
+                  <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
+                    <ServerStackIcon className="w-8 h-8 text-red-300" />
+                  </div>
+                  <p className="text-red-400 font-medium">
+                    {t.cannotConnect.replace("{name}", drives.find(d => d.id === activeDrive)?.name || activeDrive)}
+                  </p>
+                  <p className="text-slate-400 text-sm">
+                    {t.checkNetwork}
+                  </p>
+                  <button
+                    onClick={() => { fetchDrives(); fetchFiles(currentPath); }}
+                    className="mt-2 px-4 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 rounded-xl hover:bg-indigo-100 transition-colors"
+                  >
+                    {t.retryConnect}
+                  </button>
+                </div>
+              ) : (
+                <div className="col-span-full py-20 text-center flex flex-col items-center gap-3">
+                  <div className="w-16 h-16 bg-white rounded-full shadow-island flex items-center justify-center">
+                    <FolderIcon className="w-8 h-8 text-slate-300" />
+                  </div>
+                  <p className="text-slate-400">{t.emptyFolder}</p>
+                </div>
+              )
             ) : sortedFiles.length === 0 ? (
               <div className="col-span-full py-20 text-center text-slate-400">
                 {t.noResults}

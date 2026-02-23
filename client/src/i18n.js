@@ -111,7 +111,13 @@ export const translations = {
     conflictMessage: "The file \"{file}\" already exists in the destination.",
     skip: "Skip",
     applyToAll: "Apply to all remaining conflicts",
-    keepBoth: "Keep Both"
+    keepBoth: "Keep Both",
+    // Offline
+    offline: "Offline",
+    cannotConnect: "{name} - Cannot connect",
+    checkNetwork: "Please check your network or server status",
+    retryConnect: "Retry",
+    cannotConnectServer: "Cannot connect to server"
   },
   zh: {
     appTitle: "云盘管理",
@@ -225,6 +231,12 @@ export const translations = {
     conflictMessage: "目标位置已存在名为 “{file}” 的文件。",
     skip: "跳过",
     applyToAll: "应用到所有剩余冲突",
-    keepBoth: "保留两者"
+    keepBoth: "保留两者",
+    // Offline
+    offline: "离线",
+    cannotConnect: "{name} 无法连接",
+    checkNetwork: "请检查网络连接或服务器状态",
+    retryConnect: "重试连接",
+    cannotConnectServer: "无法连接到服务器"
   }
 };
