@@ -1,12 +1,7 @@
----
-name: drive-tools
+# drive-tools skill
 
-description: Drive Tools (云盘工具). A cloud drive CLI tool supporting SMB, WebDAV, and FTP protocols, providing file listing, uploading, downloading, and remote management functions to expand storage access boundaries. (支持 SMB、WebDAV 和 FTP 协议的云盘命令行工具，提供文件列表查看、上传、下载及远程管理功能，扩展存储访问边界。)
----
+Drive Tools (云盘工具). A cloud drive CLI tool supporting SMB, WebDAV, and FTP protocols, providing file listing, uploading, downloading, and remote management functions to expand storage access boundaries. (支持 SMB、WebDAV 和 FTP 协议的云盘命令行工具，提供文件列表查看、上传、下载及远程管理功能，扩展存储访问边界。)
 
-# drive-tools
-
-This `drive-tools` skill helps you connect and manage your personal drives.
 
 ## Quick Install (快速安装)
 ```
