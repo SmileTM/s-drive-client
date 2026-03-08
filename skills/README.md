@@ -49,8 +49,8 @@ python scripts/ftp_drive_tools.py --name ftpDrive get /Movies/video.mp4 ~/.openc
 ```
 
 ## Usage Guide (使用指南)
-- [smb](smb_usage_guide.md)
-- [ftp](ftp_usage_guide.md)
-- [webdav](webdav_usage_guide.md)
+- [smb](drive-tools/smb_usage_guide.md)
+- [ftp](drive-tools/ftp_usage_guide.md)
+- [webdav](drive-tools/webdav_usage_guide.md)
 
 
