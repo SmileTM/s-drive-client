@@ -2,7 +2,7 @@
     // SMB Drive Configurations (SMB 云盘配置)
     "smb": [
         {
-            "name": "smbDrive", // Configuration name (配置名称)
+            "name": "smbDrive", // Configuration alias (设置别名)
             "user": "user", // SMB Username (SMB 用户名)
             "password": "password", // SMB Password (SMB 密码)
             "ip": "192.168.50.1", // Server IP address (服务器 IP 地址)
@@ -14,7 +14,7 @@
     // FTP Drive Configurations (FTP 云盘配置)
     "ftp": [
         {
-            "name": "ftpDrive", // Configuration name (配置名称)
+            "name": "ftpDrive", // Configuration alias (设置别名)
             "user": "user", // FTP Username (FTP 用户名)
             "password": "password", // FTP Password (FTP 密码)
             "ip": "192.168.50.1", // Server IP address (服务器 IP 地址)
@@ -26,7 +26,7 @@
     // WebDAV Drive Configurations (WebDAV 云盘配置)
     "webdav": [
         {
-            "name": "webdavDrive", // Configuration name (配置名称)
+            "name": "webdavDrive", // Configuration alias (设置别名)
             "user": "user@gmail.com", // WebDAV Username / Account (WebDAV 用户名/账号)
             "password": "password", // App-specific password (应用专属密码)
             "url": "https://dav.jianguoyun.com/dav/", // WebDAV Server URL (WebDAV 服务器地址)

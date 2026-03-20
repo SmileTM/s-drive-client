@@ -1,18 +1,23 @@
-# FTP Usage Guide (使用指南)
+# FTP Usage Guide (FTP 使用指南)
 
 Drive configuration is automatically loaded from `config.json`. (云盘配置从 `config.json` 自动加载。)
 
-## FTP Config
-| Key (参数名) | Description (说明) |
-| :--- | :--- |
-| `user` | FTP Username (FTP 用户名). |
-| `password` | FTP Password (FTP 密码). |
-| `ip` | Server IP or Hostname (服务器 IP 或域名). |
-| `port` | Port Number (端口号), default is `21`. |
-| `tls` | Enable TLS (是否启用 TLS). `true` means using FTPS. |
+## FTP Config Template (FTP 配置模版)
+Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
+```json
+{
+  "name": "ftpDrive", // Configuration Alias (设置别名)
+  "user": "user", // FTP Username (FTP 用户名)
+  "password": "password", // FTP Password (FTP 密码)
+  "ip": "192.168.50.1", // Server IP or Hostname (服务器 IP 或域名)
+  "port": 21, // Port Number (端口号), default 21
+  "tls": false, // Enable TLS (是否启用 TLS), true means FTPS
+  "path": "/" // Initial remote path (初始远程路径)
+}
+```
 
 
-## Quickly Usage (快速使用)
+## Quick Start (快速开始)
 
 **Script (脚本):** `scripts/ftp_drive_tools.py`
 
@@ -33,18 +38,14 @@ python scripts/ftp_drive_tools.py --name ftpDrive get /Movies/video.mp4 ./video.
 python scripts/ftp_drive_tools.py --name ftpDrive mkdir /NewFolder
 
 # Delete File or Directory (删除远程文件或目录)
-# Use -d for directories (参数 -d 表示目标是目录)
+# Use -d for directories (使用 -d 参数删除目录)
 python scripts/ftp_drive_tools.py --name ftpDrive rm /old.txt
-python scripts/ftp_drive_tools.py --name ftpDrive rm /old_dir -d
+python scripts/ftp_drive_tools.py --name ftpDrive rm -d /old_dir
 
 # Rename or Move (重命名或移动)
 python scripts/ftp_drive_tools.py --name ftpDrive mv /old.txt /new.txt
 
 # Search Recursively (递归搜索关键字)
 python scripts/ftp_drive_tools.py --name ftpDrive find keywords --path /
-
-# **Handling Spaces & Special Characters (处理空格和特殊字符)**: If the filename or path contains spaces or special characters (like Chinese), you **MUST** wrap the path in double quotes (`"path"`). (如果文件名或路径中包含空格或特殊字符（如中文），您**必须**使用双引号包裹路径。)
-python scripts/ftp_drive_tools.py --name ftpDrive get "周杰伦 - Intro.flac" "./周杰伦 - Intro.flac"
-
 
 ```
