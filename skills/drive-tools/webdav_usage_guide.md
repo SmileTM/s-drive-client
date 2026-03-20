@@ -12,35 +12,35 @@ Drive Configuration is automatically loaded from `config.json`. (云盘配置从
 
 ## Quickly Usage (快速使用)
 
-**Script (脚本):** `scrips/webdav_drive_tools.py`
+**Script (脚本):** `scripts/webdav_drive_tools.py`
 
 ### Global Options (通用参数)
 - `--name <config_name>`: Specify the connection name or index in `config.json` (指定 `config.json` 中的连接名称或索引).
 
 ```shell
 # List Directory (列出目录内容)
-python scrips/webdav_drive_tools.py --name webdavDrive ls /Photos
+python scripts/webdav_drive_tools.py --name webdavDrive ls /Photos
 
 # Upload File (上传本地文件)
-python scrips/webdav_drive_tools.py --name webdavDrive put ./img.jpg /Photos/img.jpg
+python scripts/webdav_drive_tools.py --name webdavDrive put ./img.jpg /Photos/img.jpg
 
 # Download File (下载远程文件)
-python scrips/webdav_drive_tools.py --name webdavDrive get /Photos/img.jpg ./img.jpg
+python scripts/webdav_drive_tools.py --name webdavDrive get /Photos/img.jpg ./img.jpg
 
 # Create Directory (创建远程目录)
-python scrips/webdav_drive_tools.py --name webdavDrive mkdir /Documents/Work
+python scripts/webdav_drive_tools.py --name webdavDrive mkdir /Documents/Work
 
 # Delete File or Directory (删除远程文件或目录)
-python scrips/webdav_drive_tools.py --name webdavDrive rm /Photos/old_file.txt
-python scrips/webdav_drive_tools.py --name webdavDrive rm /Photos/OldFolder
+python scripts/webdav_drive_tools.py --name webdavDrive rm /Photos/old_file.txt
+python scripts/webdav_drive_tools.py --name webdavDrive rm /Photos/OldFolder
 
 # Rename or Move (重命名或移动)
-python scrips/webdav_drive_tools.py --name webdavDrive mv /old_name.txt /new_name.txt
+python scripts/webdav_drive_tools.py --name webdavDrive mv /old_name.txt /new_name.txt
 
 # Search Recursively (递归搜索关键字)
-python scrips/webdav_drive_tools.py --name webdavDrive find keyword --path /
+python scripts/webdav_drive_tools.py --name webdavDrive find keyword --path /
 
 # **Handling Spaces & Special Characters (处理空格和特殊字符)**: If the filename or path contains spaces or special characters (like Chinese), you **MUST** wrap the path in double quotes (`"path"`). (如果文件名或路径中包含空格或特殊字符（如中文），您**必须**使用双引号包裹路径。)
-python scrips/webdav_drive_tools.py --name webdavDrive get "周杰伦 - Intro.flac" "./周杰伦 - Intro.flac"
+python scripts/webdav_drive_tools.py --name webdavDrive get "周杰伦 - Intro.flac" "./周杰伦 - Intro.flac"
 
 ```

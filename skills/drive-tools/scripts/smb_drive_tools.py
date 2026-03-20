@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import io
 import time
 import sys
 import os
@@ -9,6 +10,10 @@ import io
 from typing import Optional, List, Dict, Any, Union, BinaryIO
 from nmb.NetBIOS import NetBIOS
 from smb.SMBConnection import SMBConnection
+
+# Fix stdout encoding issues on some terminals (修复某些终端上的 stdout 编码问题)
+if sys.stdout.encoding != 'UTF-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
 

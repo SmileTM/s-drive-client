@@ -6,8 +6,13 @@ import json
 import argparse
 import ssl
 import socket
+import io
 from ftplib import FTP, FTP_TLS, error_perm
 from typing import Optional, List, Dict, Any, Tuple, Union, BinaryIO, Callable
+
+# Fix stdout encoding issues on some terminals (修复某些终端上的 stdout 编码问题)
+if sys.stdout.encoding != 'UTF-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
 

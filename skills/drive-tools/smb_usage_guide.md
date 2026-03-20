@@ -13,35 +13,35 @@ Drive configuration is automatically loaded from `config.json`. (云盘配置从
 
 ## Quickly Usage (快速使用)
 
-**Script (脚本):** `scrips/smb_drive_tools.py`
+**Script (脚本):** `scripts/smb_drive_tools.py`
 
 ### Global Options (通用参数)
 - `--name <config_name>`: Specify the connection name or index in `config.json` (指定 `config.json` 中的连接名称或索引).
 
 ```shell
 # List Directory (列出目录内容)
-python scrips/smb_drive_tools.py --name smbDrive ls /Documents
+python scripts/smb_drive_tools.py --name smbDrive ls /Documents
 
 # Upload File (上传本地文件: local_path -> remote_path)
-python scrips/smb_drive_tools.py --name smbDrive put ./data.zip /backups/data.zip
+python scripts/smb_drive_tools.py --name smbDrive put ./data.zip /backups/data.zip
 
 # Download File (下载远程文件: remote_path -> local_path)
-python scrips/smb_drive_tools.py --name smbDrive get /movies/demo.mp4 ./demo.mp4
+python scripts/smb_drive_tools.py --name smbDrive get /movies/demo.mp4 ./demo.mp4
 
 # Create Directory (创建远程目录)
-python scrips/smb_drive_tools.py --name smbDrive mkdir /projects/new_folder
+python scripts/smb_drive_tools.py --name smbDrive mkdir /projects/new_folder
 
 # Delete File or Directory (删除远程文件或目录)
 # Use -d for directories (参数 -d 表示目标是目录)
-python scrips/smb_drive_tools.py --name smbDrive rm /old_file.txt
-python scrips/smb_drive_tools.py --name smbDrive rm /old_folder -d
+python scripts/smb_drive_tools.py --name smbDrive rm /old_file.txt
+python scripts/smb_drive_tools.py --name smbDrive rm /old_folder -d
 
 # Rename or Move (重命名或移动: old_path -> new_path)
-python scrips/smb_drive_tools.py --name smbDrive mv /old_name.txt /new_name.txt
+python scripts/smb_drive_tools.py --name smbDrive mv /old_name.txt /new_name.txt
 
 # Search Recursively (递归搜索关键字)
-python scrips/smb_drive_tools.py --name smbDrive find keyword --path /
+python scripts/smb_drive_tools.py --name smbDrive find keyword --path /
 
 # **Handling Spaces & Special Characters (处理空格和特殊字符)**: If the filename or path contains spaces or special characters (like Chinese), you **MUST** wrap the path in double quotes (`"path"`). (如果文件名或路径中包含空格或特殊字符（如中文），您**必须**使用双引号包裹路径。)
-python scrips/smb_drive_tools.py --name smbDrive get "周杰伦 - Intro.flac" "./周杰伦 - Intro.flac"
+python scripts/smb_drive_tools.py --name smbDrive get "周杰伦 - Intro.flac" "./周杰伦 - Intro.flac"
 ```
