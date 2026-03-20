@@ -10,11 +10,6 @@ description: Drive Tools (云盘工具).
 
 This `drive-tools` skill helps you connect and manage your personal drives.
 
-## Quick Install (快速安装)
-```
-npx degit SmileTM/s-drive-client/skills/drive-tools drive-tools
-```
-
 ## Directory Structure (目录结构)
 
 ```
