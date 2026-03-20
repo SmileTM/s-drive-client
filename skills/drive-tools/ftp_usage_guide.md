@@ -3,8 +3,6 @@
 Drive configuration is automatically loaded from `config.json`. (云盘配置从 `config.json` 自动加载。)
 
 ## FTP Config Template (FTP 配置模版)
-- Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
-- The configuration template can be output as a code block for users to fill in. (可以将配置模版通过代码块的格式输出给用户，让用户进行填写。)
 
 ```json
 {
@@ -17,6 +15,8 @@ Drive configuration is automatically loaded from `config.json`. (云盘配置从
   "path": "/" // Initial remote path (初始远程路径)
 }
 ```
+- Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
+- The configuration template can be output as a code block for users to fill in; do not omit any fields in the code block. (将配置模版通过代码块的格式输出给用户，让用户进行填写，代码块格式里不要缺少字段。)
 
 
 ## Quick Start (快速开始)
