@@ -7,6 +7,14 @@ A cloud drive CLI tool supporting SMB, WebDAV, and FTP protocols, providing file
 
 
 ## Quick Install (快速安装)
+
+### clawhub
+```
+# https://clawhub.ai/SmileTM/drive-tools
+npx clawhub@latest install drive-tools
+```
+
+### github
 ```
 npx degit SmileTM/s-drive-client/skills/drive-tools drive-tools
 ```
