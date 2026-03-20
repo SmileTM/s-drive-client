@@ -7,7 +7,7 @@
             "password": "", // SMB Password (SMB 密码)
             "ip": "", // Server IP address (服务器 IP 地址)
             "share": "", // Shared folder name (共享文件夹名称)
-            "domain": "", // SMB Domain, default WORKGROUP (SMB 域名，默认为 WORKGROUP)
+            "domain": "WORKGROUP", // SMB Domain, default WORKGROUP (SMB 域名，默认为 WORKGROUP)
             "path": "/" // Initial remote path, can limit the access scope (初始远程路径，可限定访问范围)
         }
     ],
