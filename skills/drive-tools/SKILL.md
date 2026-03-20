@@ -40,6 +40,7 @@ According to the type of drive the user needs to access, load the usage guide fo
 - [webdav](webdav_usage_guide.md)
 
 ### Step 3: Guide Configuration of Drive Information (第三步：引导用户配置相关云盘信息)
+- Use code block format strictly to guide users in filling in configuration information. (严格使用代码块格式，引导用户填写配置信息。)
 - Based on the drive type, check the configuration information. If the relevant drive configuration does not exist, guide the user to configure the drive connection information and record it in `skills/drive-tools/config.json` following the specified format. Note: Do not modify existing values without user confirmation. Pay special attention to the `name` (alias) field, as it will be used to identify the drive in subsequent operations. (根据对应云盘类型，检查配置信息，如果相关云盘配置不存在需要引导用户配置云盘连接信息，并将相关配置按照相关格式追加记录到 `skills/drive-tools/config.json`。注意不要改动配置文件中原有的值，如需改变一定要提示用户进行确认。尤其要注意 `name` 别名字段，用户后续会用别名进行描述指定的云盘操作。)
 - After the user enters the configuration information, perform a connection test. If the connection test fails, prompt the user to re-confirm the configuration information. If the connection test is successful, provide some suggested questions based on the drive alias set by the user. e.g., "Help me check what is in the cloud drive {name}?" (当用户输入配置信息后，进行连接测试。如果连接测试失败，则提示用户再次确认配置信息。如果连接测试成功，则根据用户设置的云盘别名内容，提示用户可以用的相关问法。例如：“帮我查看下云盘 {name} 里有些什么？”)
 ### Step 4: Execute Commands and Return Results (第四步：执行命令并返回结果)
