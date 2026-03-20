@@ -182,7 +182,7 @@ class WebDAVClient:
             
         response = requests.request(method, url, auth=self.auth, **kwargs)
         if response.status_code == 401:
-            print(f"\nAuth failed (身份验证失败) (401): Please check if the app password for user {self.config.get('user')} is correct (请检查用户的应用密码是否正确且有效)。")
+            print(f"\nAuth failed: Please check if the user {self.config.get('user')} credentials and drive configuration are correct (身份验证失败：请检查用户 {self.config.get('user')} 的凭据及云盘配置信息是否正确且有效)。")
             sys.exit(1)
         return response
 
@@ -197,7 +197,7 @@ class WebDAVClient:
         if resp.status_code in [200, 207]:
             print(f"Connected to WebDAV server successfully (成功连接至 WebDAV 服务器) (Root/根路径: {self.base_path})。")
         else:
-            print(f"Connection failed (连接失败): Cannot access path (无法访问路径) {self.base_path} (HTTP {resp.status_code})")
+            print(f"Connection failed: Please check your drive configuration (连接失败：请检查云盘配置信息) {self.base_path} (HTTP {resp.status_code})")
             sys.exit(1)
 
     def list_dir(self, path: str = '/') -> None:

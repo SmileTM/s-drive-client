@@ -198,10 +198,10 @@ class SMBClient:
                 print(f"Connected to SMB server successfully (成功连接至 SMB 服务器)。")
                 return self.conn
             else:
-                print("Connection failed: Auth failed or share inaccessible (连接失败：身份验证未通过或共享目录无法访问)。")
+                print("Connection failed: Auth failed, share inaccessible, or please check your drive configuration (连接失败：身份验证未通过、共享目录无法访问，或请检查云盘配置信息)。")
                 sys.exit(1)
         except Exception as e:
-            print(f"Connection failed: Cannot access server (连接失败：无法访问服务器) {server_ip} (Reason/原因: {e})")
+            print(f"Connection failed: Please check your drive configuration (连接失败：请检查云盘配置信息) {server_ip} (Reason/原因: {e})")
             sys.exit(1)
 
     def close(self) -> None:

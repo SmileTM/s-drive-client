@@ -3,7 +3,8 @@
 Drive configuration is automatically loaded from `config.json`. (云盘配置从 `config.json` 自动加载。)
 
 ## SMB Config Template (SMB 配置模版)
-Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
+- Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
+- The configuration template can be output as a code block for users to fill in. (可以将配置模版通过代码块的格式输出给用户，让用户进行填写。)
 
 ```json
 {
@@ -28,10 +29,10 @@ Assist users in completing relevant configuration information according to the t
 # List Directory (列出目录内容)
 python scripts/smb_drive_tools.py --name smbDrive ls /Documents
 
-# Upload File (上传本地文件: local_path -> remote_path)
+# Upload File: local_path -> remote_path (上传本地文件: 本地路径 -> 远程路径)
 python scripts/smb_drive_tools.py --name smbDrive put ./data.zip /backups/data.zip
 
-# Download File (下载远程文件: remote_path -> local_path)
+# Download File: remote_path -> local_path (下载远程文件: 远程路径 -> 本地路径)
 python scripts/smb_drive_tools.py --name smbDrive get /movies/demo.mp4 ./demo.mp4
 
 # Create Directory (创建远程目录)
@@ -42,7 +43,7 @@ python scripts/smb_drive_tools.py --name smbDrive mkdir /projects/new_folder
 python scripts/smb_drive_tools.py --name smbDrive rm /old_file.txt
 python scripts/smb_drive_tools.py --name smbDrive rm -d /old_folder
 
-# Rename or Move (重命名或移动: old_path -> new_path)
+# Rename or Move: old_path -> new_path (重命名或移动: 旧路径 -> 新路径)
 python scripts/smb_drive_tools.py --name smbDrive mv /old_name.txt /new_name.txt
 
 # Search Recursively (递归搜索关键字)

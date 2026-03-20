@@ -7,3 +7,10 @@ build/
 .idea/
 server/.secret.key
 dist-electron/
+__pycache__/
+*.py[cod]
+*$py.class
+*.bk
+skills/drive-tools/scripts/test/
+skills/drive-tools/a.yml
+skills/drive-tools/config.yaml

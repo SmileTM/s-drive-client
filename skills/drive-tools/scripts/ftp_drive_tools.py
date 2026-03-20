@@ -205,7 +205,7 @@ class FTPClient:
                         try: self.ftp.quit()
                         except: pass
                     time.sleep(0.5)
-                else: print(f"Encrypted connection failed (加密模式连接失败): {e}")
+                else: print(f"Encrypted connection failed, please check your drive configuration (加密模式连接失败，请检查云盘配置信息) (Reason/原因: {e})")
 
         try:
             self.ftp = ReusableFTP_TLS(context=self._create_context()) if use_tls else FTP()
@@ -223,7 +223,7 @@ class FTPClient:
             print(f"Connection established successfully (成功建立连接) (Mode/模式: {'TLS' if use_tls else 'ClearText'}，Initial path/初始路径: {self.base_path})。")
             return self.ftp
         except Exception as e:
-            print(f"Connection failed: Cannot access server (连接失败：无法访问服务器) {host} (Reason/原因: {e})")
+            print(f"Connection failed: Please check your drive configuration (连接失败：请检查云盘配置信息) {host} (Reason/原因: {e})")
             sys.exit(1)
 
     def close(self) -> None:

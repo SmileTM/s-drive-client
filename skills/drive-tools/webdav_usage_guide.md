@@ -3,7 +3,8 @@
 Drive Configuration is automatically loaded from `config.json`. (云盘配置从 `config.json` 自动加载。)
 
 ## WebDAV Config Template (WebDAV 配置模版)
-Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
+- Assist users in completing relevant configuration information according to the template, and record it to `skills/drive-tools/config.json`. (协助用户按模板完成相关配置信息，并记录到 `skills/drive-tools/config.json`)
+- The configuration template can be output as a code block for users to fill in. (可以将配置模版通过代码块的格式输出给用户，让用户进行填写。)
 
 ```json
 {
@@ -27,10 +28,10 @@ Assist users in completing relevant configuration information according to the t
 # List Directory (列出目录内容)
 python scripts/webdav_drive_tools.py --name webdavDrive ls /Photos
 
-# Upload File (上传本地文件)
+# Upload File: local_path -> remote_path (上传本地文件: 本地路径 -> 远程路径)
 python scripts/webdav_drive_tools.py --name webdavDrive put ./img.jpg /Photos/img.jpg
 
-# Download File (下载远程文件)
+# Download File: remote_path -> local_path (下载远程文件: 远程路径 -> 本地路径)
 python scripts/webdav_drive_tools.py --name webdavDrive get /Photos/img.jpg ./img.jpg
 
 # Create Directory (创建远程目录)
@@ -41,7 +42,7 @@ python scripts/webdav_drive_tools.py --name webdavDrive mkdir /Documents/Work
 python scripts/webdav_drive_tools.py --name webdavDrive rm /Photos/old_file.txt
 python scripts/webdav_drive_tools.py --name webdavDrive rm /Photos/OldFolder
 
-# Rename or Move (重命名或移动)
+# Rename or Move: old_path -> new_path (重命名或移动: 旧路径 -> 新路径)
 python scripts/webdav_drive_tools.py --name webdavDrive mv /old_name.txt /new_name.txt
 
 # Search Recursively (递归搜索关键字)
