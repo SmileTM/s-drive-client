@@ -29,6 +29,9 @@ Drive configuration is automatically loaded from `config.json`. (云盘配置从
 - `--name <config_name>`: Specify the connection name or index in `config.json` (指定 `config.json` 中的连接名称或索引).
 
 ```shell
+# Test Connection (测试连接是否成功)
+python scripts/smb_drive_tools.py --name smbDrive test
+
 # List Directory (列出目录内容)
 python scripts/smb_drive_tools.py --name smbDrive ls /Documents
 

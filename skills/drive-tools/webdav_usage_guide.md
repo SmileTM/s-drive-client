@@ -28,6 +28,9 @@ Drive Configuration is automatically loaded from `config.json`. (云盘配置从
 - `--name <config_name>`: Specify the connection name or index in `config.json` (指定 `config.json` 中的连接名称或索引).
 
 ```shell
+# Test Connection (测试连接是否成功)
+python scripts/webdav_drive_tools.py --name webdavDrive test
+
 # List Directory (列出目录内容)
 python scripts/webdav_drive_tools.py --name webdavDrive ls /Photos
 

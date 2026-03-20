@@ -484,6 +484,9 @@ def main() -> None:
     parser.add_argument("--name", help="Connection name in config.json (配置文件中的连接名称)", default=None)
     
     subparsers = parser.add_subparsers(dest="command", help="Subcommands (子命令)")
+
+    # test
+    test_parser = subparsers.add_parser("test", help="Test connection (测试连接)")
  
     # ls
     ls_parser = subparsers.add_parser("ls", help="List directory (列出目录)")
@@ -542,6 +545,9 @@ def main() -> None:
             client.rename(args.old, args.new)
         elif args.command == "find":
             client.search(args.path, args.keyword)
+        elif args.command == "test":
+            # client.connect() is already called above, so if it reaches here, it's successful
+            print(f"Connection test passed (连接测试通过) [{client.config.get('name', 'default')}]。")
     finally:
         client.close()
 
